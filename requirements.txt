@@ -1,0 +1,15 @@
+# Telegram Selfbot SaaS Panel — Requirements
+# Python 3.10+
+
+# === Core ===
+telethon>=1.36.0      # Telegram client library
+
+# === Optional: Proxy support ===
+# Required if you want to use SOCKS5/SOCKS4/HTTP proxies
+python_socks>=2.0.0   # for proxy in userbot login
+
+# === Standard library only for everything else ===
+# - asyncio, sqlite3, urllib, json, hashlib, secrets
+# - All HTTP requests use urllib.request (stdlib)
+# - All database ops use sqlite3 (stdlib)
+# - All crypto uses hashlib + secrets (stdlib)

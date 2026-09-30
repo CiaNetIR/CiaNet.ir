@@ -83,22 +83,143 @@
 ```bash
 git clone https://github.com/DLSDT/CiaNet.ir.git
 cd CiaNet.ir
-pip install telethon
+pip install -r requirements.txt
 python3 main.py all
 ```
 
-### متغیرهای محیطی
-```bash
-export API_ID=...
-export API_HASH=...
-export BOT_TOKEN=...
-export OWNER_ID=...                # فقط برای نمونه اصلی
-export ADMIN_ID=...                # آیدی ادمین اصلی
+## 📦 پیش‌نیازها (Requirements)
 
-# ربات اختصاصی (Dedicated Bot)
+### ۱. نرم‌افزار
+- **Python 3.10+** (tested on 3.10, 3.11, 3.12)
+- **Linux/Unix** یا WSL (systemd اختیاری ولی توصیه‌شده)
+- **SQLite 3.35+** (با JSONB و RETURNING)
+
+### ۲. کتابخانه‌های Python
+| پکیج | ضروری؟ | کاربرد |
+|------|--------|--------|
+| `telethon>=1.36.0` | ✅ بله | کلاینت تلگرام |
+| `python_socks>=2.0.0` | اختیاری | پروکسی SOCKS5/4/HTTP برای لاگین اکانت‌ها |
+
+بقیه (asyncio, sqlite3, urllib, hashlib, secrets) جزو **کتابخانه استاندارد** پایتون هستند.
+
+### ۳. تلگرام — ۳ نوع توکن/اکانت
+| نوع | منبع | استفاده |
+|------|------|---------|
+| **API ID + API Hash** | [my.telegram.org](https://my.telegram.org/apps) | `api_id` و `api_hash` برای همه کلاینت‌ها |
+| **Admin Bot Token** | [@BotFather](https://t.me/BotFather) → `/newbot` | ربات اصلی (پنل SaaS) |
+| **Helper Bot Token** | [@BotFather](https://t.me/BotFather) → `/newbot` (دوم) | ربات راهنما (read-only) |
+| **User Account** | شماره تلفن اکانت کاربر | خود اکانت‌های سلف (لاگین با کد) |
+
+### ۴. متغیرهای محیطی (Environment Variables)
+
+#### نمونه اصلی (Main Instance)
+```bash
+# ضروری
+export API_ID=12345                      # از my.telegram.org
+export API_HASH=abc123...                # از my.telegram.org
+export ADMIN_BOT_TOKEN=123456:ABC...     # از @BotFather
+export ADMIN_ID=123456789                # آیدی عددی تلگرام شما
+
+# اختیاری
+export HELPER_BOT_TOKEN=789:XYZ...       # ربات راهنما
+export HELPER_BOT_USERNAME=HelpBot       # یوزرنیم بدون @
+export SELFBOT_DATA_DIR=/path/to/data    # پیش‌فرض: /opt/selfbot/data
+export DEBUG=1                           # لاگ verbose
+```
+
+#### ربات اختصاصی (Dedicated Bot)
+```bash
 export SELFBOT_DEDICATED_BOT=1
-export SELFBOT_DEDICATED_BOT_ID=123
-export SELFBOT_GRANTS_DB_PATH=/path/to/main/saas.db
+export SELFBOT_DEDICATED_BOT_ID=42       # ID ربات اختصاصی در DB
+export SELFBOT_GRANTS_DB_PATH=/path/to/main/saas.db   # مسیر DB مرکزی
+export SELFBOT_DATA_DIR=/path/to/dedicated/42
+```
+
+### ۵. دسترسی‌های سیستمی (System Access)
+| دسترسی | دلیل |
+|--------|------|
+| **فایل سیستم** (read/write) | ذخیره DB، session files، پروکسی، بکاپ |
+| **پوشه `sessions/` با `chmod 700`** | فایل session تلگرام (sensitive) |
+| **پورت خروجی HTTPS (443)** | دسترسی به API تلگرام + قیمت‌ها |
+| **DNS** | resolve کردن telegram.org و APIها |
+
+### ۶. APIهای خارجی (اختیاری ولی در کد استفاده شده)
+
+#### قیمت لحظه‌ای (طلا/تتر/تون/ترون)
+| API | URL | استفاده |
+|-----|-----|---------|
+| **Binance** | `api.binance.com` | قیمت USDT/TON/TRX |
+| **CoinGecko** | `api.coingecko.com` | fallback + قیمت IRR |
+| **Bybit** | `api.bybit.com` | fallback |
+| **KuCoin** | `api.kucoin.com` | fallback |
+| **OKX** | `www.okx.com` | قیمت طلا (XAU-USDT) |
+| **Nobitex** | `api.nobitex.ir` | قیمت تومان |
+| **Wallex** | `api.wallex.ir` | قیمت تومان (fallback) |
+| **Exir** | `api.exir.io` | قیمت تومان (fallback) |
+| **Bit24** | `api.bit24.cash` | قیمت تومان (fallback) |
+| **Navasan (GitHub)** | `raw.githubusercontent.com/.../gold.json` | قیمت طلا/سکه |
+
+#### تأیید پرداخت TRC20
+| API | URL | استفاده |
+|-----|-----|---------|
+| **TronGrid** | `api.trongrid.io` | تأیید تراکنش USDT روی شبکه TRON |
+
+⚠️ **اگر اینترنت به این APIها محدود باشد، قابلیت قیمت و پرداخت TRC20 کار نمی‌کند** (ولی بقیه ربات سالم می‌ماند).
+
+### ۷. ساختار پوشه‌ها (خودکار ساخته می‌شود)
+```
+$DATA_DIR/
+├── saas.db                  # دیتابیس اصلی (SQLite)
+├── config.json              # کانفیگ اکانت‌ها
+├── admin_bot_admins.json    # لیست ادمین‌ها (standalone mode)
+├── account_delete_journal.json
+├── sessions/                # فایل session هر اکانت (chmod 700)
+│   ├── helper_bot.session
+│   ├── admin_bot.session
+│   └── myaccount.session
+├── downloads/               # فایل‌های دانلودشده
+└── tracker_media/           # پیام‌های حذف/ادیت‌شده
+```
+
+### ۸. نصب استاندارد (Systemd)
+
+```bash
+# 1. کلون + نصب
+git clone https://github.com/DLSDT/CiaNet.ir.git /opt/selfbot
+cd /opt/selfbot
+pip install -r requirements.txt
+
+# 2. env file
+sudo tee /etc/selfbot.env <<EOF
+API_ID=12345
+API_HASH=abc...
+ADMIN_BOT_TOKEN=...
+ADMIN_ID=123456789
+EOF
+sudo chmod 600 /etc/selfbot.env
+
+# 3. systemd service
+sudo tee /etc/systemd/system/selfbot.service <<'EOF'
+[Unit]
+Description=Telegram Selfbot SaaS Panel
+After=network-online.target
+
+[Service]
+Type=simple
+User=selfbot
+WorkingDirectory=/opt/selfbot
+EnvironmentFile=/etc/selfbot.env
+ExecStart=/usr/bin/python3 main.py all
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 4. شروع
+sudo systemctl daemon-reload
+sudo systemctl enable --now selfbot.service
 ```
 
 ## 🔒 امنیت
