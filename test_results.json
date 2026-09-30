@@ -1,0 +1,293 @@
+{
+  "total": 57,
+  "passed": 57,
+  "failed": 0,
+  "results": [
+    {
+      "name": "سلف روشن",
+      "passed": true,
+      "details": "enabled=True"
+    },
+    {
+      "name": "سلف خاموش",
+      "passed": true,
+      "details": "همه قابلیت‌ها خاموش شد"
+    },
+    {
+      "name": "تایم روشن",
+      "passed": true,
+      "details": "time_enabled=True"
+    },
+    {
+      "name": "تایم خاموش",
+      "passed": true,
+      "details": "time_enabled=False"
+    },
+    {
+      "name": "آنلاین روشن",
+      "passed": true,
+      "details": "online_enabled=True"
+    },
+    {
+      "name": "آنلاین خاموش",
+      "passed": true,
+      "details": "online_enabled=False"
+    },
+    {
+      "name": "بیو روشن",
+      "passed": true,
+      "details": "bio_enabled=True"
+    },
+    {
+      "name": "بیو خاموش",
+      "passed": true,
+      "details": "bio_enabled=False"
+    },
+    {
+      "name": "تیک پیوی روشن",
+      "passed": true,
+      "details": "auto_read_pv=True"
+    },
+    {
+      "name": "تیک پیوی خاموش",
+      "passed": true,
+      "details": "auto_read_pv=False"
+    },
+    {
+      "name": "تیک گروه روشن",
+      "passed": true,
+      "details": "auto_read_group=True"
+    },
+    {
+      "name": "تیک گروه خاموش",
+      "passed": true,
+      "details": "auto_read_group=False"
+    },
+    {
+      "name": "تیک کانال روشن",
+      "passed": true,
+      "details": "auto_read_channel=True"
+    },
+    {
+      "name": "تیک کانال خاموش",
+      "passed": true,
+      "details": "auto_read_channel=False"
+    },
+    {
+      "name": "سکوت روشن",
+      "passed": true,
+      "details": "silence_all=True"
+    },
+    {
+      "name": "سکوت خاموش",
+      "passed": true,
+      "details": "silence_all=False"
+    },
+    {
+      "name": "سکوت پیوی روشن",
+      "passed": true,
+      "details": "silence_pv[99999]=True"
+    },
+    {
+      "name": "سکوت پیوی خاموش",
+      "passed": true,
+      "details": "silence_pv keys=[]"
+    },
+    {
+      "name": "دشمن روشن",
+      "passed": true,
+      "details": "دستور پذیرفته شد"
+    },
+    {
+      "name": "دشمن خاموش",
+      "passed": true,
+      "details": "دستور پذیرفته شد"
+    },
+    {
+      "name": "ردیاب روشن",
+      "passed": true,
+      "details": "tracker_enabled=True"
+    },
+    {
+      "name": "ردیاب خاموش",
+      "passed": true,
+      "details": "tracker_enabled=False"
+    },
+    {
+      "name": "تبچی زمان 10",
+      "passed": true,
+      "details": "tabchi_interval=10"
+    },
+    {
+      "name": "تبچی زمان 30",
+      "passed": true,
+      "details": "tabchi_interval=30"
+    },
+    {
+      "name": "تبچی زمان 4 (زیر حد)",
+      "passed": true,
+      "details": "رد شد (مقدار قبلی=5)"
+    },
+    {
+      "name": "تبچی وضعیت",
+      "passed": true,
+      "details": "گزارش ارسال شد"
+    },
+    {
+      "name": "وضعیت",
+      "passed": true,
+      "details": "گزارش وضعیت ارسال شد"
+    },
+    {
+      "name": "اسم جدید",
+      "passed": true,
+      "details": "regex match شد"
+    },
+    {
+      "name": "فونت bold",
+      "passed": true,
+      "details": "current_font=bold"
+    },
+    {
+      "name": "فونت double",
+      "passed": true,
+      "details": "current_font=double"
+    },
+    {
+      "name": "فونت sans",
+      "passed": true,
+      "details": "current_font=sans"
+    },
+    {
+      "name": "فونت sans_bold",
+      "passed": true,
+      "details": "current_font=sans_bold"
+    },
+    {
+      "name": "فونت mono",
+      "passed": true,
+      "details": "current_font=mono"
+    },
+    {
+      "name": "فونت normal",
+      "passed": true,
+      "details": "current_font=normal"
+    },
+    {
+      "name": "فونت نامعتبر",
+      "passed": true,
+      "details": "رد شد (validation کار کرد)"
+    },
+    {
+      "name": "بازی تاس",
+      "passed": true,
+      "details": "دستور به queue اضافه شد"
+    },
+    {
+      "name": "بازی دارت",
+      "passed": true,
+      "details": "دستور به queue اضافه شد"
+    },
+    {
+      "name": "بازی بسکتبال",
+      "passed": true,
+      "details": "دستور به queue اضافه شد"
+    },
+    {
+      "name": "بازی فوتبال",
+      "passed": true,
+      "details": "دستور به queue اضافه شد"
+    },
+    {
+      "name": "بازی اسلات",
+      "passed": true,
+      "details": "دستور به queue اضافه شد"
+    },
+    {
+      "name": "بازی بولینگ",
+      "passed": true,
+      "details": "دستور به queue اضافه شد"
+    },
+    {
+      "name": "طلا",
+      "passed": true,
+      "details": "دستور اجرا شد"
+    },
+    {
+      "name": "قیمت تتر",
+      "passed": true,
+      "details": "دستور اجرا شد"
+    },
+    {
+      "name": "قیمت تون",
+      "passed": true,
+      "details": "دستور اجرا شد"
+    },
+    {
+      "name": "قیمت ترون",
+      "passed": true,
+      "details": "دستور اجرا شد"
+    },
+    {
+      "name": "حذف 10",
+      "passed": true,
+      "details": "regex match شد"
+    },
+    {
+      "name": "حذف 1",
+      "passed": true,
+      "details": "regex match شد"
+    },
+    {
+      "name": "حذف 100",
+      "passed": true,
+      "details": "regex match شد (یا reject به دلیل سقف)"
+    },
+    {
+      "name": "کپی با لینک",
+      "passed": true,
+      "details": "regex match شد"
+    },
+    {
+      "name": "دستور ایدی (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "دستور بلاک (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "دستور آنبلاک (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "دستور ذخیره (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "دستور فوروارد (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "دستور مشخصات (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "دستور سنجاق (با reply)",
+      "passed": true,
+      "details": "ارسال شد"
+    },
+    {
+      "name": "پینگ",
+      "passed": true,
+      "details": "دستور اجرا شد"
+    }
+  ],
+  "timestamp": "2026-09-30T23:14:53.393148"
+}
