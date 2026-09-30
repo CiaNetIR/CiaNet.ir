@@ -71,30 +71,33 @@ def test_user_menu_callbacks():
 
 def test_show_main_menu_method():
     print("─" * 60)
-    print("🏠 تست: متد _show_main_menu")
+    print("🏠 تست: متد _show_menu_for_role")
 
     from main import SaaSBot
     has_method = hasattr(SaaSBot, "_show_menu_for_role")
     record("_show_menu_for_role وجود دارد", has_method, "")
 
-    # چک کن که منو ۶ دکمه داره نه ۱۳ تا قبلی
     with open("main.py", "r", encoding="utf-8") as f:
         content = f.read()
 
-    has_new_design = "سلف چیست" in content and "خرید با لایسنس" in content
-    record("منوی جدید نصب شده", has_new_design, "شامل دکمه‌های جدید")
+    # چک کن که ۶ ردیف دقیق نصب شده
+    has_r1 = "راهنمای فعال‌سازی" in content and "سلف چیست؟" in content
+    record("ردیف ۱: راهنما + سلف چیست", has_r1, "")
 
-    has_expiry_button = "انقضای سلف" in content
-    record("دکمه‌ی «انقضای سلف»", has_expiry_button, "")
+    has_r2 = "انقضای سلف:" in content
+    record("ردیف ۲: انقضای سلف", has_r2, "")
 
-    has_login_button = "لاگین کردن سلف" in content
-    record("دکمه‌ی «لاگین کردن سلف»", has_login_button, "")
+    has_r3_login = "لاگین کردن سلف" in content and "خرید سلف" in content
+    record("ردیف ۳: لاگین + خرید", has_r3_login, "")
 
-    has_buy_button = "خرید سلف" in content
-    record("دکمه‌ی «خرید سلف»", has_buy_button, "")
+    has_r4 = "خرید با لایسنس" in content
+    record("ردیف ۴: خرید با لایسنس", has_r4, "")
 
-    has_admin_button = "🎛 ادمین" in content or "admin_hub" in content
-    record("دکمه‌ی «ادمین»", has_admin_button, "")
+    has_r5 = "پشتیبانی" in content
+    record("ردیف ۵: پشتیبانی", has_r5, "")
+
+    has_r6 = "پنل مدیریت / ادمین" in content
+    record("ردیف ۶: پنل مدیریت", has_r6, "")
 
 
 def test_admin_conditional():
