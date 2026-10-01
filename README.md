@@ -34,67 +34,86 @@
 
 ## ⚡ Quick Start / شروع سریع
 
-> **5 minutes to a running selfbot panel.** / **۵ دقیقه تا راه‌اندازی کامل.**
+> **One command. Everything automated.** / **یک دستور. همه چیز خودکار.**
 
-### 1️⃣ Clone & Install / کلون و نصب
-
-```bash
-git clone https://github.com/DLSDT/CiaNet.ir.git /opt/selfbot
-cd /opt/selfbot
-pip install -r requirements.txt
-```
-
-### 2️⃣ Get Credentials / دریافت کلیدها
-
-| چی لازمه | کجا | راهنما |
-|---|---|---|
-| **API ID + Hash** | [my.telegram.org/apps](https://my.telegram.org/apps) | [Guide](https://core.telegram.org/api/obtaining_api_id) |
-| **Admin Bot Token** | [@BotFather](https://t.me/BotFather) → `/newbot` | Main panel bot |
-| **Admin User ID** | [@userinfobot](https://t.me/userinfobot) | Your numeric Telegram ID |
-
-### 3️⃣ Configure & Run / تنظیم و اجرا
+### 🚀 The One-Liner / دستور جادویی
 
 ```bash
-# Set environment variables
-export API_ID=12345
-export API_HASH=abc123def456
-export ADMIN_BOT_TOKEN=123456:ABC-DEF
-export ADMIN_ID=123456789
-
-# Run
-python3 main.py all
+curl -sSL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/setup.sh | sudo bash
 ```
 
-### 4️⃣ (Optional) Systemd Service / سرویس سیستمی
+یا **non-interactive** با env vars:
 
 ```bash
-sudo tee /etc/systemd/system/selfbot.service <<'EOF'
-[Unit]
-Description=CiaNet Selfbot Panel
-After=network-online.target
-
-[Service]
-Type=simple
-User=selfbot
-WorkingDirectory=/opt/selfbot
-Environment="API_ID=12345"
-Environment="API_HASH=abc123"
-Environment="ADMIN_BOT_TOKEN=123456:ABC"
-Environment="ADMIN_ID=123456789"
-ExecStart=/usr/bin/python3 main.py all
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable --now selfbot
+API_ID=12345 \
+API_HASH=abc123def456 \
+ADMIN_BOT_TOKEN=123456:ABC-DEF \
+ADMIN_ID=123456789 \
+curl -sSL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/setup.sh | sudo bash -s -- --non-interactive
 ```
+
+**بعد از ۲ دقیقه:**
+- ✅ CiaNet در `/opt/cianet` نصب شده
+- ✅ Python venv + dependencies
+- ✅ systemd service (`cianet.service`) — **هرگز خاموش نمی‌شه**
+- ✅ Watchdog (هر ۱ دقیقه چک می‌کنه)
+- ✅ Auto-updater (هر ۵ دقیقه GitHub رو چک می‌کنه)
+- ✅ اگه webhook تنظیم بشه: real-time update
 
 **Send `/start` to your bot. Done. ✨**
 **به ربات `/start` بفرستید. تمام. ✨**
+
+> 💡 قبل از اجرا، این‌ها رو آماده داشته باشید: **API ID** (my.telegram.org), **API Hash**, **Admin Bot Token** (@BotFather), **Admin ID** (@userinfobot).
+
+### 🔄 Self-Update Flow / آپدیت خودکار
+
+```
+شما روی GitHub push می‌کنید
+         ↓
+     [۱] polling (هر ۵ دقیقه) ────┐
+     [۲] webhook (real-time) ─────┤
+                                  ↓
+                  cianet_updater.check_for_update()
+                                  ↓
+            ┌─ آپدیت پیدا شد؟ ──────┐
+            ↓ YES                    ↓ NO
+    apply_update()               (ادامه)
+            ↓
+    ① graceful disable همه‌ی اکانت‌ها
+    ② backup main.py → versions/
+    ③ git pull
+    ④ systemd restart
+            ↓
+    ⑤ re-enable همه‌ی اکانت‌ها
+    ⑥ notify admin (با commit hash)
+```
+
+**نکات کلیدی:**
+- ⏸ **بدون قطعی برای کاربران**: اکانت‌ها disable می‌شن، آپدیت می‌شه، دوباره enable
+- 🔐 **بدون data loss**: backup اتوماتیک قبل از هر آپدیت
+- 🔄 **همیشه به‌روز**: اگه ۵ دقیقه polling از کار بیفته، webhook جبران می‌کنه
+- 📊 **ادغام با پنل**: `Ⅳ سیستم → 🔄 به‌روزرسانی` (با badge تعداد commit‌ها)
+
+### 📡 اختیاری: Webhook Setup (real-time) / وب‌هوک
+
+اگه می‌خواهید آپدیت real-time باشه (نه ۵ دقیقه delay):
+
+```bash
+# 1. یه URL عمومی نیاز دارید (مثلاً cloudflared tunnel)
+cloudflared tunnel --url http://localhost:9876
+
+# 2. secret URL رو در env تنظیم کنید
+export CIANET_WEBHOOK_SECRET=$(openssl rand -hex 16)
+# مثلاً: webhook URL = https://your-tunnel.trycloudflare.com/webhook/abc123...
+
+# 3. در GitHub:
+#    Settings → Webhooks → Add
+#    URL: https://your-tunnel.trycloudflare.com/webhook/abc123...
+#    Content: application/json
+#    Events: just the push event
+```
+
+حالا هر push شما بلافاصله ربات رو آپدیت می‌کنه (نه ۵ دقیقه delay).
 
 ---
 
@@ -387,6 +406,17 @@ Pull requests welcome. For major changes, open an issue first.
 
 ## 📋 Changelog / تاریخچه
 
+### v2.1 — Self-Update & One-Command Install (2026-10-01) / نصب یک‌دستوری
+
+> **یک `curl` تا ربات کامل + آپدیت خودکار.**
+
+- **setup.sh**: یک اسکریپت که `/opt/cianet` می‌سازه + venv + deps + systemd + watchdog + auto-updater
+- **cianet_updater.py**: polling (۵min) + webhook (real-time) + propagation
+- **پنل ادمین → Ⅳ سیستم → 🔄 به‌روزرسانی**: با badge تعداد commit
+- **Propagation**: بعد از آپدیت، همه‌ی اکانت‌های کاربران re-enable می‌شن
+- **Watchdog**: اگه ربات بمیره، ۱ دقیقه بعد بیدارش می‌کنه
+- **۱۱ تست E2E** (همه پاس، lock، backup، propagation، git pull failure)
+
 ### v2.0 — Panel Redesign (2026-10-01) / بازطراحی پنل
 
 > **5-section admin hub with Roman-numeral navigation + reseller flow.**
@@ -395,7 +425,7 @@ Pull requests welcome. For major changes, open an issue first.
 - Welcome block shortened from 8 lines to 2
 - New `reseller_applications` table + `_show_reseller_info` flow
 - `UI.section_header`, `UI.NUM`, `UI.microcopy()` helpers
-- 18 new tests (246 total, 100% pass)
+- 18 new tests (257 total, 100% pass)
 
 ### v1.9.3 — Backup Timeout Fix (2026-10-01) / فیکس تایم‌اوت بکاپ
 

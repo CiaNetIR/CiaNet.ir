@@ -8526,8 +8526,36 @@ class SaaSBot:
         if self.admin_panel._backup_task is None or self.admin_panel._backup_task.done():
             self.admin_panel._backup_task = asyncio.create_task(self.admin_panel._daily_backup_loop())
 
+        # Auto-update loop: هر ۵ دقیقه چک کنه. اگه آپدیتی بود، graceful
+        # disable همه‌ی اکانت‌ها → pull → restart → re-enable همه → notify.
+        try:
+            from cianet_updater import auto_update_loop, propagation_marker_present, propagate_to_accounts
+            self._update_task = asyncio.create_task(
+                auto_update_loop(
+                    interval=300,
+                    admin_notify_func=self._notify_admin_update,
+                )
+            )
+            # اگه از آپدیت قبلی restart شدیم و اکانت‌ها باید re-enable شن:
+            if propagation_marker_present():
+                async def _post_update_propagate():
+                    await asyncio.sleep(5)  # بذار همه‌چیز ready شه
+                    await propagate_to_accounts(admin_bot=self)
+                self._propagate_task = asyncio.create_task(_post_update_propagate())
+        except Exception as e:
+            print(f"⚠️ auto-update init failed (continuing): {e}")
+
         print("🤖 ربات CiaNetSelf (نقش‌محور) با موفقیت روشن شد.")
         return self.client
+
+    async def _notify_admin_update(self, text: str) -> None:
+        """notify admin وقتی آپدیت پیدا شد."""
+        try:
+            owner = OWNER_ID if isinstance(OWNER_ID, int) else (OWNER_ID[0] if OWNER_ID else None)
+            if owner and self.client:
+                await self.client.send_message(owner, text)
+        except Exception as e:
+            print(f"notify update failed: {e}")
 
     def _role(self, user_id: int) -> str:
         return get_role(user_id, OWNER_ID)
@@ -9218,9 +9246,17 @@ class SaaSBot:
             UI.go("📊 آمار تیکت‌ها", "admin_ticket_stats"),
         ]
         # Ⅳ سیستم
+        # دکمه‌ی آپدیت با badge دینامیک: 🔄 آپدیت (3) اگه ۳ commit منتظر باشن
+        try:
+            from cianet_updater import get_pending_commits
+            pending_n = len(get_pending_commits())
+            upd_label = f"🔄 به‌روزرسانی{badge(pending_n)}" if pending_n else "🔄 به‌روزرسانی"
+        except Exception:
+            upd_label = "🔄 به‌روزرسانی"
         sec4 = [
             UI.go("📢 کانال عضویت", "owner_channel_set", primary=True),
             UI.go("💼 کیف پول USDT", "admin_wallet"),
+            UI.go(upd_label, "admin_update"),
             UI.go("💾 بکاپ و بازیابی", "admin_backup"),
         ]
         # Ⅴ امنیت (فقط OWNER)
@@ -10043,6 +10079,142 @@ class SaaSBot:
             ),
             buttons=buttons,
         )
+
+    # ─────────────────────────────────────────────────────
+    #  آپدیت سیستم — Auto-Update & Propagation
+    # ─────────────────────────────────────────────────────
+
+    async def _admin_show_update_hub(self, event):
+        """هاب مرکزی آپدیت. وضعیت + commit info + دکمه‌های عملیاتی."""
+        try:
+            from cianet_updater import get_version_info
+            info = get_version_info()
+            local = (info.get("local_commit") or "unknown")[:8]
+            remote = (info.get("remote_commit") or "unknown")[:8]
+            pending = info.get("pending_commits", [])
+            last_check = info.get("last_check", 0)
+            last_update = info.get("last_update_at", 0)
+
+            if pending:
+                status = f"🔄 {len(pending)} آپدیت موجود"
+                status_color = UI.YELLOW
+                body = [
+                    f"**وضعیت:** {status_color} {status}",
+                    "",
+                    f"local:  `{local}`",
+                    f"remote: `{remote}`",
+                    "",
+                    "**Commit‌های جدید:**",
+                    "\n".join(f"  • `{c}`" for c in pending[:8]),
+                ]
+                if len(pending) > 8:
+                    body.append(f"  … و {len(pending) - 8} commit دیگر")
+            else:
+                status_color = UI.GREEN
+                body = [
+                    f"**وضعیت:** {status_color} ✅ به‌روز",
+                    "",
+                    f"local:  `{local}`",
+                    f"remote: `{remote}`",
+                ]
+
+            if last_check:
+                body.append(f"\nآخرین چک: {time_ago(last_check)}")
+            if last_update:
+                body.append(f"آخرین آپدیت: {time_ago(last_update)}")
+
+            buttons = []
+            if pending:
+                buttons.append([UI.confirm(
+                    f"⬇️ اعمال آپدیت ({len(pending)} commit)",
+                    "admin_update_apply",
+                    tone="primary",
+                )])
+            buttons.append([UI.go("🔍 چک مجدد", "admin_update_check")])
+            buttons.append([UI.go("📜 تاریخچه آپدیت‌ها", "admin_update_history")])
+            buttons.append(UI.nav_row())
+
+            await event.edit(
+                UI.screen(
+                    "🔄 به‌روزرسانی سیستم",
+                    body=body,
+                    subtitle="هر آپدیت از GitHub. polling هر ۵ دقیقه + watchdog.",
+                    hint="آپدیت اتوماتیک است؛ این پنل برای کنترل دستی است.",
+                ),
+                buttons=buttons,
+            )
+        except Exception as e:
+            await event.edit(
+                UI.screen(
+                    "🔄 به‌روزرسانی سیستم",
+                    body=[f"❌ خطا: {e}"],
+                    subtitle="",
+                ),
+                buttons=UI.nav_row(),
+            )
+
+    async def _admin_update_check(self, event):
+        """چک دستی برای آپدیت (بدون apply)."""
+        try:
+            from cianet_updater import get_pending_commits
+            pending = get_pending_commits()
+            if pending:
+                msg = f"🔄 {len(pending)} آپدیت موجود. به هاب برگرد و «اعمال آپدیت» رو بزن."
+            else:
+                msg = "✅ سیستم به‌روز است."
+            await event.answer(msg, alert=True)
+        except Exception as e:
+            await event.answer(f"❌ خطا: {e}", alert=True)
+
+    async def _admin_update_apply(self, event):
+        """apply آپدیت: disable accounts → pull → restart → re-enable."""
+        await event.answer("🔄 در حال آپدیت...", alert=False)
+        try:
+            from cianet_updater import apply_update
+            success, msg = apply_update()
+            # apply_update خودش restart می‌کنه. این کد معمولاً اجرا نمی‌شه
+            # چون systemd restart می‌کنه process رو.
+            await event.answer(msg[:200] if len(msg) > 200 else msg, alert=True)
+        except Exception as e:
+            await event.answer(f"❌ خطا: {e}", alert=True)
+
+    async def _admin_update_history(self, event):
+        """تاریخچه آپدیت‌ها (git log)."""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-20"],
+                cwd="/opt/cianet", capture_output=True, text=True, timeout=10,
+            )
+            log_text = result.stdout.strip() or "(خالی)"
+            body = ["**۲۰ commit اخیر:**", "```", log_text[:1500], "```"]
+            await event.edit(
+                UI.screen(
+                    "📜 تاریخچه",
+                    body=body,
+                    subtitle="git log",
+                ),
+                buttons=[
+                    [UI.go("🔙 برگشت", "admin_update")],
+                    UI.nav_row(),
+                ],
+            )
+        except Exception as e:
+            await event.answer(f"❌ خطا: {e}", alert=True)
+
+
+def time_ago(ts: float) -> str:
+    """نمایش فارسی فاصله‌ی زمانی. اگه < 60s: 'همین الان'."""
+    if not ts:
+        return "نامشخص"
+    diff = time.time() - ts
+    if diff < 60:
+        return "همین الان"
+    if diff < 3600:
+        return f"{int(diff // 60)} دقیقه پیش"
+    if diff < 86400:
+        return f"{int(diff // 3600)} ساعت پیش"
+    return f"{int(diff // 86400)} روز پیش"
 
     # ─────────────────────────────────────────────────────
     #  بخش OWNER/ADMIN
@@ -13414,6 +13586,18 @@ class SaaSBot:
                 if data == "admin_backup" and role == ROLE_OWNER:
                     await self._admin_show_backup_hub(event)
                     return
+                if data == "admin_update" and role == ROLE_OWNER:
+                    await self._admin_show_update_hub(event)
+                    return
+                if data == "admin_update_check" and role == ROLE_OWNER:
+                    await self._admin_update_check(event)
+                    return
+                if data == "admin_update_apply" and role == ROLE_OWNER:
+                    await self._admin_update_apply(event)
+                    return
+                if data == "admin_update_history" and role == ROLE_OWNER:
+                    await self._admin_update_history(event)
+                    return
                 if data == "owner_users" and role in (ROLE_OWNER, ROLE_ADMIN):
                     await self._owner_show_users(event)
                     return
@@ -14989,6 +15173,86 @@ def _active_runtime_tags() -> list:
         if t not in tags:
             tags.append(t)
     return tags
+
+
+# ─── Auto-update hooks (فراخوانی از cianet_updater.py) ───
+
+async def _disable_all_accounts_for_update() -> str:
+    """
+    قبل از آپدیت: همه‌ی اکانت‌ها رو graceful stop کن.
+    صدا زده می‌شه از cianet_updater.apply_update() قبل از git pull.
+    """
+    log_lines = []
+    tags = _active_runtime_tags()
+    log_lines.append(f"⏸ stopping {len(tags)} runtime(s) for update")
+    for tag in tags:
+        try:
+            ok = await ensure_stopped(tag, caller="auto_update")
+            log_lines.append(f"  {'✓' if ok else '✗'} {tag}")
+        except Exception as e:
+            log_lines.append(f"  ✗ {tag}: {e}")
+    # یک ثانیه pause برای release session files
+    await asyncio.sleep(1)
+    return "\n".join(log_lines)
+
+
+async def _reenable_all_accounts_after_update() -> str:
+    """
+    بعد از restart (و propagation_marker present): همه‌ی اکانت‌ها رو دوباره start کن.
+    صدا زده می‌شه از cianet_updater.propagate_to_accounts() بعد از restart.
+    """
+    log_lines = []
+    cfg = load_config()
+    if not cfg:
+        return "⚠️ config.json خالی، اکانتی برای re-enable نیست"
+    log_lines.append(f"▶️ re-enabling {len(cfg)} account(s) after update")
+    for tag, c in cfg.items():
+        if c.get("disabled"):
+            log_lines.append(f"  ⏭ {tag} (disabled in config)")
+            continue
+        try:
+            ready, st = await ensure_started(tag, c, caller="auto_update_propagation")
+            log_lines.append(f"  {'✓' if ready else '✗'} {tag}: {st}")
+        except Exception as e:
+            log_lines.append(f"  ✗ {tag}: {e}")
+        # فاصله بین start ها (مثل main loop)
+        await asyncio.sleep(2)
+    return "\n".join(log_lines)
+
+
+async def _send_admin_notification(text: str) -> None:
+    """به owner پیام بده بعد از آپدیت."""
+    try:
+        from telethon import TelegramClient
+        # پیدا کردن client فعال (هر bot client ای)
+        for entry in ACCOUNTS.values():
+            if entry and entry.bot and getattr(entry.bot, "client", None):
+                owner = OWNER_ID if isinstance(OWNER_ID, int) else (OWNER_ID[0] if OWNER_ID else None)
+                if owner:
+                    await entry.bot.client.send_message(owner, text)
+                    return
+    except Exception as e:
+        print(f"send_admin_notification failed: {e}")
+
+
+def _update_status_text() -> str:
+    """برای نمایش در پنل ادمین."""
+    try:
+        from cianet_updater import get_version_info
+        info = get_version_info()
+        local = (info.get("local_commit") or "unknown")[:8]
+        remote = (info.get("remote_commit") or "unknown")[:8]
+        pending = info.get("pending_commits", [])
+        if pending:
+            return (
+                f"🔄 آپدیت موجود است!\n"
+                f"  local:  {local}\n"
+                f"  remote: {remote}\n"
+                f"  commits: {len(pending)}\n"
+            )
+        return f"✅ به‌روز ({local})"
+    except Exception as e:
+        return f"⚠️ {e}"
 
 
 async def wait_ready(tag: str, timeout: float = ACCOUNT_START_POLL_TIMEOUT) -> tuple:
