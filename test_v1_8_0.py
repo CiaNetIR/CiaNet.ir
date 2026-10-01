@@ -23,24 +23,23 @@ def record(name, passed, details=""):
 
 
 def test_welcome_text():
-    """متن /start مطابق درخواست کاربر باشد."""
+    """متن /start کوتاه و حرفه‌ای (v2.0).
+
+    قبلاً: یه بلوک ۸-خطی شعاری بود.
+    حالا: یه جمله‌ی گرم + نام کاربر + وضعیت.
+    """
     print("─" * 60)
-    print("👋 تست: متن خوش‌آمدگویی")
+    print("👋 تست: متن خوش‌آمدگویی v2.0")
     from main import SaaSBot
 
-    # Read the source code to check the welcome block
     with open("main.py", "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Check exact strings from user request
+    # v2.0: متن کوتاه و حرفه‌ای
     checks = [
-        ("سلام کاربر", "سلام"),
-        ("سلف‌ساز 𝗖𝗶𝗮𝗡𝗲𝘁", "نام ربات"),
-        ("بهترین باش، در کنار ما", "شعار"),
-        ("بی‌همتا در سرعت", "ویژگی ۱"),
-        ("بی‌همتا در امکانات", "ویژگی ۲"),
-        ("بدون آفلاینی", "ویژگی ۳"),
-        ("بدون هیچ‌گونه تبلیغات", "ویژگی ۴"),
+        ("سلام {first}", "سلام شخصی‌سازی‌شده"),
+        ("به سلف‌ساز CiaNet خوش آمدی", "خوش‌آمد مدرن"),
+        ("سلف فعال", "خلاصه‌ی وضعیت سلف"),
     ]
     for s, desc in checks:
         record(f"شامل «{s}»", s in content, desc)
