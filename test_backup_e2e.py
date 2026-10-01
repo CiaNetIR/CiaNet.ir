@@ -123,7 +123,7 @@ async def test_send_backup_through_dispatcher():
                 self.handlers[str(event_type)] = f
                 return f
             return decorator
-        async def send_file(self, chat, path, caption=""):
+        async def send_file(self, chat, path, caption="", **kwargs):
             self.sent_files.append({"path": path, "caption": caption})
             return mock.MagicMock()
         async def send_message(self, chat, msg, **kwargs):
@@ -255,6 +255,61 @@ def test_restore_validates_zip():
     os.remove(bad_zip)
 
 
+async def test_backup_race_condition():
+    """تست: اگه کاربر چندبار بکاپ بزنه، فقط یکی اجرا بشه."""
+    print("─" * 60)
+    print("🔒 تست: race condition روی backup")
+    os.environ['ADMIN_ID'] = '12345678'
+    from main import init_db, _conn, upsert_user, SaaSBot
+
+    init_db()
+    test_owner = 12345678
+    with _conn() as c:
+        c.execute("DELETE FROM users WHERE user_id = ?", (test_owner,))
+    upsert_user(test_owner, "owner", "مالک")
+
+    class FakeClient:
+        def __init__(self):
+            self.sent_files = []
+            self.sent_messages = []
+        async def send_file(self, chat, path, caption="", **kwargs):
+            await asyncio.sleep(0.2)
+            self.sent_files.append({"path": path})
+            return mock.MagicMock()
+        async def send_message(self, chat, msg, **kwargs):
+            self.sent_messages.append({"msg": msg})
+
+    client = FakeClient()
+    bot = SaaSBot(client)
+    bot.client = client
+
+    class MockEvent:
+        def __init__(self, sender_id):
+            self.sender_id = sender_id
+            self.chat_id = sender_id
+            self.raw_text = ""
+            self.data = b"owner_backup"
+            self.message = mock.MagicMock()
+            self.query = "mock"
+            self.sender = type('S', (), {'id': sender_id, 'first_name': 'مالک'})()
+        async def answer(self, text=None, alert=False):
+            pass
+        async def edit(self, text, buttons=None):
+            pass
+        async def respond(self, text, buttons=None):
+            pass
+        async def delete(self):
+            pass
+
+    await asyncio.gather(
+        bot._owner_show_backup(MockEvent(test_owner)),
+        bot._owner_show_backup(MockEvent(test_owner)),
+        bot._owner_show_backup(MockEvent(test_owner)),
+    )
+    record("فقط یک بکاپ ارسال شد (race condition)", len(client.sent_files) == 1,
+           f"files={len(client.sent_files)}")
+
+
 async def main():
     print("=" * 60)
     print("🧪 تست جامع سیستم بکاپ و ری‌استور")
@@ -267,6 +322,7 @@ async def main():
         test_event_respond_in_callback()
         test_backup_includes_all_files()
         test_restore_validates_zip()
+        await test_backup_race_condition()
     except Exception as e:
         print(f"\n❌ خطای بحرانی: {e}")
         import traceback
