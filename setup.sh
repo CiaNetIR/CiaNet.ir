@@ -261,8 +261,18 @@ if [ -n "$LEGACY_DIR" ] && [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$INSTALL_
     # Migrate sessions/ (the critical part)
     if [ -d "$LEGACY_DIR/sessions" ]; then
         mkdir -p "$INSTALL_DIR/sessions"
-        # -n: don't overwrite, -p: preserve permissions
-        cp -rpn "$LEGACY_DIR/sessions/"* "$INSTALL_DIR/sessions/" 2>/dev/null || true
+        # rsync خیلی مطمئن‌تر از cp هست وقتی فایل‌ها حساس هستن
+        # (cp -rpn می‌تونه در بعضی edge cases فایل رو خراب کنه اگه
+        # در حین کپی، main.py هنوز در حال استفاده از session باشه).
+        # --update: overwrite نکن فایل‌هایی که newer هستن در dest
+        # --no-times: timestamp حفظ نکن (Telethon حساس به mtime)
+        # --checksum: فقط بر اساس content مقایسه کنه
+        if command -v rsync >/dev/null 2>&1; then
+            rsync -au --no-times --checksum "$LEGACY_DIR/sessions/" "$INSTALL_DIR/sessions/" 2>/dev/null || true
+        else
+            # fallback: cp ساده (بدون -p که ممکنه timestamp خراب کنه)
+            cp -un "$LEGACY_DIR/sessions/"* "$INSTALL_DIR/sessions/" 2>/dev/null || true
+        fi
         chown -R root:root "$INSTALL_DIR/sessions" 2>/dev/null || true
         chmod 700 "$INSTALL_DIR/sessions" 2>/dev/null || true
         SESSION_COUNT=$(ls -1 "$INSTALL_DIR/sessions"/*.session 2>/dev/null | wc -l)
