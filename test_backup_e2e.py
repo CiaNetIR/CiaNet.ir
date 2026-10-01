@@ -310,6 +310,101 @@ async def test_backup_race_condition():
            f"files={len(client.sent_files)}")
 
 
+async def test_backup_locked_session():
+    """تست: اگه session قفل باشه، بکاپ باید timeout بشه نه hang."""
+    import os
+    import time
+    print("─" * 60)
+    print("🔒 تست: backup روی session قفل")
+    os.environ['ADMIN_ID'] = '12345678'
+    from main import init_db, _conn, upsert_user, SaaSBot
+    import sqlite3
+
+    init_db()
+    test_owner = 12345678
+    with _conn() as c:
+        c.execute("DELETE FROM users WHERE user_id = ?", (test_owner,))
+    upsert_user(test_owner, "owner", "مالک")
+
+    # ساختن session فایل SQLite واقعی
+    sessions_dir = "sessions"
+    os.makedirs(sessions_dir, exist_ok=True)
+    locked_session = os.path.join(sessions_dir, "locked_test.session")
+    con = sqlite3.connect(locked_session)
+    con.execute("CREATE TABLE x (id INTEGER)")
+    con.execute("INSERT INTO x VALUES (1)")
+    con.commit()
+    con.close()
+
+    # قفل کردن session
+    hold = sqlite3.connect(locked_session, timeout=0)
+    hold.execute("BEGIN EXCLUSIVE")
+
+    class FakeClient:
+        def __init__(self):
+            self.sent_files = []
+            self.sent_messages = []
+        async def send_file(self, chat, path, caption="", **kwargs):
+            self.sent_files.append({"path": path})
+            return mock.MagicMock()
+        async def send_message(self, chat, msg, **kwargs):
+            self.sent_messages.append({"msg": msg})
+
+    client = FakeClient()
+    bot = SaaSBot(client)
+    bot.client = client
+
+    class MockEvent:
+        def __init__(self, sender_id):
+            self.sender_id = sender_id
+            self.chat_id = sender_id
+            self.raw_text = ""
+            self.data = b"owner_backup"
+            self.message = mock.MagicMock()
+            self.query = "mock"
+            self.sender = type('S', (), {'id': sender_id, 'first_name': 'مالک'})()
+        async def answer(self, text=None, alert=False):
+            pass
+        async def edit(self, text, buttons=None):
+            pass
+        async def respond(self, text, buttons=None):
+            pass
+        async def delete(self):
+            pass
+
+    t0 = time.time()
+    event = MockEvent(test_owner)
+    try:
+        await bot._owner_show_backup(event)
+    except Exception as e:
+        print(f"  exception: {e}")
+    elapsed = time.time() - t0
+    print(f"  elapsed: {elapsed:.1f}s (باید < 70 باشه)")
+
+    # آزاد کردن lock
+    hold.rollback()
+    hold.close()
+
+    record("Backup timeout < 70s (نه hang)", elapsed < 70, f"elapsed={elapsed:.1f}s")
+    record("فایل ارسال نشد (قفل بود)", len(client.sent_files) == 0,
+           f"files={len(client.sent_files)}")
+    record("پیام خطا به کاربر رفت", len(client.sent_messages) >= 1,
+           f"msgs={len(client.sent_messages)}")
+    if client.sent_messages:
+        msg = client.sent_messages[0]['msg']
+        record("پیام خطا شامل 'قفل' یا 'سشن'",
+               "قفل" in msg or "سشن" in msg or "ناموفق" in msg,
+               f"msg={msg[:80]}")
+    # پاک کردن
+    if os.path.exists(locked_session):
+        os.remove(locked_session)
+    # پاک کردن فایل‌های tmp که ممکنه ایجاد شده باشن
+    for f in os.listdir(sessions_dir):
+        if 'bksnap' in f or '.tmp' in f:
+            try: os.remove(os.path.join(sessions_dir, f))
+            except: pass
+
+
 async def main():
     print("=" * 60)
     print("🧪 تست جامع سیستم بکاپ و ری‌استور")
@@ -323,6 +418,7 @@ async def main():
         test_backup_includes_all_files()
         test_restore_validates_zip()
         await test_backup_race_condition()
+        await test_backup_locked_session()
     except Exception as e:
         print(f"\n❌ خطای بحرانی: {e}")
         import traceback
