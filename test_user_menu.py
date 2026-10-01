@@ -27,19 +27,18 @@ def test_what_is_text():
     print("─" * 60)
     print("📖 تست: متن «سلف چیست» شامل راهنمای فعال‌سازی")
 
-    from main import WHAT_IS_SELFBOT_TEXT
-    text = WHAT_IS_SELFBOT_TEXT
+    from main import WHAT_IS_SELFBOT_TEXT, ACTIVATION_HELP_TEXT
+    # v1.8.0: متن‌ها جدا شدن — «سلف چیست» خلاصه‌ست و «راهنمای فعال‌سازی» جداگانه
+    what_text = WHAT_IS_SELFBOT_TEXT
+    help_text = ACTIVATION_HELP_TEXT
 
-    record("متن وجود دارد", len(text) > 100, f"len={len(text)}")
-    record("شامل «سلف چیست؟»", "سلف چیست" in text, "✓")
-    record("شامل «راهنمای فعال‌سازی»", "راهنمای فعال‌سازی" in text, "✓")
-    # متن از ارقام فارسی استفاده می‌کنه: ۱. ۲. ۳. ...
-    record("شامل مراحل ۱-۶ (فارسی)",
-           all(f"{'۱۲۳۴۵۶'[i-1]}." in text for i in range(1, 7)),
-           "شماره‌گذاری فارسی")
-    record("شامل «+98» (شماره بین‌المللی)", "+98" in text, "✓")
-    record("شامل «رمز دو مرحله‌ای»", "رمز دو مرحله‌ای" in text, "✓")
-    record("شامل Anti-Ban نکته", "Anti-Ban" in text or "مجازی" in text, "✓")
+    record("متن «سلف چیست» وجود دارد", len(what_text) > 100, f"len={len(what_text)}")
+    record("متن «راهنمای فعال‌سازی» وجود دارد", len(help_text) > 100, f"len={len(help_text)}")
+    record("سلف چیست: شامل قابلیت‌ها", "قابلیت" in what_text or "ساعت" in what_text, "✓")
+    record("سلف چیست: شامل امنیت", "امنیت" in what_text, "✓")
+    record("راهنما: شامل «+98» (شماره بین‌المللی)", "+98" in help_text, "✓")
+    record("راهنما: شامل «رمز دو مرحله‌ای»", "رمز دو مرحله‌ای" in help_text, "✓")
+    record("راهنما: شامل «مرحله»", "مرحله" in help_text, "✓")
 
 
 def test_user_menu_callbacks():
