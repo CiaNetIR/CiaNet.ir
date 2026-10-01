@@ -165,13 +165,22 @@ echo -e "${BLUE}[4/7]${NC} Configuring environment..."
 
 # Auto-migrate from /etc/selfbot.env (v2.2 NEW)
 if [ -f /etc/selfbot.env ] && [ ! -f "$ENV_FILE" ]; then
-    cp /etc/selfbot.env "$ENV_FILE"
+    # Sanitize قبل از کپی: nano/editor فاصله‌ی انتهای خط اضافه می‌کنه
+    # که systemd اون رو به‌عنوان بخشی از مقدار env می‌خونه و token/hash
+    # رو خراب می‌کنه (ریشه‌ی bug: 'ADMIN_BOT_TOKEN تنظیم نشده').
+    sed 's/[[:space:]]*$//' /etc/selfbot.env > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    echo -e "  ${GREEN}OK${NC} Migrated env from /etc/selfbot.env"
+    echo -e "  ${GREEN}OK${NC} Migrated env from /etc/selfbot.env (sanitized)"
 fi
 
 if [ -f "$ENV_FILE" ]; then
     echo -e "  ${YELLOW}Existing env: $ENV_FILE${NC}"
+    # Sanitize: حذف فاصله‌های انتهای خط (از nano/editor خراب می‌شه)
+    # این کار لازمه چون systemd فاصله‌ی انتهای خط رو به‌عنوان بخشی
+    # از مقدار env می‌خونه و token/hash رو خراب می‌کنه.
+    if [ -w "$ENV_FILE" ]; then
+        sed -i 's/[[:space:]]*$//' "$ENV_FILE"
+    fi
     if [ "$NON_INTERACTIVE" = false ]; then
         read -p "      Keep existing values? [Y/n] " use_existing
         if [[ ! "$use_existing" =~ ^[Yy]$|^$ ]]; then
@@ -402,4 +411,18 @@ if [ "$SERVICE_STATUS" != "active" ]; then
     echo ""
     echo -e "${YELLOW}Service is not active. Check logs:${NC}"
     echo "  sudo journalctl -u $SERVICE_NAME -n 30 --no-pager"
+fi
+
+# Validate env vars are actually loaded by systemd
+echo ""
+echo -e "${BLUE}Validating env vars...${NC}"
+sleep 1
+LOADED_ENV=$(systemctl show $SERVICE_NAME -p Environment 2>/dev/null | sed 's/^Environment=//' | tr ' ' '\n' | grep -E "^API_|^ADMIN_" || true)
+if [ -z "$LOADED_ENV" ]; then
+    echo -e "${RED}WARN: systemd Environment is empty!${NC}"
+    echo "  Most common cause: trailing whitespace in $ENV_FILE"
+    echo "  Fix: sed -i 's/[[:space:]]*\$//' $ENV_FILE && systemctl restart $SERVICE_NAME"
+else
+    echo -e "${GREEN}OK${NC} env vars loaded:"
+    echo "$LOADED_ENV" | sed 's/=.*/=***/' | head -4
 fi
