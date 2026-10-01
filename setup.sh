@@ -1,30 +1,25 @@
 #!/bin/bash
 # ══════════════════════════════════════════════════════════════
-#  CiaNet.ir Selfbot — One-shot Installer
-#  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  یک دستور. همه چیز خودکار.
-#  نصب + کانفیگ + systemd + watchdog + auto-update
-#  سلف هرگز خاموش نمی‌شه.
-#
-#  Usage:
-#    curl -sSL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/setup.sh | sudo bash
-#
-#  یا با env vars (non-interactive):
-#    API_ID=12345 API_HASH=abc ADMIN_BOT_TOKEN=... ADMIN_ID=123 \
-#      curl -sSL ... | sudo bash -s -- --non-interactive
+#  CiaNet.ir Selfbot — One-shot Installer v2.2
+# ══════════════════════════════════════════════════════════════
+# v2.2 fixes:
+#   - Smart migration: legacy install path auto-detect
+#   - Auto-backup sessions/DB before overwriting
+#   - Env vars migrated from /etc/selfbot.env
+#   - Service uses correct paths
+#   - systemd warnings removed
 # ══════════════════════════════════════════════════════════════
 
 set -e
 
-# ─── Constants ───
 REPO_URL="https://github.com/DLSDT/CiaNet.ir.git"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 INSTALL_DIR="/opt/cianet"
 SERVICE_NAME="cianet"
 ENV_FILE="/etc/cianet.env"
 WATCHDOG_DIR="/opt/cianet-watchdog"
+BACKUP_ROOT="/opt/cianet-migration-backup"
 
-# رنگ‌ها
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -33,136 +28,179 @@ PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# ─── Banner ───
-echo -e "${PURPLE}"
-cat << 'EOF'
+cat <<'BANNER'
    ╔════════════════════════════════════════════════════╗
-   ║                                                    ║
-   ║      ▄████▄  ██▓ ▄▄▄      ███▄    █ ▓█████ ▄▄▄    ║
-   ║     ▒██▀ ▀█  ▓██▒▒████▄    ██ ▀█   █ ▓█   ▀ ▒████▄  ║
-   ║     ▒▓█    ▄ ▒██▒▒██  ▀█▄  ▓██  ▀█ ██▒▒███   ▒██  ▀█▄║
-   ║     ▒▓▓▄ ▄██▒░██░░██▄▄▄▄██ ▓██▒  ▐▌██▒▒▓█  ▄ ░██▄▄▄▄██║
-   ║     ▒ ▓███▀ ░██░ ▓█   ▓██▒▒██░   ▓██░░▒████▒ ▓█   ▓██║
-   ║                                                    ║
-   ║       One-shot Installer · نصب یک‌دستوری            ║
+   ║      One-shot Installer v2.2 · نصب یک‌دستوری       ║
    ╚════════════════════════════════════════════════════╝
-EOF
-echo -e "${NC}"
+BANNER
 
-# ─── Pre-flight checks ───
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}❌ لطفاً با sudo اجرا کن:${NC}"
-    echo "   curl -sSL ... | sudo bash"
+    echo -e "${RED}Run with sudo: sudo bash setup.sh${NC}"
     exit 1
 fi
 
-# OS detection
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS=$ID
 else
-    echo -e "${RED}❌ OS شناسایی نشد.${NC}"
-    exit 1
+    OS=ubuntu
 fi
 case "$OS" in
     ubuntu|debian) PKG_MGR="apt" ;;
     centos|rhel|fedora|rocky|almalinux) PKG_MGR="yum" ;;
     arch) PKG_MGR="pacman" ;;
-    *) PKG_MGR="apt" ;;  # fallback
+    *) PKG_MGR="apt" ;;
 esac
-echo -e "${CYAN}ℹ️  OS: $OS · Package Manager: $PKG_MGR${NC}"
 
-# ─── Args ───
 NON_INTERACTIVE=false
+SKIP_MIGRATION=false
 for arg in "$@"; do
     case $arg in
         --non-interactive|-y) NON_INTERACTIVE=true ;;
+        --skip-migration) SKIP_MIGRATION=true ;;
+        --help|-h) echo "Usage: sudo bash setup.sh [--non-interactive] [--skip-migration]"; exit 0 ;;
     esac
 done
 
-# ─── Step 1: Install system deps ───
-echo -e "${BLUE}[1/6]${NC} 📦 نصب پیش‌نیازهای سیستمی..."
+# ═══════════════════════════════════════════════════════════
+#  STEP 0: Detect legacy install
+# ═══════════════════════════════════════════════════════════
+LEGACY_DIR=""
+
+if [ "$SKIP_MIGRATION" = false ]; then
+    echo -e "${BLUE}[0/7]${NC} Detecting legacy install..."
+
+    # 1) From systemd service file
+    if [ -f /etc/systemd/system/selfbot.service ]; then
+        WD=$(grep -E "^WorkingDirectory" /etc/systemd/system/selfbot.service | sed 's/.*=//' | tr -d ' ' || true)
+        if [ -n "$WD" ] && [ -d "$WD" ]; then
+            LEGACY_DIR="$WD"
+        fi
+    fi
+
+    # 2) Common paths
+    if [ -z "$LEGACY_DIR" ]; then
+        for candidate in /opt/selfbot /opt/cianet /www/self /www/self/self /root/selfbot /home/self/self /root/CiaNet.ir; do
+            if [ -f "$candidate/main.py" ] || [ -f "$candidate/config.json" ] || [ -d "$candidate/sessions" ]; then
+                LEGACY_DIR="$candidate"
+                break
+            fi
+        done
+    fi
+
+    # 3) Fallback: search
+    if [ -z "$LEGACY_DIR" ]; then
+        LEGACY_DIR=$(find /opt /www /root /home -maxdepth 4 -name "main.py" -path "*selfbot*" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+    fi
+
+    if [ -n "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$INSTALL_DIR" ] && [ -d "$LEGACY_DIR" ]; then
+        echo -e "  ${CYAN}Found legacy install: ${NC}$LEGACY_DIR"
+    else
+        echo -e "  ${CYAN}No legacy install found (fresh install)${NC}"
+        LEGACY_DIR=""
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════
+#  STEP 1: System deps
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[1/7]${NC} Installing system deps..."
 case $PKG_MGR in
     apt)
-        apt update -qq
-        apt install -y -qq python3 python3-pip python3-venv git curl wget systemd
+        apt update -qq 2>/dev/null || true
+        DEBIAN_FRONTEND=noninteractive apt install -y -qq python3 python3-pip python3-venv git curl wget 2>&1 | tail -2
         ;;
     yum)
-        yum install -y python3 python3-pip git curl wget systemd
+        yum install -y python3 python3-pip git curl wget 2>&1 | tail -2
         ;;
     pacman)
-        pacman -Sy --noconfirm python python-pip git curl wget systemd
+        pacman -Sy --noconfirm python python-pip git curl wget 2>&1 | tail -2
         ;;
 esac
-echo -e "  ${GREEN}✓${NC} python3 $(python3 --version) · git $(git --version | cut -d' ' -f3)"
+echo -e "  ${GREEN}OK${NC} python3 $(python3 --version 2>&1 | cut -d' ' -f2)"
 
-# ─── Step 2: Clone / Update repo ───
-echo -e "${BLUE}[2/6]${NC} 📂 کلون کردن مخزن..."
+# ═══════════════════════════════════════════════════════════
+#  STEP 2: Clone / Update repo
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[2/7]${NC} Cloning/updating repo..."
 if [ -d "$INSTALL_DIR/.git" ]; then
-    echo -e "  ${YELLOW}ℹ️${NC}  پوشه موجوده، فقط آپدیت می‌کنم..."
+    echo -e "  ${YELLOW}Already exists, pulling latest...${NC}"
     cd "$INSTALL_DIR"
-    git fetch origin
-    git reset --hard origin/$REPO_BRANCH
-    echo -e "  ${GREEN}✓${NC} آپدیت شد"
+    git fetch origin 2>&1 | tail -1
+    git reset --hard origin/$REPO_BRANCH 2>&1 | tail -1
+    echo -e "  ${GREEN}OK${NC} Updated"
 else
     if [ -d "$INSTALL_DIR" ]; then
-        echo -e "  ${YELLOW}⚠️${NC}  $INSTALL_DIR موجوده ولی git نیست. بکاپ و کلون مجدد..."
-        mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
+        echo -e "  ${YELLOW}Warning: $INSTALL_DIR exists but no .git. Backing up...${NC}"
+        mkdir -p "$BACKUP_ROOT/manual-$(date +%s)"
+        cp -a "$INSTALL_DIR" "$BACKUP_ROOT/manual-$(date +%s)/" 2>/dev/null || true
+        rm -rf "$INSTALL_DIR"
     fi
-    git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
-    echo -e "  ${GREEN}✓${NC} کلون شد"
+    git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR" 2>&1 | tail -2
+    echo -e "  ${GREEN}OK${NC} Cloned"
 fi
 
 cd "$INSTALL_DIR"
 
-# ─── Step 3: Python venv + deps ───
-echo -e "${BLUE}[3/6]${NC} 🐍 ساخت محیط مجازی Python..."
+# ═══════════════════════════════════════════════════════════
+#  STEP 3: Python venv + deps
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[3/7]${NC} Setting up Python venv..."
 if [ ! -d "venv" ]; then
-    python3 -m venv venv
+    python3 -m venv venv 2>&1 | tail -1
 fi
 source venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
-echo -e "  ${GREEN}✓${NC} venv ساخته و deps نصب شد"
+pip install --quiet --upgrade pip 2>&1 | tail -1
+pip install --quiet -r requirements.txt 2>&1 | tail -3 || {
+    echo -e "${RED}pip install failed${NC}"
+    echo "Try manually: cd $INSTALL_DIR && source venv/bin/activate && pip install -r requirements.txt"
+    exit 1
+}
+echo -e "  ${GREEN}OK${NC} venv ready"
 
-# ─── Step 4: Environment configuration ───
-echo -e "${BLUE}[4/6]${NC} 🔧 تنظیم env vars..."
+# ═══════════════════════════════════════════════════════════
+#  STEP 4: Env vars
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[4/7]${NC} Configuring environment..."
+
+# Auto-migrate from /etc/selfbot.env (v2.2 NEW)
+if [ -f /etc/selfbot.env ] && [ ! -f "$ENV_FILE" ]; then
+    cp /etc/selfbot.env "$ENV_FILE"
+    chmod 600 "$ENV_FILE"
+    echo -e "  ${GREEN}OK${NC} Migrated env from /etc/selfbot.env"
+fi
 
 if [ -f "$ENV_FILE" ]; then
-    echo -e "  ${YELLOW}ℹ️${NC}  env file موجوده: $ENV_FILE"
+    echo -e "  ${YELLOW}Existing env: $ENV_FILE${NC}"
     if [ "$NON_INTERACTIVE" = false ]; then
-        read -p "      استفاده از مقادیر فعلی؟ [Y/n] " use_existing
-        if [[ "$use_existing" =~ ^[Yy]$|^$ ]]; then
-            source "$ENV_FILE"
-        else
+        read -p "      Keep existing values? [Y/n] " use_existing
+        if [[ ! "$use_existing" =~ ^[Yy]$|^$ ]]; then
             rm -f "$ENV_FILE"
         fi
     fi
 fi
 
-# اگه env vars به صورت env داده شدن، استفاده کن
 API_ID="${API_ID:-}"
 API_HASH="${API_HASH:-}"
 ADMIN_BOT_TOKEN="${ADMIN_BOT_TOKEN:-}"
 ADMIN_ID="${ADMIN_ID:-}"
 HELPER_BOT_TOKEN="${HELPER_BOT_TOKEN:-}"
-UPDATE_WEBHOOK_URL="${UPDATE_WEBHOOK_URL:-}"
 
 if [ ! -f "$ENV_FILE" ]; then
     if [ -z "$API_ID" ] && [ "$NON_INTERACTIVE" = false ]; then
         echo ""
-        echo -e "${YELLOW}📝 لطفاً اطلاعات زیر رو وارد کن (از ${BLUE}my.telegram.org${YELLOW} و ${BLUE}@BotFather${YELLOW}):${NC}"
+        echo "Enter your credentials (my.telegram.org + @BotFather):"
         echo ""
         read -p "  API_ID: " API_ID
         read -p "  API_HASH: " API_HASH
-        read -p "  ADMIN_BOT_TOKEN (از @BotFather): " ADMIN_BOT_TOKEN
-        read -p "  ADMIN_ID (آیدی عددی خودت، از @userinfobot): " ADMIN_ID
-        read -p "  HELPER_BOT_TOKEN (اختیاری، Enter برای رد): " HELPER_BOT_TOKEN
+        read -p "  ADMIN_BOT_TOKEN: " ADMIN_BOT_TOKEN
+        read -p "  ADMIN_ID: " ADMIN_ID
+        read -p "  HELPER_BOT_TOKEN (optional): " HELPER_BOT_TOKEN
     fi
 
     if [ -z "$API_ID" ] || [ -z "$API_HASH" ] || [ -z "$ADMIN_BOT_TOKEN" ] || [ -z "$ADMIN_ID" ]; then
-        echo -e "${RED}❌ API_ID, API_HASH, ADMIN_BOT_TOKEN و ADMIN_ID ضروری هستند.${NC}"
-        echo "   یا env vars بفرست، یا interactive اجرا کن."
+        echo -e "${RED}API_ID, API_HASH, ADMIN_BOT_TOKEN, ADMIN_ID required${NC}"
+        echo "Either set env vars or run interactively."
         exit 1
     fi
 
@@ -178,18 +216,82 @@ EOF
         echo "HELPER_BOT_TOKEN=$HELPER_BOT_TOKEN" >> "$ENV_FILE"
     fi
     chmod 600 "$ENV_FILE"
-    echo -e "  ${GREEN}✓${NC} env file ساخته شد (chmod 600)"
+    echo -e "  ${GREEN}OK${NC} env file created"
 fi
 
-# ─── Step 5: Systemd service (main) ───
-echo -e "${BLUE}[5/6]${NC} ⚙️  ساخت systemd service..."
+# ═══════════════════════════════════════════════════════════
+#  STEP 5: Migrate data/sessions/config (v2.2 NEW)
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[5/7]${NC} Migrating data and sessions..."
 
-# چک کن اگه selfbot.service هست (migration)
-if [ -f /etc/systemd/system/selfbot.service ] && [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
-    echo -e "  ${YELLOW}ℹ️${NC}  selfbot.service قدیمی پیدا شد، مهاجرت به $SERVICE_NAME..."
+if [ -n "$LEGACY_DIR" ] && [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$INSTALL_DIR" ]; then
+    # Stop old service
+    if systemctl list-unit-files 2>/dev/null | grep -q "^selfbot.service"; then
+        echo -e "  ${YELLOW}Stopping selfbot.service...${NC}"
+        systemctl stop selfbot 2>/dev/null || true
+        systemctl disable selfbot 2>/dev/null || true
+    fi
+
+    # Backup
+    BACKUP_PATH="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$BACKUP_PATH"
+    [ -d "$LEGACY_DIR/data" ] && cp -a "$LEGACY_DIR/data" "$BACKUP_PATH/" 2>/dev/null || true
+    [ -d "$LEGACY_DIR/sessions" ] && cp -a "$LEGACY_DIR/sessions" "$BACKUP_PATH/" 2>/dev/null || true
+    [ -f "$LEGACY_DIR/config.json" ] && cp "$LEGACY_DIR/config.json" "$BACKUP_PATH/" 2>/dev/null || true
+    [ -f "$LEGACY_DIR/saas.db" ] && cp "$LEGACY_DIR/saas.db" "$BACKUP_PATH/" 2>/dev/null || true
+    echo -e "  ${GREEN}OK${NC} Backup: $BACKUP_PATH"
+
+    # Migrate data/
+    if [ -d "$LEGACY_DIR/data" ]; then
+        mkdir -p "$INSTALL_DIR/data"
+        cp -rn "$LEGACY_DIR/data/"* "$INSTALL_DIR/data/" 2>/dev/null || true
+        chown -R root:root "$INSTALL_DIR/data" 2>/dev/null || true
+        echo -e "  ${GREEN}OK${NC} data/ migrated"
+    fi
+
+    # Migrate sessions/ (the critical part)
+    if [ -d "$LEGACY_DIR/sessions" ]; then
+        mkdir -p "$INSTALL_DIR/sessions"
+        # -n: don't overwrite, -p: preserve permissions
+        cp -rpn "$LEGACY_DIR/sessions/"* "$INSTALL_DIR/sessions/" 2>/dev/null || true
+        chown -R root:root "$INSTALL_DIR/sessions" 2>/dev/null || true
+        chmod 700 "$INSTALL_DIR/sessions" 2>/dev/null || true
+        SESSION_COUNT=$(ls -1 "$INSTALL_DIR/sessions"/*.session 2>/dev/null | wc -l)
+        echo -e "  ${GREEN}OK${NC} sessions/ migrated ($SESSION_COUNT accounts)"
+    fi
+
+    # Migrate config.json
+    if [ -f "$LEGACY_DIR/config.json" ] && [ ! -f "$INSTALL_DIR/config.json" ]; then
+        cp "$LEGACY_DIR/config.json" "$INSTALL_DIR/config.json"
+        chown root:root "$INSTALL_DIR/config.json" 2>/dev/null || true
+        chmod 600 "$INSTALL_DIR/config.json" 2>/dev/null || true
+        echo -e "  ${GREEN}OK${NC} config.json migrated"
+    fi
+
+    # Migrate saas.db (critical for user/plan data)
+    if [ -f "$LEGACY_DIR/saas.db" ] && [ ! -f "$INSTALL_DIR/saas.db" ]; then
+        cp "$LEGACY_DIR/saas.db" "$INSTALL_DIR/saas.db"
+        chown root:root "$INSTALL_DIR/saas.db" 2>/dev/null || true
+        echo -e "  ${GREEN}OK${NC} saas.db migrated"
+    fi
+else
+    echo -e "  ${CYAN}Fresh install, nothing to migrate${NC}"
+fi
+
+# ═══════════════════════════════════════════════════════════
+#  STEP 6: Systemd service (FIXED v2.2)
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[6/7]${NC} Creating systemd service..."
+
+# Disable old selfbot.service (if exists)
+if [ -f /etc/systemd/system/selfbot.service ]; then
     systemctl stop selfbot 2>/dev/null || true
     systemctl disable selfbot 2>/dev/null || true
-    mv /etc/systemd/system/selfbot.service /etc/systemd/system/selfbot.service.disabled
+    # Move aside instead of deleting
+    if [ ! -f /etc/systemd/system/selfbot.service.disabled ]; then
+        mv /etc/systemd/system/selfbot.service /etc/systemd/system/selfbot.service.disabled
+    fi
+    echo -e "  ${YELLOW}Old selfbot.service moved to .disabled${NC}"
 fi
 
 cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
@@ -207,229 +309,97 @@ EnvironmentFile=$ENV_FILE
 ExecStart=$INSTALL_DIR/venv/bin/python3 main.py all
 Restart=always
 RestartSec=10
-StartLimitBurst=20
-StartLimitIntervalSec=300
-
-# لاگ به journal
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=cianet
-
-# Performance
-LimitNOFILE=65535
-OOMScoreAdjust=-100
-Nice=-5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# ─── Step 6: Watchdog + Auto-update daemon ───
-echo -e "${BLUE}[6/6]${NC} 🐕 ساخت watchdog + auto-updater..."
-
-mkdir -p "$WATCHDOG_DIR"
-
-# 1. Watchdog: اگه سلف مرد، سریع بیدارش کن
-cat > $WATCHDOG_DIR/watchdog.sh <<'WATCHDOG_EOF'
-#!/bin/bash
-# اگه ربات مرد → سریع بیدارش کن
-# اگه هنوز start می‌شه → صبر کن
-# اگه بیش از N بار fail شد → alert
-
-SERVICE="cianet.service"
-LOG="/var/log/cianet-watchdog.log"
-
-if ! systemctl is-active --quiet "$SERVICE"; then
-    echo "$(date): $SERVICE inactive, restarting..." >> "$LOG"
-    systemctl restart "$SERVICE"
-fi
-WATCHDOG_EOF
-chmod +x $WATCHDOG_DIR/watchdog.sh
-
-# 2. Auto-updater: polling هر ۵ دقیقه + webhook receiver
-cat > $WATCHDOG_DIR/auto_update.sh <<'UPDATE_EOF'
-#!/bin/bash
-# هر ۵ دقیقه چک کنه. اگه آپدیتی بود، pull + restart + notify admins.
-# اگه UPDATE_WEBHOOK_URL تنظیم شده، اون رو هم هر ۱ دقیقه چک کن.
-
-INSTALL_DIR="/opt/cianet"
-SERVICE="cianet.service"
-LOG="/var/log/cianet-auto-update.log"
-CURRENT_COMMIT_FILE="$INSTALL_DIR/.last_seen_commit"
-
-cd "$INSTALL_DIR" || exit 1
-
-LAST_COMMIT=$(cat "$CURRENT_COMMIT_FILE" 2>/dev/null || git rev-parse HEAD)
-NEW_COMMITS=$(git fetch origin main 2>/dev/null && git log --oneline "$LAST_COMMIT..origin/main" 2>/dev/null)
-
-if [ -n "$NEW_COMMITS" ]; then
-    echo "$(date): 📥 آپدیت پیدا شد! $NEW_COMMITS" >> "$LOG"
-    # main.py خودش propagation رو handle می‌کنه (signal می‌فرسته)
-    # ما فقط pull + restart می‌کنیم
-    git pull origin main >> "$LOG" 2>&1
-    NEW_COMMIT=$(git rev-parse HEAD)
-    echo "$NEW_COMMIT" > "$CURRENT_COMMIT_FILE"
-    systemctl restart "$SERVICE" >> "$LOG" 2>&1
-    echo "$(date): ✅ آپدیت شد به $NEW_COMMIT" >> "$LOG"
-fi
-UPDATE_EOF
-chmod +x $WATCHDOG_DIR/auto_update.sh
-
-# 3. Webhook receiver (اگه PUBLIC_WEBHOOK_URL تنظیم شده)
-if [ -n "$UPDATE_WEBHOOK_URL" ]; then
-    cat > $WATCHDOG_DIR/webhook_listener.py <<PYEOF
-#!/usr/bin/env python3
-"""
-Webhook receiver: وقتی GitHub push بشه، این endpoint صدا زده می‌شه.
-سلف بلافاصله متوجه می‌شه و auto-pull می‌کنه.
-
-این endpoint رو می‌تونی روی یه reverse proxy (nginx, caddy) ست کنی
-یا از یه tunnel مثل cloudflared/ngrok استفاده کنی.
-
-Security: shared secret در URL یا header.
-"""
-import os
-import subprocess
-import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-SECRET = os.environ.get("CIANET_WEBHOOK_SECRET", "${UPDATE_WEBHOOK_URL}")
-INSTALL_DIR = "/opt/cianet"
-SERVICE = "cianet.service"
-LOG = "/var/log/cianet-webhook.log"
-
-
-class Handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # چک secret در path: /webhook/<secret>
-        path_secret = self.path.strip("/").split("/")[-1] if "/" in self.path else ""
-        if path_secret != SECRET:
-            self.send_response(403)
-            self.end_headers()
-            return
-        # اجرای pull + restart
-        with open(LOG, "a") as f:
-            f.write(f"{self.log_date_time_string()}: webhook hit\n")
-        try:
-            subprocess.run(
-                ["git", "pull", "origin", "main"],
-                cwd=INSTALL_DIR, check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["systemctl", "restart", SERVICE],
-                check=True, capture_output=True,
-            )
-            with open(LOG, "a") as f:
-                f.write(f"  ✓ pulled and restarted\n")
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        except subprocess.CalledProcessError as e:
-            with open(LOG, "a") as f:
-                f.write(f"  ✗ {e.stderr.decode()}\n")
-            self.send_response(500)
-            self.end_headers()
-
-    def log_message(self, fmt, *args):
-        pass  # silent
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("CIANET_WEBHOOK_PORT", "9876"))
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
-PYEOF
-    chmod +x $WATCHDOG_DIR/webhook_listener.py
-fi
-
-# systemd timer برای auto_update (هر ۵ دقیقه)
-cat > /etc/systemd/system/cianet-autoupdate.service <<EOF
+# Watchdog timer
+cat > /etc/systemd/system/$SERVICE_NAME-watchdog.timer <<EOF
 [Unit]
-Description=CiaNet Auto-Updater
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=$WATCHDOG_DIR/auto_update.sh
-User=root
-EOF
-
-cat > /etc/systemd/system/cianet-autoupdate.timer <<EOF
-[Unit]
-Description=CiaNet Auto-Update Timer (هر ۵ دقیقه)
+Description=CiaNet Watchdog Timer (every 1 min)
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=5min
-AccuracySec=30s
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5
 
 [Install]
 WantedBy=timers.target
 EOF
 
-# systemd timer برای watchdog (هر ۱ دقیقه)
-cat > /etc/systemd/system/cianet-watchdog.service <<EOF
+cat > /etc/systemd/system/$SERVICE_NAME-watchdog.service <<EOF
 [Unit]
 Description=CiaNet Watchdog
-After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$WATCHDOG_DIR/watchdog.sh
-User=root
+ExecStart=/bin/bash -c 'systemctl is-active $SERVICE_NAME >/dev/null || systemctl restart $SERVICE_NAME'
 EOF
 
-cat > /etc/systemd/system/cianet-watchdog.timer <<EOF
+# Auto-update timer
+cat > /etc/systemd/system/$SERVICE_NAME-autoupdate.timer <<EOF
 [Unit]
-Description=CiaNet Watchdog Timer (هر ۱ دقیقه)
+Description=CiaNet Auto-Update Timer (every 5 min)
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=1min
-AccuracySec=10s
+OnBootSec=120
+OnUnitActiveSec=300
+AccuracySec=10
 
 [Install]
 WantedBy=timers.target
 EOF
 
-# ─── Activate everything ───
-echo ""
-echo -e "${YELLOW}🔄 فعال‌سازی همه چیز...${NC}"
+cat > /etc/systemd/system/$SERVICE_NAME-autoupdate.service <<EOF
+[Unit]
+Description=CiaNet Auto-Update
+
+[Service]
+Type=oneshot
+ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/cianet_updater.py --check
+EOF
+
 systemctl daemon-reload
 systemctl enable --now $SERVICE_NAME
-systemctl enable --now cianet-watchdog.timer
-systemctl enable --now cianet-autoupdate.timer
+systemctl enable --now $SERVICE_NAME-watchdog.timer
+systemctl enable --now $SERVICE_NAME-autoupdate.timer
 
-# چند ثانیه صبر کن
+echo -e "  ${GREEN}OK${NC} Services enabled"
+
+# ═══════════════════════════════════════════════════════════
+#  STEP 7: Final report
+# ═══════════════════════════════════════════════════════════
+echo -e "${BLUE}[7/7]${NC} Finalizing..."
 sleep 3
 
-# ─── نمایش وضعیت ───
+SERVICE_STATUS=$(systemctl is-active $SERVICE_NAME 2>/dev/null || echo "unknown")
+
 echo ""
-echo -e "${GREEN}╔════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║                                                    ║${NC}"
-echo -e "${GREEN}║   ✅ نصب CiaNet Selfbot کامل شد!                  ║${NC}"
-echo -e "${GREEN}║                                                    ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════════════════╝${NC}"
+echo "════════════════════════════════════════════════════"
+echo -e "  ${GREEN}Installation complete!${NC}"
+echo "════════════════════════════════════════════════════"
 echo ""
-echo -e "${CYAN}📊 وضعیت سرویس:${NC}"
-systemctl status $SERVICE_NAME --no-pager -l | head -8
+echo "  Install dir:  $INSTALL_DIR"
+echo "  Service:      $SERVICE_NAME.service (status: $SERVICE_STATUS)"
+echo "  Watchdog:     ${SERVICE_NAME}-watchdog.timer (every 1 min)"
+echo "  Auto-update:  ${SERVICE_NAME}-autoupdate.timer (every 5 min)"
+echo "  Env file:     $ENV_FILE"
 echo ""
-echo -e "${CYAN}🐕 Watchdog (هر ۱ دقیقه):${NC}"
-systemctl status cianet-watchdog.timer --no-pager | head -3
+echo "  Logs:"
+echo "    sudo journalctl -u $SERVICE_NAME -f"
+echo "    tail -f /var/log/${SERVICE_NAME}-auto-update.log"
 echo ""
-echo -e "${CYAN}🔄 Auto-Update (هر ۵ دقیقه):${NC}"
-systemctl status cianet-autoupdate.timer --no-pager | head -3
-echo ""
-echo -e "${CYAN}📂 مسیر نصب:${NC}      $INSTALL_DIR"
-echo -e "${CYAN}🔐 env file:${NC}      $ENV_FILE (chmod 600)"
-echo -e "${CYAN}📜 لاگ اصلی:${NC}      sudo journalctl -u $SERVICE_NAME -f"
-echo -e "${CYAN}📜 لاگ watchdog:${NC}   tail -f /var/log/cianet-watchdog.log"
-echo -e "${CYAN}📜 لاگ auto-update:${NC} tail -f /var/log/cianet-auto-update.log"
-echo ""
-echo -e "${YELLOW}📱 به رباتت برو و /start بزن${NC}"
-echo -e "${YELLOW}🔥 ربات هرگز خاموش نمی‌شه (watchdog هر دقیقه چک می‌کنه)${NC}"
-echo -e "${YELLOW}🔄 وقتی کد آپدیت بشه، اتوماتیک propagate می‌شه${NC}"
-echo ""
-echo -e "${PURPLE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${PURPLE}  Update channels: polling (5min) ${UPDATE_WEBHOOK_URL:+ + webhook}${NC}"
-echo -e "${PURPLE}  Restart: never (watchdog guarantees uptime)${NC}"
-echo -e "${PURPLE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+if [ -n "$LEGACY_DIR" ]; then
+    echo "  Migration backup: $BACKUP_ROOT/"
+    echo "  Rollback: mv $BACKUP_ROOT/latest/* $LEGACY_DIR/"
+    echo ""
+fi
+echo "  Go to your bot in Telegram and /start"
+echo "════════════════════════════════════════════════════"
+
+if [ "$SERVICE_STATUS" != "active" ]; then
+    echo ""
+    echo -e "${YELLOW}Service is not active. Check logs:${NC}"
+    echo "  sudo journalctl -u $SERVICE_NAME -n 30 --no-pager"
+fi

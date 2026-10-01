@@ -8519,7 +8519,11 @@ class SaaSBot:
         # هندلر جداگانه ثبت نمی‌کند (فقط متدهایش مستقیماً فراخوانی می‌شوند)
         self.admin_panel.client = self.client
 
-        self._register_handlers()
+        # FIX BUG #1: SaaSBot متد _register_handlers نداره.
+        # این متد مال AdminBot هست که در self.admin_panel قرار داره.
+        # بدون این fix، startup با خطای 'SaaSBot' object has no attribute
+        # '_register_handlers' fail می‌شد.
+        self.admin_panel._register_handlers()
 
         if self._expiry_task is None or self._expiry_task.done():
             self._expiry_task = asyncio.create_task(self._expiry_loop())
