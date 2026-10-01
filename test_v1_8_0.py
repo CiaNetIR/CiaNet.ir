@@ -118,12 +118,16 @@ def test_admin_panel_tabs():
     with open("main.py", "r", encoding="utf-8") as f:
         content = f.read()
 
-    tabs = ["admin_tab_sales", "admin_tab_users", "admin_tab_support", "admin_tab_settings"]
-    for tab in tabs:
-        record(f"تب {tab} تعریف شده", tab in content, "✓")
-    record("تابع _show_admin_tab", "def _show_admin_tab" in content, "✓")
+    # v1.9.0: پنل ادمین flat شد - همه چیز در یک صفحه با 12 دکمه
+    # به جای 4 تب تو در تو
+    items = ["owner_payments", "admin_finance", "owner_pricing", "license_access",
+             "admin_users", "user_search_start", "admin_tickets",
+             "owner_channel_set", "admin_wallet", "cap_list", "admin_backup"]
+    for item in items:
+        record(f"دکمه {item}", f'"{item}"' in content, "✓")
     record("تابع _show_reseller_dashboard", "def _show_reseller_dashboard" in content, "✓")
     record("تابع _show_users_section", "def _show_users_section" in content, "✓")
+    record("پنل flat (بدون 4 تب)", "admin_tab_sales" not in content, "✓")
 
 
 def test_users_section_filters():
