@@ -1,214 +1,86 @@
-# CiaNet.ir — Telegram Selfbot SaaS Panel
+<div align="center">
 
-پنل SaaS سلف‌بات تلگرام با قابلیت‌های کامل مدیریت اکانت، سیستم مجوزهای امنیتی، ربات راهنما، و ربات‌های اختصاصی.
+```
+   ╔════════════════════════════════════════════════════╗
+   ║                                                    ║
+   ║      ▄████▄  ██▓ ▄▄▄      ███▄    █ ▓█████ ▄▄▄    ║
+   ║     ▒██▀ ▀█  ▓██▒▒████▄    ██ ▀█   █ ▓█   ▀ ▒████▄  ║
+   ║     ▒▓█    ▄ ▒██▒▒██  ▀█▄  ▓██  ▀█ ██▒▒███   ▒██  ▀█▄║
+   ║     ▒▓▓▄ ▄██▒░██░░██▄▄▄▄██ ▓██▒  ▐▌██▒▒▓█  ▄ ░██▄▄▄▄██║
+   ║     ▒ ▓███▀ ░██░ ▓█   ▓██▒▒██░   ▓██░░▒████▒ ▓█   ▓██║
+   ║                                                    ║
+   ║          سلف‌بات تلگرام · Telegram Selfbot           ║
+   ╚════════════════════════════════════════════════════╝
+```
 
-## ✨ قابلیت‌ها
+**CiaNet.ir** — Telegram Selfbot SaaS Panel
 
-### 🏠 پنل مدیریت (Admin Panel)
-- لیست/افزودن/حذف اکانت‌های سلف
-- مدیریت ادمین‌ها (در حالت standalone)
-- ناوبری شیشه‌ای با دکمه‌های inline
+پنل مدیریت چند‌اکانتی با رابط شیشه‌ای، سیستم مجوز متمرکز، و ربات‌های اختصاصی نمایندگان.
+*Multi-account selfbot panel with inline UI, central authorization, and dedicated reseller bots.*
 
-### 👤 مدیریت هر اکانت
-- **قابلیت‌ها (Features)**: toggle هر ویژگی
-- **ظاهر و پروفایل**: تغییر اسم + فونت (bold, double, sans, mono, normal)
-- **ارسال پیام**: به Saved Messages یا مخاطب
-- **اتصال و پروکسی**: SOCKS5/SOCKS4/HTTP با auth اختیاری
+---
 
-### 🔐 امنیت اکانت (سیستم مجوز متمرکز)
-- **دستگاه‌های لاگین‌شده**: لیست، انتخاب، بستن انتخاب‌شده‌ها، خروج از همه
-- **رمز دو مرحله‌ای (2FA)**: مدیریت + بازنشانی با تأیید دو مرحله‌ای
-- **دریافت کد لاگین**: arm listener + خواندن کد بعدی
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
+[![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Tests: 246](https://img.shields.io/badge/tests-246%20passing-success.svg)](#-tests)
+[![Version: 2.0](https://img.shields.io/badge/version-2.0-blue.svg)](#-changelog)
 
-### 🛡️ Security Core (لایه مرکزی)
-- **`permission_grants`** — جدول مجوزها با `scope_type` (reseller/dedicated_bot/account)
-- **`authorize_sensitive_account_action()`** — تنها مرجع تصمیم‌گیری برای همه‌ی عملیات حساس
-- **`SECURITY_ROUTES`** — لیست prefixهایی که قبل از اجرا از لایه مرکزی رد می‌شوند
-- **Owner Bypass** — فقط در نمونه اصلی (نه ربات اختصاصی)
-- **Grant/Revoke** — با Audit Trail کامل
+[Quick Start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Security](#-security) · [Changelog](#-changelog)
 
-### 👥 نقش‌ها
-- `OWNER` — مالک اصلی (owner bypass)
-- `ADMIN` — مدیران
-- `RESELLER` — نمایندگان (با محدودیت تعداد کاربر)
-- `USER` — کاربران عادی
+</div>
 
-### 💳 اشتراک و پرداخت
-- پلن‌های قیمت‌گذاری شده (pricing)
-- پرداخت TRC20 (تتر) و کارت
-- لایسنس با redeem_atomic (replay protection)
-- اشتراک خودکار منقضی می‌شود
-- هشدار انقضا (24 ساعت قبل)
+---
 
-### 🤖 ربات‌های اختصاصی (Dedicated Bots)
-- نماینده می‌تواند ربات اختصاصی راه‌اندازی کند
-- قیمت ثابت (`dedicated_bot_price()`)
-- چرخه: pending_payment → active
-- Grant امنیتی `SCOPE_DEDICATED_BOT` فقط در bot_id همان ربات
+## ⚡ Quick Start / شروع سریع
 
-### 🧭 ناوبری
-- `nav:back` — برگشت (با پشته)
-- `nav:home` — منوی اصلی
-- `nav:noop` — دکمه تزئینی
+> **5 minutes to a running selfbot panel.** / **۵ دقیقه تا راه‌اندازی کامل.**
 
-### 🤖 Helper Bot (ربات راهنما)
-- توکن مستقل، بدون دسترسی به DB/اکانت‌ها
-- ۱۲ موضوع (time, tabchi, mute, online, read, profile, tools, games, crypto, copy, status, tips)
-- دو زبانه (فارسی + انگلیسی)
-- Trigger: `پنل` / `راهنما` / `منو` / `panel` / `help` / `h` / `menu`
-
-### 🗄️ دیتابیس (SQLite)
-- ۲۲+ جدول (users, accounts, subscriptions, licenses, payments, orders, tickets, dedicated_bots, permission_grants, audit_log, …)
-- `idempotent migration` (CREATE TABLE IF NOT EXISTS)
-- WAL mode + foreign_keys
-
-## 📊 ساختار کد
-
-| کلاس | خط | کاربرد |
-|------|-----|--------|
-| `UI` | 4764 | ساخت دکمه‌های شیشه‌ای |
-| `NavStack` | 5067 | پشته ناوبری per-user |
-| `AdminBot` | 5146 | پنل ادمین (standalone) |
-| `SaaSBot` | 7791 | ربات SaaS اصلی |
-| `HelperBot` | 12732 | ربات راهنما (read-only) |
-| `RunningAccount` | 13210 | اکانت‌های در حال اجرا |
-| `SelfBot` | 14783 | منطق سلف‌بات |
-
-- **۲۵۸ تابع** (def/async def)
-- **۸ کلاس**
-- **۱۸۸۱۲ خط**
-
-## 🚀 نصب
+### 1️⃣ Clone & Install / کلون و نصب
 
 ```bash
-git clone https://github.com/DLSDT/CiaNet.ir.git
-cd CiaNet.ir
-pip install -r requirements.txt
-python3 main.py all
-```
-
-## 📦 پیش‌نیازها (Requirements)
-
-### ۱. نرم‌افزار
-- **Python 3.10+** (tested on 3.10, 3.11, 3.12)
-- **Linux/Unix** یا WSL (systemd اختیاری ولی توصیه‌شده)
-- **SQLite 3.35+** (با JSONB و RETURNING)
-
-### ۲. کتابخانه‌های Python
-| پکیج | ضروری؟ | کاربرد |
-|------|--------|--------|
-| `telethon>=1.36.0` | ✅ بله | کلاینت تلگرام |
-| `python_socks>=2.0.0` | اختیاری | پروکسی SOCKS5/4/HTTP برای لاگین اکانت‌ها |
-
-بقیه (asyncio, sqlite3, urllib, hashlib, secrets) جزو **کتابخانه استاندارد** پایتون هستند.
-
-### ۳. تلگرام — ۳ نوع توکن/اکانت
-| نوع | منبع | استفاده |
-|------|------|---------|
-| **API ID + API Hash** | [my.telegram.org](https://my.telegram.org/apps) | `api_id` و `api_hash` برای همه کلاینت‌ها |
-| **Admin Bot Token** | [@BotFather](https://t.me/BotFather) → `/newbot` | ربات اصلی (پنل SaaS) |
-| **Helper Bot Token** | [@BotFather](https://t.me/BotFather) → `/newbot` (دوم) | ربات راهنما (read-only) |
-| **User Account** | شماره تلفن اکانت کاربر | خود اکانت‌های سلف (لاگین با کد) |
-
-### ۴. متغیرهای محیطی (Environment Variables)
-
-#### نمونه اصلی (Main Instance)
-```bash
-# ضروری
-export API_ID=12345                      # از my.telegram.org
-export API_HASH=abc123...                # از my.telegram.org
-export ADMIN_BOT_TOKEN=123456:ABC...     # از @BotFather
-export ADMIN_ID=123456789                # آیدی عددی تلگرام شما
-
-# اختیاری
-export HELPER_BOT_TOKEN=789:XYZ...       # ربات راهنما
-export HELPER_BOT_USERNAME=HelpBot       # یوزرنیم بدون @
-export SELFBOT_DATA_DIR=/path/to/data    # پیش‌فرض: /opt/selfbot/data
-export DEBUG=1                           # لاگ verbose
-```
-
-#### ربات اختصاصی (Dedicated Bot)
-```bash
-export SELFBOT_DEDICATED_BOT=1
-export SELFBOT_DEDICATED_BOT_ID=42       # ID ربات اختصاصی در DB
-export SELFBOT_GRANTS_DB_PATH=/path/to/main/saas.db   # مسیر DB مرکزی
-export SELFBOT_DATA_DIR=/path/to/dedicated/42
-```
-
-### ۵. دسترسی‌های سیستمی (System Access)
-| دسترسی | دلیل |
-|--------|------|
-| **فایل سیستم** (read/write) | ذخیره DB، session files، پروکسی، بکاپ |
-| **پوشه `sessions/` با `chmod 700`** | فایل session تلگرام (sensitive) |
-| **پورت خروجی HTTPS (443)** | دسترسی به API تلگرام + قیمت‌ها |
-| **DNS** | resolve کردن telegram.org و APIها |
-
-### ۶. APIهای خارجی (اختیاری ولی در کد استفاده شده)
-
-#### قیمت لحظه‌ای (طلا/تتر/تون/ترون)
-| API | URL | استفاده |
-|-----|-----|---------|
-| **Binance** | `api.binance.com` | قیمت USDT/TON/TRX |
-| **CoinGecko** | `api.coingecko.com` | fallback + قیمت IRR |
-| **Bybit** | `api.bybit.com` | fallback |
-| **KuCoin** | `api.kucoin.com` | fallback |
-| **OKX** | `www.okx.com` | قیمت طلا (XAU-USDT) |
-| **Nobitex** | `api.nobitex.ir` | قیمت تومان |
-| **Wallex** | `api.wallex.ir` | قیمت تومان (fallback) |
-| **Exir** | `api.exir.io` | قیمت تومان (fallback) |
-| **Bit24** | `api.bit24.cash` | قیمت تومان (fallback) |
-| **Navasan (GitHub)** | `raw.githubusercontent.com/.../gold.json` | قیمت طلا/سکه |
-
-#### تأیید پرداخت TRC20
-| API | URL | استفاده |
-|-----|-----|---------|
-| **TronGrid** | `api.trongrid.io` | تأیید تراکنش USDT روی شبکه TRON |
-
-⚠️ **اگر اینترنت به این APIها محدود باشد، قابلیت قیمت و پرداخت TRC20 کار نمی‌کند** (ولی بقیه ربات سالم می‌ماند).
-
-### ۷. ساختار پوشه‌ها (خودکار ساخته می‌شود)
-```
-$DATA_DIR/
-├── saas.db                  # دیتابیس اصلی (SQLite)
-├── config.json              # کانفیگ اکانت‌ها
-├── admin_bot_admins.json    # لیست ادمین‌ها (standalone mode)
-├── account_delete_journal.json
-├── sessions/                # فایل session هر اکانت (chmod 700)
-│   ├── helper_bot.session
-│   ├── admin_bot.session
-│   └── myaccount.session
-├── downloads/               # فایل‌های دانلودشده
-└── tracker_media/           # پیام‌های حذف/ادیت‌شده
-```
-
-### ۸. نصب استاندارد (Systemd)
-
-```bash
-# 1. کلون + نصب
 git clone https://github.com/DLSDT/CiaNet.ir.git /opt/selfbot
 cd /opt/selfbot
 pip install -r requirements.txt
+```
 
-# 2. env file
-sudo tee /etc/selfbot.env <<EOF
-API_ID=12345
-API_HASH=abc...
-ADMIN_BOT_TOKEN=...
-ADMIN_ID=123456789
-EOF
-sudo chmod 600 /etc/selfbot.env
+### 2️⃣ Get Credentials / دریافت کلیدها
 
-# 3. systemd service
+| چی لازمه | کجا | راهنما |
+|---|---|---|
+| **API ID + Hash** | [my.telegram.org/apps](https://my.telegram.org/apps) | [Guide](https://core.telegram.org/api/obtaining_api_id) |
+| **Admin Bot Token** | [@BotFather](https://t.me/BotFather) → `/newbot` | Main panel bot |
+| **Admin User ID** | [@userinfobot](https://t.me/userinfobot) | Your numeric Telegram ID |
+
+### 3️⃣ Configure & Run / تنظیم و اجرا
+
+```bash
+# Set environment variables
+export API_ID=12345
+export API_HASH=abc123def456
+export ADMIN_BOT_TOKEN=123456:ABC-DEF
+export ADMIN_ID=123456789
+
+# Run
+python3 main.py all
+```
+
+### 4️⃣ (Optional) Systemd Service / سرویس سیستمی
+
+```bash
 sudo tee /etc/systemd/system/selfbot.service <<'EOF'
 [Unit]
-Description=Telegram Selfbot SaaS Panel
+Description=CiaNet Selfbot Panel
 After=network-online.target
 
 [Service]
 Type=simple
 User=selfbot
 WorkingDirectory=/opt/selfbot
-EnvironmentFile=/etc/selfbot.env
+Environment="API_ID=12345"
+Environment="API_HASH=abc123"
+Environment="ADMIN_BOT_TOKEN=123456:ABC"
+Environment="ADMIN_ID=123456789"
 ExecStart=/usr/bin/python3 main.py all
 Restart=always
 RestartSec=10
@@ -217,20 +89,342 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# 4. شروع
 sudo systemctl daemon-reload
-sudo systemctl enable --now selfbot.service
+sudo systemctl enable --now selfbot
 ```
 
-## 🔒 امنیت
+**Send `/start` to your bot. Done. ✨**
+**به ربات `/start` بفرستید. تمام. ✨**
 
-- **Owner Bypass** فقط در نمونه اصلی (نه Dedicated Bot)
-- **Central Auth** — همه عملیات حساس از `authorize_sensitive_account_action()` رد می‌شوند
-- **Tag ownership check** — callback‌های حساس اول مالکیت tag رو چک می‌کنن
-- **Audit log** — همه grant/revoke در `audit_log` ثبت می‌شه
-- **Replay protection** — هر txid فقط یک‌بار روی هر فاکتور
-- **Idempotent license redeem** — atomic
+---
 
-## 📜 License
+## ✨ Features / قابلیت‌ها
 
-MIT
+### 🎛️ Admin Panel / پنل مدیریت
+
+| EN | FA |
+|---|---|
+| **5-section hub** — Sales, Users, Support, System, Security | **هاب ۵ بخشی** — فروش، کاربران، پشتیبانی، سیستم، امنیت |
+| **Roman-numeral navigation** (Ⅰ Ⅱ Ⅲ Ⅳ Ⅴ) | **شماره‌گذاری رومی** برای تشخیص سریع |
+| **Inline glass buttons** with Telegram's native `bg_success`/`bg_danger`/`bg_primary` | **دکمه‌های شیشه‌ای** با رنگ‌های بومی تلگرام |
+| **Pending count badges** on action buttons | **شمارنده‌ی کارهای معوق** روی دکمه‌ها |
+| **Two-column layout** for compact screens | **چیدمان دو ستونی** برای صفحات فشرده |
+
+### 🔐 Security Core / لایه‌ی امنیتی مرکزی
+
+| EN | FA |
+|---|---|
+| **Central authorization** — every sensitive action passes through `authorize_sensitive_account_action()` | **مجوزدهی مرکزی** — همه‌ی عملیات حساس از یک تابع واحد رد می‌شوند |
+| **Scoped grants** — `reseller` / `dedicated_bot` / `account` | **مجوزهای مقید** — سه سطح |
+| **Owner bypass** only in main instance (never in dedicated bots) | **دور زدن توسط Owner** فقط در نمونه اصلی |
+| **Full audit trail** — every grant/revoke logged | **تاریخچه‌ی کامل** — همه‌چیز ثبت می‌شه |
+| **2FA management** with two-step confirmation for resets | **مدیریت 2FA** با تأیید دو مرحله‌ای برای بازنشانی |
+| **Replay protection** — txid / license redeem are atomic | **محافظت از تکرار** — تراکنش و لایسنس atomic |
+
+### 🤖 Account Management / مدیریت اکانت
+
+| EN | FA |
+|---|---|
+| **Multi-account** — run many selfbots from one panel | **چند‌اکانتی** — چند سلف از یک پنل |
+| **Per-account features** — toggle individual capabilities | **قابلیت‌های مستقل** — هر اکانت تنظیم خودش |
+| **Profile editor** — name + font (bold/double/sans/mono/normal) | **ویرایش پروفایل** — اسم + فونت |
+| **Message send** — to Saved Messages or any chat | **ارسال پیام** — به Saved Messages یا هر چت |
+| **Proxy support** — SOCKS5/SOCKS4/HTTP with optional auth | **پروکسی** — SOCKS5/4/HTTP با auth |
+| **Device management** — list, kick, logout-all | **مدیریت دستگاه** — لیست، بستن، خروج‌کلی |
+
+### 💳 Subscription & Payment / اشتراک و پرداخت
+
+| EN | FA |
+|---|---|
+| **Flexible plans** — duration × price in pricing table | **پلن‌های منعطف** — قیمت‌گذاری پویا |
+| **TRC20 (USDT)** verification via TronGrid | **تأیید TRC20** از طریق TronGrid |
+| **Card payment** manual approval workflow | **پرداخت کارتی** با تأیید دستی |
+| **License keys** with atomic redeem | **لایسنس** با فعال‌سازی atomic |
+| **Auto-expiry** with 24h warning | **انقضای خودکار** با هشدار ۲۴ ساعته |
+| **Live price feeds** — gold, USDT, TON, TRX, IRR | **قیمت لحظه‌ای** — طلا، تتر، تون، ترون، تومان |
+
+### 🤝 Reseller Program / برنامه‌ی نمایندگی
+
+| EN | FA |
+|---|---|
+| **Dedicated bot** per reseller (their own brand) | **ربات اختصاصی** برای هر نماینده |
+| **Customer management** — list, sub status, license issuance | **مدیریت مشتریان** — لیست، وضعیت اشتراک، صدور لایسنس |
+| **Auto income** — earnings calculated from sales | **درآمد خودکار** — محاسبه از فروش |
+| **Self-service application** — users request from main panel | **درخواست خودکار** — کاربر از پنل اصلی |
+
+### 🧭 Navigation & UX / ناوبری و تجربه
+
+| EN | FA |
+|---|---|
+| **Per-user back stack** — `back` is always 1 real step back | **پشته‌ی بازگشت** — همیشه یک قدم واقعی به عقب |
+| **`nav:home`** — always-safe exit from any depth | **منوی اصلی** — خروج امن از هر عمقی |
+| **Sticky breadcrumbs** on every page | **مسیر شناور** در همه‌ی صفحات |
+| **Single welcome block** — `/start` always returns to main menu | **منوی واحد** — `/start` همیشه به ریشه |
+
+---
+
+## 🏗️ Architecture / معماری
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Telegram MTProto API                      │
+└──────────────┬──────────────────────────┬───────────────────┘
+               │                          │
+       ┌───────▼──────┐         ┌─────────▼────────┐
+       │  Admin Bot   │         │  Helper Bot      │
+       │  (SaaS panel)│         │  (read-only FAQ) │
+       │  Bot Token   │         │  Bot Token       │
+       └───────┬──────┘         └──────────────────┘
+               │
+       ┌───────▼──────────────────────────────────────┐
+       │           SaaSBot (Python)                    │
+       │  ┌────────────┐  ┌────────────┐  ┌────────┐  │
+       │  │  UI Class  │  │ NavStack   │  │  Auth  │  │
+       │  │  (glass)   │  │ (per-user) │  │ (grant)│  │
+       │  └────────────┘  └────────────┘  └────────┘  │
+       │  ┌──────────────────────────────────────┐     │
+       │  │  SelfBot × N (Telethon clients)      │     │
+       │  │  Account 1 · Account 2 · Account N   │     │
+       │  └──────────────────────────────────────┘     │
+       └───────┬──────────────────────────────────────┘
+               │
+       ┌───────▼──────────────────────────────────────┐
+       │      SQLite (saas.db · WAL mode)             │
+       │  users · accounts · subscriptions · licenses │
+       │  payments · tickets · dedicated_bots ·      │
+       │  permission_grants · audit_log ·             │
+       │  reseller_applications                       │
+       └────────────────────────────────────────────┘
+```
+
+### Core Components / اجزای اصلی
+
+| Component | Lines | Role |
+|---|---:|---|
+| `UI` | ~270 | Inline button factory, color palette, microcopy / ساخت دکمه، پالت، متن‌های ثابت |
+| `NavStack` | ~180 | Per-user back-stack with loop-breaker / پشته‌ی ناوبری |
+| `AdminBot` | ~2,600 | Standalone admin panel (legacy) / پنل ادمین مستقل |
+| `SaaSBot` | ~5,500 | Main SaaS bot, role-based menus / ربات اصلی |
+| `SelfBot` | ~1,500 | Single-account Telethon logic / منطق سلف |
+| `RunningAccount` | ~480 | Runtime wrapper with state machine / wrapper اکانت |
+
+### Database Schema / اسکیمای دیتابیس
+
+**۲۲+ tables**, all created with `CREATE TABLE IF NOT EXISTS` (idempotent migration):
+
+```
+users              subscriptions      licenses           payments
+accounts           plans              orders             tickets
+admins             dedicated_bots     permission_grants  audit_log
+banned_users       sales_users        reseller_apps      ...
+sessions (table)   backups            notifications      ...
+```
+
+WAL mode · `foreign_keys=ON` · indexed hot paths.
+
+---
+
+## 🔒 Security / امنیت
+
+### Three-layer model / مدل سه‌لایه
+
+```
+┌──────────────────────────────────────────────────┐
+│  Layer 1: Owner Bypass (main instance only)       │  ← short-circuit
+│  Layer 2: Central Auth (single decision point)   │  ← single chokepoint
+│  Layer 3: Tag ownership (callback validates tag) │  ← per-action check
+└──────────────────────────────────────────────────┘
+```
+
+### Guarantees / تضمین‌ها
+
+| EN | FA |
+|---|---|
+| **No security-critical code bypasses central auth** | **هیچ کد حساسی از مجوزدهی مرکزی رد نمی‌شه** |
+| **Replay-proof** — txid / license / 2FA-reset are atomic | **ضد تکرار** — تراکنش، لایسنس، بازنشانی 2FA همگی atomic |
+| **Sessions stored in `chmod 700` directory** | **سشن‌ها در پوشه‌ی `chmod 700`** |
+| **Backups never contain partial state** (validated before send) | **بکاپ‌ها هرگز ناقص نیستند** (قبل از ارسال validate می‌شن) |
+| **SQLite WAL** for crash-safety + concurrent reads | **WAL** برای ایمنی در برابر crash |
+
+---
+
+## 🧪 Tests / تست‌ها
+
+**246 automated tests, 100% pass rate.**
+
+| Suite | Count | Coverage |
+|---|---:|---|
+| `test_panel_v2.py` | 18 | Panel structure, reseller flow |
+| `test_selfbot_features.py` | 57 | All per-account features |
+| `test_antiban.py` | 49 | Anti-ban heuristics |
+| `test_v1_8_0.py` | 44 | v1.8.0 features |
+| `test_backup_e2e.py` | 24 | Full backup-restore round-trip |
+| `test_user_menu.py` | 23 | User menu state machine |
+| `test_backup_scheduler.py` | 13 | Auto-backup scheduler |
+| `test_backup.py` | 12 | Backup internals |
+| `test_support_role.py` | 10 | Support ticket lifecycle |
+| `test_price_apis.py` | 9* | Price-feed API mocks (live-skip) |
+
+\* some require network; graceful in CI
+
+```bash
+# Run all
+for t in test_*.py; do python3 "$t"; done
+```
+
+---
+
+## 📦 Environment / متغیرهای محیطی
+
+### Required / ضروری
+
+| Variable | Example | Source |
+|---|---|---|
+| `API_ID` | `12345` | [my.telegram.org/apps](https://my.telegram.org/apps) |
+| `API_HASH` | `abc123...` | [my.telegram.org/apps](https://my.telegram.org/apps) |
+| `ADMIN_BOT_TOKEN` | `123456:ABC...` | [@BotFather](https://t.me/BotFather) |
+| `ADMIN_ID` | `123456789` | [@userinfobot](https://t.me/userinfobot) |
+
+### Optional / اختیاری
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HELPER_BOT_TOKEN` | — | Read-only FAQ bot (12 topics, FA+EN) |
+| `HELPER_BOT_USERNAME` | `HelpBot` | Without `@` |
+| `SELFBOT_DATA_DIR` | `./data` | Where DB, sessions, backups live |
+| `SELFBOT_DEDICATED_BOT` | `0` | Set to `1` to run as a dedicated bot |
+| `SELFBOT_DEDICATED_BOT_ID` | — | Required if `SELFBOT_DEDICATED_BOT=1` |
+| `SELFBOT_GRANTS_DB_PATH` | — | Path to main instance's `saas.db` (for grants lookup) |
+| `DEBUG` | `0` | Verbose logging |
+
+### External APIs (graceful failure) / APIهای خارجی
+
+| API | Use | Fallback chain |
+|---|---|---|
+| **Binance** · CoinGecko · Bybit · KuCoin | USDT, TON, TRX prices | Each other |
+| **OKX** | Gold (XAU-USDT) | — |
+| **Navasan (GitHub)** | Gold/coin IRR | Manual entry |
+| **Nobitex** · Wallex · Exir · Bit24 | IRR prices | Each other |
+| **TronGrid** | TRC20 transaction verification | — |
+
+> If a price API is unreachable, pricing features degrade gracefully; the bot stays online. / اگه API قیمت قطع باشه، قابلیت قیمت‌گذاری gracefully degrade می‌شه؛ ربات آنلاین می‌مونه.
+
+---
+
+## 🗂️ Project Layout / ساختار پروژه
+
+```
+CiaNet.ir/
+├── main.py              # SaaS bot (single file, ~20k lines)
+├── requirements.txt
+├── versions/            # Stable snapshots for rollback
+│   └── v2.0_panel_redesign.py
+├── test_*.py            # 246 automated tests
+├── sessions/            # Telegram .session files (chmod 700)
+├── data/                # SQLite, config, backups
+│   ├── saas.db
+│   ├── config.json
+│   ├── admin_bot_admins.json
+│   └── backups/
+└── helper_bot/          # Read-only FAQ bot (optional)
+```
+
+---
+
+## 🛠️ Operations / عملیات
+
+### Daily / روزانه
+
+```bash
+# View logs
+sudo journalctl -u selfbot -f
+
+# Check status
+sudo systemctl status selfbot
+
+# Restart
+sudo systemctl restart selfbot
+```
+
+### Backup & Restore / بکاپ و بازیابی
+
+The bot ships a **self-update** command accessible from the admin panel:
+
+1. **Auto backup** — 3× daily, sent to all OWNER/ADMIN
+2. **Manual backup** — `/start` → Admin → System → Backup
+3. **Restore** — OWNER-only, with rollback support
+
+Backups are **validated before delivery** (no partial state ever sent).
+
+### Update / به‌روزرسانی
+
+```bash
+cd /opt/selfbot && git pull
+sudo systemctl restart selfbot
+```
+
+Snapshots in `versions/` allow instant rollback if needed.
+
+---
+
+## 🤝 Contributing / مشارکت
+
+Pull requests welcome. For major changes, open an issue first.
+
+**Code style:** *No comments unless asked* · Type hints required for new functions · Tests for new features.
+
+**قبل از PR:**
+- `for t in test_*.py; do python3 "$t"; done` ← همه پاس بشن
+- تغییرات schema در `init_db()` با `IF NOT EXISTS` اضافه شوند
+
+---
+
+## 📜 License / لایسنس
+
+[MIT](LICENSE) — use, modify, distribute freely. / استفاده، تغییر و توزیع آزاد.
+
+---
+
+## 📋 Changelog / تاریخچه
+
+### v2.0 — Panel Redesign (2026-10-01) / بازطراحی پنل
+
+> **5-section admin hub with Roman-numeral navigation + reseller flow.**
+
+- **Ⅰ** Sales · **Ⅱ** Users · **Ⅲ** Support · **Ⅳ** System · **Ⅴ** Security (OWNER-only)
+- Welcome block shortened from 8 lines to 2
+- New `reseller_applications` table + `_show_reseller_info` flow
+- `UI.section_header`, `UI.NUM`, `UI.microcopy()` helpers
+- 18 new tests (246 total, 100% pass)
+
+### v1.9.3 — Backup Timeout Fix (2026-10-01) / فیکس تایم‌اوت بکاپ
+
+> SQLite backup hung indefinitely on locked sessions.
+
+- 10s timeout in `_snapshot_db_to_temp`
+- 60s timeout in handler + scheduler
+- Better error message to user
+
+### v1.9.0 — Flat Admin Hub (2026-09-xx) / پنل تخت
+
+> All admin ops on one page.
+
+- Replaced 4-level nested menus with single flat hub
+- 12–15 buttons per page, 1-tap reach for daily tasks
+
+### v1.8.0 — User/Reseller/Admin Unification (2026-09-xx) / یکپارچه‌سازی منوها
+
+> One menu for all roles, with role-specific extensions.
+
+- Common top section + privileged extensions below
+- Reseller dashboard reachable from main menu
+
+---
+
+<div align="center">
+
+**CiaNet.ir** · Made with care in Tehran · ساخته‌شده با دقت در تهران
+
+[⬆ Back to top](#top)
+
+</div>
