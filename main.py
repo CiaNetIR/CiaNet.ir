@@ -42,12 +42,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("cianet")
-
 from telethon import TelegramClient, events, Button, errors
 from telethon.tl.functions.account import (
     UpdateProfileRequest, UpdateStatusRequest,
@@ -122,7 +116,7 @@ def _chmod_private(path: str, mode: int = 0o600) -> bool:
     except OSError as e:
         if not getattr(_chmod_private, "_warned", False):
             _chmod_private._warned = True
-            logger.warning(
+            print(f"⚠️ محدودکردنِ دسترسیِ «{path}» ممکن نشد ({e.__class__.__name__}) — "
                   f"اگر چند کاربر روی این سرور هستند، دسترسی را دستی با "
                   f"chmod 600/700 محدود کن.")
         return False
@@ -150,7 +144,7 @@ async def _deliver_via_bot(owner_id: int, text: str) -> bool:
         await bot.client.send_message(owner_id, text)
         return True
     except Exception as e:
-        logger.warning(f"⚠️ [code-delivery] ارسال از طریق ربات ناموفق: {type(e).__name__}")
+        print(f"⚠️ [code-delivery] ارسال از طریق ربات ناموفق: {type(e).__name__}")
         return False
 
 
@@ -181,7 +175,7 @@ def _spawn_bg(coro, label: str = ""):
             return
         exc = t.exception()
         if exc is not None:
-            logger.warning(f"⚠️ [bg:{label or 'task'}] {type(exc).__name__}: {str(exc)[:120]}")
+            print(f"⚠️ [bg:{label or 'task'}] {type(exc).__name__}: {str(exc)[:120]}")
 
     task.add_done_callback(_done)
     return task
@@ -362,7 +356,7 @@ def add_or_update_user(user):
                     last_seen = excluded.last_seen
             ''', (user.id, user.username or "", user.first_name or "", user.last_name or "", now, now))
     except Exception as e:
-        logger.info(f"Error adding user {user.id}: {e}")
+        print(f"Error adding user {user.id}: {e}")
 
 def increment_messages_count(user_id: int):
     with _bot_db(commit=True) as conn:
@@ -1180,7 +1174,7 @@ def _migrate_schema(c) -> None:
     if "subscriptions" in tables:
         check_sql = _table_check_constraint_text(c, "subscriptions")
         if "superseded" not in check_sql:
-            logger.info("🔧 [saas_db] مهاجرت schema: افزودن وضعیت 'superseded' به جدول subscriptions...")
+            print("🔧 [saas_db] مهاجرت schema: افزودن وضعیت 'superseded' به جدول subscriptions...")
             before = c.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]
             c.execute("ALTER TABLE subscriptions RENAME TO subscriptions_old")
             c.execute("""
@@ -1211,13 +1205,13 @@ def _migrate_schema(c) -> None:
                     f"تراکنش برگشت داده شد و جدول قدیمی حفظ شد."
                 )
             c.execute("DROP TABLE subscriptions_old")
-            logger.info("✅ [saas_db] مهاجرت subscriptions با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            print("✅ [saas_db] مهاجرت subscriptions با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
     # ── مهاجرت licenses: افزودن نوع 'admin' به CHECK(license_type IN ...) ──
     if "licenses" in tables:
         check_sql = _table_check_constraint_text(c, "licenses")
         if "'admin'" not in check_sql:
-            logger.info("🔧 [saas_db] مهاجرت schema: افزودن نوع 'admin' به جدول licenses...")
+            print("🔧 [saas_db] مهاجرت schema: افزودن نوع 'admin' به جدول licenses...")
             before = c.execute("SELECT COUNT(*) FROM licenses").fetchone()[0]
             c.execute("ALTER TABLE licenses RENAME TO licenses_old")
             c.execute("""
@@ -1248,13 +1242,13 @@ def _migrate_schema(c) -> None:
                     f"تراکنش برگشت داده شد و جدول قدیمی حفظ شد."
                 )
             c.execute("DROP TABLE licenses_old")
-            logger.info("✅ [saas_db] مهاجرت licenses با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            print("✅ [saas_db] مهاجرت licenses با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
     # ── مهاجرت payments: تغییر نام receipt_file_id → receipt_ref ──
     if "payments" in tables:
         cols = _table_columns(c, "payments")
         if "receipt_ref" not in cols:
-            logger.info("🔧 [saas_db] مهاجرت schema: افزودن ستون receipt_ref به جدول payments...")
+            print("🔧 [saas_db] مهاجرت schema: افزودن ستون receipt_ref به جدول payments...")
             if "receipt_file_id" in cols:
                 # ستون قدیمی وجود دارد — عوض تغییر نام (که در نسخه‌های قدیم
                 # SQLite همیشه پشتیبانی نمی‌شود)، یک ستون جدید اضافه و
@@ -1264,17 +1258,17 @@ def _migrate_schema(c) -> None:
                 c.execute("UPDATE payments SET receipt_ref = receipt_file_id")
             else:
                 c.execute("ALTER TABLE payments ADD COLUMN receipt_ref TEXT")
-            logger.info("✅ [saas_db] مهاجرت payments با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            print("✅ [saas_db] مهاجرت payments با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
     # ── مهاجرت delete_journal: افزودن ستون status (ردیف‌های قدیمی → DELETE_PENDING) ──
     if "delete_journal" in tables:
         cols = _table_columns(c, "delete_journal")
         if "status" not in cols:
-            logger.info("🔧 [saas_db] مهاجرت schema: افزودن ستون status به جدول delete_journal...")
+            print("🔧 [saas_db] مهاجرت schema: افزودن ستون status به جدول delete_journal...")
             c.execute(
                 "ALTER TABLE delete_journal ADD COLUMN status TEXT NOT NULL DEFAULT 'DELETE_PENDING'"
             )
-            logger.info("✅ [saas_db] مهاجرت delete_journal با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            print("✅ [saas_db] مهاجرت delete_journal با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
 
 def init_db() -> None:
@@ -1464,7 +1458,7 @@ def init_db() -> None:
             )
         except sqlite3.IntegrityError:
             c.execute("CREATE INDEX IF NOT EXISTS idx_orders_txid ON orders(txid)")
-            logger.warning(
+            print("⚠️ [saas_db] داده‌ی قدیمیِ orders دارای txid تکراری است — "
                   "ایندکس یکتای txid ساخته نشد (چک پایتونیِ replay فعال است).")
         # v2.0: درخواست‌های نمایندگی (جدول جدا از admins تا تاریخچه‌ی
         # درخواست‌ها، تأیید/رد و توضیحات نگه داشته شود).
@@ -1493,7 +1487,7 @@ def init_db() -> None:
         if "pid" not in _dbot_cols:
             # بازسازیِ حفظ-داده (هرگز DROP مستقیم — دراپِ ساده رکوردهای واقعی
             # ربات‌های اختصاصی را می‌سوزاند): rename → create → copy → verify → drop
-            logger.info("🔧 [saas_db] مهاجرت dedicated_bots: بازسازیِ حفظ-داده برای افزودن pid/expire_date...")
+            print("🔧 [saas_db] مهاجرت dedicated_bots: بازسازیِ حفظ-داده برای افزودن pid/expire_date...")
             c.execute("ALTER TABLE dedicated_bots RENAME TO dedicated_bots_old")
             c.execute(
                 """CREATE TABLE dedicated_bots (
@@ -1525,7 +1519,7 @@ def init_db() -> None:
                 required_not_null=("reseller_id", "owner_id", "token", "created_at", "status"),
             )
             c.execute("DROP TABLE dedicated_bots_old")
-            logger.info("✅ [saas_db] مهاجرت dedicated_bots حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            print("✅ [saas_db] مهاجرت dedicated_bots حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
         # مهاجرت ۲: افزودن وضعیت 'deleted' به CHECK — بازسازیِ حفظ-داده
         # (rename → create → copy → drop) چون SQLite نمی‌تواند CHECK را درجا
@@ -1534,7 +1528,7 @@ def init_db() -> None:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='dedicated_bots'"
         ).fetchone()
         if _dbot_sql and "'deleted'" not in _dbot_sql[0]:
-            logger.info("🔧 [saas_db] مهاجرت dedicated_bots: افزودن وضعیت 'deleted' (بازسازی حفظ-داده)...")
+            print("🔧 [saas_db] مهاجرت dedicated_bots: افزودن وضعیت 'deleted' (بازسازی حفظ-داده)...")
             c.execute("ALTER TABLE dedicated_bots RENAME TO dedicated_bots_old")
             c.execute(
                 """CREATE TABLE dedicated_bots (
@@ -1562,7 +1556,7 @@ def init_db() -> None:
                 required_not_null=("reseller_id", "owner_id", "token", "created_at", "status"),
             )
             c.execute("DROP TABLE dedicated_bots_old")
-            logger.info("✅ [saas_db] مهاجرت dedicated_bots ('deleted') حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            print("✅ [saas_db] مهاجرت dedicated_bots ('deleted') حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
         # v1.8.0: migration — اضافه کردن ستون unit به tickets اگه نبود
         try:
@@ -1651,7 +1645,7 @@ def get_role(user_id: int, owner_id: int) -> str:
     global _owner_id_warning_shown
     if not owner_id and not _owner_id_warning_shown:
         _owner_id_warning_shown = True
-        logger.error(
+        print(
             "🛑 [saas_db] هشدار حیاتی: owner_id نامعتبر (0 یا خالی) است — "
             "یعنی متغیر محیطی ADMIN_ID تنظیم نشده. تا وقتی این مقدار درست "
             "نشود، هیچ‌کس (حتی صاحب اصلی ربات) OWNER تشخیص داده نمی‌شود."
@@ -1842,7 +1836,7 @@ def claim_referral_rewards(user_id: int) -> int:
             create_subscription(user_id, "هدیه دعوت", REFERRAL_REWARD_DAYS)
             granted += 1
         except Exception as e:
-            logger.warning(f"⚠️ [referral] ساخت اشتراک هدیه ناموفق: {type(e).__name__}: {e}")
+            print(f"⚠️ [referral] ساخت اشتراک هدیه ناموفق: {type(e).__name__}: {e}")
             break
     if granted:
         with _conn() as c:
@@ -1935,7 +1929,7 @@ async def delete_user_completely(user_id: int) -> bool:
             if c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone() is None:
                 return False
     except Exception as e:
-        logger.error(f"⛔ [delete_user] PRECHECK (DB اصلی) شکست خورد: {type(e).__name__}: {e}")
+        print(f"⛔ [delete_user] PRECHECK (DB اصلی) شکست خورد: {type(e).__name__}: {e}")
         return False
     try:
         with _db_lock:
@@ -1945,7 +1939,7 @@ async def delete_user_completely(user_id: int) -> bool:
             finally:
                 bd.close()
     except Exception as e:
-        logger.error(f"⛔ [delete_user] PRECHECK (bot_data) شکست خورد — حذف لغو شد: {type(e).__name__}: {e}")
+        print(f"⛔ [delete_user] PRECHECK (bot_data) شکست خورد — حذف لغو شد: {type(e).__name__}: {e}")
         return False
 
     # ── ۲) تراکنشِ واحدِ DB اصلی — همه با هم COMMIT یا همه ROLLBACK ──
@@ -2026,15 +2020,15 @@ async def delete_user_completely(user_id: int) -> bool:
                             (user_id,),
                         )
                 except Exception as e:
-                    logger.warning(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
+                    print(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
             break
         except Exception as e:
             if attempt == 2:
-                logger.error(
+                print(f"⛔ [delete_user] CRITICAL: پاک‌سازی bot_data (self_accounts) بعد از ۳ تلاش "
                       f"شکست خورد — کاربر از DB اصلی حذف شده ولی ردیف legacy باقی است "
                       f"(نه silent): {type(e).__name__}: {e}")
                 return False
-            logger.warning(f"⚠️ [delete_user] bot_data قفل بود — تلاش مجدد ({attempt + 1}/3): {type(e).__name__}: {e}")
+            print(f"⚠️ [delete_user] bot_data قفل بود — تلاش مجدد ({attempt + 1}/3): {type(e).__name__}: {e}")
             await asyncio.sleep(0.3)
 
     # ── ۴) اکانت‌های سلفِ او در config.json: مالکیت گرفته می‌شود (یتیم) ──
@@ -2045,7 +2039,7 @@ async def delete_user_completely(user_id: int) -> bool:
         _orphan_user_selfbots(user_id)
         _config_orphaned = True
     except Exception as e:
-        logger.warning(f"⚠️ [delete_user] یتیم‌سازی اکانت‌های سلف در config با خطا مواجه شد: {type(e).__name__}: {e}")
+        print(f"⚠️ [delete_user] یتیم‌سازی اکانت‌های سلف در config با خطا مواجه شد: {type(e).__name__}: {e}")
     # مرحله‌ی ۴ تمام شد → Journal را جلو ببر (FILES_DELETED)
     if _config_orphaned:
         try:
@@ -2055,7 +2049,7 @@ async def delete_user_completely(user_id: int) -> bool:
                     (user_id,),
                 )
         except Exception as e:
-            logger.warning(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
+            print(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
 
     # ── ۵) توقف فرآیندهای ربات‌های اختصاصیِ revoke‌شده — با تأییدِ مرگ ──
     for bid in owned_dedicated:
@@ -2085,10 +2079,10 @@ async def delete_user_completely(user_id: int) -> bool:
                 if still_alive:
                     # وضعیت DB درست است (revoked) ولی فرآیند هنوز زنده است —
                     # بدون silent گزارش می‌شود تا اپراتور/هلت‌چک بعدی پیگیری کند.
-                    logger.error(
+                    print(f"⛔ [delete_user] CRITICAL: فرآیند ربات اختصاصی #{bid} (pid={pid}) "
                           f"بعد از SIGTERM/SIGKILL هنوز زنده است — بررسی دستی لازم است.")
         except Exception as e:
-            logger.warning(f"⚠️ [delete_user] توقف فرآیند ربات اختصاصی #{bid} ناموفق بود: {type(e).__name__}: {e}")
+            print(f"⚠️ [delete_user] توقف فرآیند ربات اختصاصی #{bid} ناموفق بود: {type(e).__name__}: {e}")
 
     # ── ۶) پایانِ موفق: ردیف journal پاک می‌شود — فقط وقتی همه‌ی مراحل حیاتی
     # (bot_data + config) کامل شده‌اند؛ وگرنه ردیف می‌ماند و Recovery ادامه می‌دهد.
@@ -2097,7 +2091,7 @@ async def delete_user_completely(user_id: int) -> bool:
             with _conn() as c:
                 c.execute("DELETE FROM delete_journal WHERE user_id = ?", (user_id,))
         except Exception as e:
-            logger.warning(f"⚠️ [delete_user] پاک‌سازی ردیف journal ناموفق بود (بی‌ضرر — Recovery دوباره تلاش می‌کند): {type(e).__name__}: {e}")
+            print(f"⚠️ [delete_user] پاک‌سازی ردیف journal ناموفق بود (بی‌ضرر — Recovery دوباره تلاش می‌کند): {type(e).__name__}: {e}")
 
     log_action(None, "delete_user_completely", f"user_id={user_id}, dedicated_revoked={len(owned_dedicated)}")
     return True
@@ -2976,7 +2970,7 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
     except Exception as e:
         # هر خطای دیگری (قفل DB و…) — تراکنش rollback می‌شود و state نیمه‌کاره
         # باقی نمی‌ماند. جزئیات فنی فقط در لاگ سرور.
-        logger.warning(f"⚠️ [saas_db] pay_order_trc20_atomic خطا: {type(e).__name__}: {e}")
+        print(f"⚠️ [saas_db] pay_order_trc20_atomic خطا: {type(e).__name__}: {e}")
         return {"ok": False, "error": "unknown_error"}
     log_action(user_id, "order_paid_trc20", f"order={order_id}, plan={order['plan']}")
     return {"ok": True, "plan": order["plan"], "duration": duration}
@@ -3256,12 +3250,12 @@ def _checkpoint_and_clean(path: str) -> bool:
         finally:
             con.close()
     except Exception as e:
-        logger.warning(
+        print(f"⚠️ [sqlite] WAL checkpoint شکست خورد ({path}): {type(e).__name__}: "
               f"{str(e)[:100]} — WAL/SHM حذف نشدند.")
         return False
     if not row or len(row) < 1 or row[0] != 0:
         busy = row[0] if row else "?"
-        logger.warning(
+        print(f"⚠️ [sqlite] WAL checkpoint ناقص است ({path}): busy={busy} — "
               f"WAL/SHM حذف نشدند.")
         return False
     for suffix in ("-wal", "-shm"):
@@ -3273,7 +3267,7 @@ def _checkpoint_and_clean(path: str) -> bool:
             # sidecar هست ولی حذف نشد — نباید «موفق» گزارش شود؛ در Restore/
             # Rollback این یعنی sidecar کهنه ممکن است روی فایلِ جدید attach
             # شود (فساد / readonly).
-            logger.warning(
+            print(f"⚠️ [sqlite] حذف sidecar {path + suffix} ناموفق: "
                   f"{type(e).__name__}: {str(e)[:100]} — cleanup ناقص اعلام "
                   f"می‌شود.")
             return False
@@ -3379,7 +3373,7 @@ def _checkpoint_and_clean_session(path: str) -> bool:
             try:
                 os.remove(stale)
             except OSError as e:
-                logger.warning(
+                print(f"⚠️ [restore] حذف sidecar کهنه‌ی سشن {stale} ناموفق: "
                       f"{type(e).__name__}: {str(e)[:100]} — تمیزکاری ناقص اعلام "
                       f"می‌شود.")
                 return False
@@ -3391,7 +3385,7 @@ def _checkpoint_and_clean_session(path: str) -> bool:
         try:
             os.remove(journal)
         except OSError as e:
-            logger.warning(f"⚠️ [restore] حذف journal کهنه‌ی سشن {journal} ناموفق: {e}")
+            print(f"⚠️ [restore] حذف journal کهنه‌ی سشن {journal} ناموفق: {e}")
             return False
     return True
 
@@ -3411,7 +3405,7 @@ def _snapshot_session_to_temp(path: str):
     برمی‌گرداند: مسیر snapshot موقت (یا None برای فایلِ غیر-SQLite).
     """
     if not _file_is_sqlite(path):
-        logger.warning(
+        print(f"⚠️ [backup] سشن {path} فایل SQLite معتبر نیست — بایگانی خام "
               f"(بدون snapshot، محتوای غیر-SQLite).")
         return None
     try:
@@ -3485,7 +3479,7 @@ def build_backup_zip(zip_path: str) -> bool:
                 try:
                     db_snaps[arc] = _snapshot_db_to_temp(real)
                 except Exception as e:
-                    logger.warning(f"⚠️ [backup] snapshot دیتابیس {real} ناموفق: {e}")
+                    print(f"⚠️ [backup] snapshot دیتابیس {real} ناموفق: {e}")
                     return False
             elif real.endswith(".session"):
                 snaps = _snapshot_session_to_temp(real)
@@ -3523,7 +3517,7 @@ def build_backup_zip(zip_path: str) -> bool:
             return False
         return True
     except Exception as e:
-        logger.warning(f"⚠️ [backup] ساخت بکاپ ناموفق: {e}")
+        print(f"⚠️ [backup] ساخت بکاپ ناموفق: {e}")
         try:
             os.remove(zip_path)
         except Exception:
@@ -3621,7 +3615,7 @@ def validate_backup_zip(zip_path: str) -> tuple:
                     if not _file_is_sqlite(tmp_db):
                         if db_name.endswith(".session"):
                             # سشن غیر-SQLite: فقط هشدار (بایگانی خام) — بکاپ را رد نمی‌کند
-                            logger.warning(f"⚠️ [backup] سشن {db_name} فایل SQLite معتبر نیست — بایگانی خام.")
+                            print(f"⚠️ [backup] سشن {db_name} فایل SQLite معتبر نیست — بایگانی خام.")
                             continue
                         return False, f"دیتابیس {db_name} فایل SQLite معتبر نیست."
                     if not _db_integrity_ok(tmp_db):
@@ -3841,7 +3835,7 @@ def _remove_stale_restore_files(manifest_files: list,
                 try:
                     _preserve_file(arc, real)
                 except OSError as e:
-                    logger.warning(
+                    print(f"⚠️ [restore] حفظ فایل stale قبل از حذف ناموفق بود: "
                           f"{real}: {e}")
                     errors.append((real, e))
                     return
@@ -3852,7 +3846,7 @@ def _remove_stale_restore_files(manifest_files: list,
                 # BUG B: حذفِ ناموفقِ stale swallow نمی‌شود — خطا ثبت می‌شود و
                 # در پایانِ تابع کلِ عملیات Restore fail اعلام می‌شود (فایلِ
                 # موجودی که حذف نشده یعنی Snapshot واقعیِ مدنظر ساخته نشده).
-                logger.warning(f"⚠️ [restore] حذف فایل stale ناموفق بود: {real}: {e}")
+                print(f"⚠️ [restore] حذف فایل stale ناموفق بود: {real}: {e}")
                 errors.append((real, e))
 
     # فایل‌های سطح‌بالای ردیابی‌شده
@@ -3881,7 +3875,7 @@ def _remove_stale_restore_files(manifest_files: list,
                     try:
                         _preserve_file(arc, full)
                     except OSError as e:
-                        logger.warning(
+                        print(f"⚠️ [restore] حفظ سشن stale قبل از حذف ناموفق "
                               f"بود: {full}: {e}")
                         errors.append((full, e))
                         continue
@@ -3891,7 +3885,7 @@ def _remove_stale_restore_files(manifest_files: list,
                 except OSError as e:
                     # BUG B: مثل _safe_remove — حذفِ ناموفقِ سشنِ stale Restore
                     # را fail می‌کند (نه اینکه فقط لاگ شود و ادامه یابد).
-                    logger.warning(f"⚠️ [restore] حذف سشن stale ناموفق بود: {full}: {e}")
+                    print(f"⚠️ [restore] حذف سشن stale ناموفق بود: {full}: {e}")
                     errors.append((full, e))
     if errors:
         # BUG B: حذفِ ناقصِ stale — مسیرهای حذف‌شده‌ی موفق (removed) همراهِ
@@ -3948,7 +3942,7 @@ def _post_restore_validate(restored_files: list = None) -> tuple:
             if not health["ok"]:
                 return False, f"سشن بازیابی‌شده «{tag}» سالم نیست: {health['error']}"
             if health["sqlite_ok"]:
-                logger.info(f"✅ [SESSION][{tag}][CHECK] سشن بازیابی‌شده سالم است")
+                print(f"✅ [SESSION][{tag}][CHECK] سشن بازیابی‌شده سالم است")
     return True, ""
 
 
@@ -4007,7 +4001,7 @@ def restore_backup_from_zip(zip_path: str, stale_cleanup: bool = True) -> tuple:
             _rollback_from_emergency(emergency_zip, [], [])
         except Exception as re_:
             rollback_err = re_
-            logger.warning(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
+            print(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
         shutil.rmtree(workdir, ignore_errors=True)
         if rollback_err is not None:
             # BUG #4: rollbackِ ناقص هرگز «موفقیتِ بازگشت» اعلام نمی‌شود.
@@ -4226,7 +4220,7 @@ def _do_restore_locked(zip_path: str, workdir: str, emergency_zip: str,
                                      removed_stale, stale_preserve_dir)
         except Exception as re_:
             rollback_err = re_
-            logger.warning(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
+            print(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
         shutil.rmtree(workdir, ignore_errors=True)
         if rollback_err is not None:
             # BUG #4: اگر rollback خودش ناقص ماند، هرگز «وضعیت قبلی
@@ -4310,13 +4304,13 @@ async def restore_backup_from_zip_async(zip_path: str) -> tuple:
                     )
                     if not r_ok:
                         resume_failed.append(f"{t}({r_st})")
-                        logger.warning(
+                        print(f"⚠️ [restore] resume اکانت «{t}» ناموفق بود "
                               f"(status={r_st}) — بقیه‌ی اکانت‌ها ادامه دادند.")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     resume_failed.append(f"{t}({type(e).__name__})")
-                    logger.warning(
+                    print(f"⚠️ [restore] resume اکانت «{t}» با خطا مواجه شد: "
                           f"{type(e).__name__}: {str(e)[:80]} — بقیه‌ی اکانت‌ها "
                           f"ادامه دادند.")
         if resume_failed:
@@ -4858,12 +4852,12 @@ def _validate_saas_env_or_exit() -> None:
     problems = _validate_saas_env()
     if not problems:
         return
-    logger.error("❌ راه‌اندازی متوقف شد — متغیرهای محیطی ربات مدیریت (SaaS) ناقص‌اند:")
+    print("❌ راه‌اندازی متوقف شد — متغیرهای محیطی ربات مدیریت (SaaS) ناقص‌اند:")
     for p in problems:
-        logger.info(f"   - {p}")
-    logger.info("   قبل از اجرا آن‌ها را تنظیم کن، مثلاً:")
-    logger.info('   export ADMIN_BOT_TOKEN="<token>" ADMIN_ID="<owner-id>"')
-    logger.info("   یا از systemd Environment=... / فایل .env استفاده کن.")
+        print(f"   - {p}")
+    print("   قبل از اجرا آن‌ها را تنظیم کن، مثلاً:")
+    print('   export ADMIN_BOT_TOKEN="<token>" ADMIN_ID="<owner-id>"')
+    print("   یا از systemd Environment=... / فایل .env استفاده کن.")
     raise SystemExit(1)
 
 
@@ -5604,7 +5598,7 @@ class AdminBot:
         if self._backup_task is None or self._backup_task.done():
             self._backup_task = asyncio.create_task(self._daily_backup_loop())
 
-        logger.info("🤖 ربات مدیریت (پنل ادمین) با موفقیت روشن شد.")
+        print("🤖 ربات مدیریت (پنل ادمین) با موفقیت روشن شد.")
         return self.client
 
     def _is_admin(self, uid: int) -> bool:
@@ -5635,7 +5629,7 @@ class AdminBot:
             with open(ADMIN_LIST_FILE, "w", encoding="utf-8") as f:
                 json.dump(sorted(ids), f)
         except Exception as e:
-            logger.warning(f"⚠️ [admin_bot] ذخیره‌ی لیست ادمین‌ها ناموفق بود: {e}")
+            print(f"⚠️ [admin_bot] ذخیره‌ی لیست ادمین‌ها ناموفق بود: {e}")
 
     # ─────────────────────────────────────────────────────
     #  منوی اصلی
@@ -6069,7 +6063,7 @@ class AdminBot:
             sessions = await entry.bot.list_sessions()
         except Exception as e:
             # پیامِ عمومی به کاربر؛ جزئیات فقط در لاگ سرور.
-            logger.warning(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}: {e}")
+            print(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}: {e}")
             await event.edit(
                 UI.screen("🔒 دستگاه‌های لاگین‌شده",
                           body=[f"{UI.RED} گرفتن فهرست دستگاه‌ها ناموفق بود. دوباره تلاش کن."]),
@@ -6165,7 +6159,7 @@ class AdminBot:
         try:
             others = [s for s in await entry.bot.list_sessions() if not s["current"]]
         except Exception as e:
-            logger.warning(f"⚠️ [sesstog:{tag}] list_sessions ناموفق: {type(e).__name__}")
+            print(f"⚠️ [sesstog:{tag}] list_sessions ناموفق: {type(e).__name__}")
             await event.answer("گرفتن فهرست دستگاه‌ها ناموفق بود.", alert=True)
             return
         if 0 <= idx < len(others):
@@ -6339,7 +6333,7 @@ class AdminBot:
         try:
             others = [s for s in await entry.bot.list_sessions() if not s["current"]]
         except Exception as e:
-            logger.warning(f"⚠️ [sesswipe:{tag}] list_sessions ناموفق: {type(e).__name__}")
+            print(f"⚠️ [sesswipe:{tag}] list_sessions ناموفق: {type(e).__name__}")
             others = []
         if not others:
             await self._show_sessions(event, tag, flash="دستگاهِ دیگری برای بستن نبود.")
@@ -6394,7 +6388,7 @@ class AdminBot:
             try:
                 n = await entry.bot.terminate_other_sessions()
             except Exception as e:
-                logger.warning(
+                print(f"⚠️ [sessterm:{tag}] terminate_other_sessions ناموفق: "
                       f"{type(e).__name__}: {e}")
                 await self._show_sessions(event, tag, flash="بستنِ دستگاه‌ها ناموفق بود.")
                 return
@@ -6472,7 +6466,7 @@ class AdminBot:
         except Exception as e:
             # هیچ‌وقت پیش نمی‌آید (get_2fa_status خودش exception را مدیریت
             # می‌کند)، ولی fail-safe: هرگز crash نکنیم.
-            logger.warning(f"⚠️ [tfa:{tag}] get_2fa_status استثنا داد: {type(e).__name__}")
+            print(f"⚠️ [tfa:{tag}] get_2fa_status استثنا داد: {type(e).__name__}")
             st = {"ok": False, "error": "api_error"}
 
         body = []
@@ -6491,7 +6485,7 @@ class AdminBot:
             }.get(err_code, "خواندن وضعیت امنیتی ناموفق بود. دوباره تلاش کن.")
             body.append(f"{UI.RED} {msg}")
             # فقط در لاگِ سرور — هرگز به کاربر نمی‌رود.
-            logger.warning(
+            print(f"⚠️ [tfa:{tag}] خواندن 2FA شکست خورد: {err_code} "
                   f"({st.get('error_ident', '?')}) actor={event.sender_id}")
             await event.edit(
                 UI.screen("🔐 رمز دو مرحله‌ای", body=body,
@@ -6671,7 +6665,7 @@ class AdminBot:
 
             # خطای واقعی. پیامِ کوتاه و عمومی به کاربر؛ جزئیات در لاگ.
             err_ident = res.get("error") or res.get("raw") or "unknown"
-            logger.warning(
+            print(f"⚠️ [tfa:{tag}] بازنشانی ناموفق: state=error "
                   f"ident={err_ident} raw={str(res.get('raw'))[:100]} "
                   f"actor={event.sender_id}")
             hintline = ""
@@ -6974,7 +6968,7 @@ class AdminBot:
             # توقف ناقص (تسکِ Runtime هنوز زنده است و سشن هنوز مالِ اوست):
             # هرگز «غیرفعال‌شده» ثبت نمی‌شود — نه disabled، نه disabled_reason،
             # نه save_config؛ فقط پیام خطای واضح به ادمین و برگشت.
-            logger.error(
+            print(f"❌ [_disable_account] توقف کامل اکانت «{tag}» ممکن نشد — "
                   f"Runtime هنوز مالک سشن است؛ غیرفعال‌سازی انجام نشد.")
             await event.edit(
                 f"⚠️ توقف کامل اکانت «{tag}» ممکن نشد (Runtime هنوز در حال بستن/"
@@ -7036,7 +7030,7 @@ class AdminBot:
                 # PATCH 5: تسک هنوز زنده است → سشن را نباید حذف کرد (کلاینتِ
                 # زنده به آن write می‌کند). هیچ تغییری اعمال نشده؛ Intent را
                 # برمی‌داریم و حذف را لغو می‌کنیم.
-                logger.error(
+                print(f"❌ [delete_account] توقف کامل اکانت «{tag}» ممکن نشد — "
                       f"سشن هنوز باز است؛ حذف لغو شد.")
                 journal = _load_account_delete_journal()
                 journal.pop(tag, None)
@@ -7052,7 +7046,7 @@ class AdminBot:
             # دست‌نخورده می‌ماند تا Recovery استارتاپی ادامه دهد و اکانت
             # قابل بازیابی باشد.
             if not _remove_session_files(tag):
-                logger.error(
+                print(f"❌ [delete_account] حذف فایل سشن «{tag}» ناقص ماند — "
                       f"config حذف نشد؛ journal حفظ شد و Recovery استارتاپی "
                       f"ادامه می‌دهد.")
                 await event.edit(
@@ -7067,12 +7061,12 @@ class AdminBot:
             try:
                 self.sb.clear_state(tag)
             except Exception as e:
-                logger.warning(
+                print(f"⚠️ [delete_account] پاک‌سازی state اکانت {tag} ناموفق: "
                       f"{type(e).__name__}: {str(e)[:80]}")
         except Exception as e:
             # نیمه‌حذف — journal عمداً باقی می‌ماند تا Recovery استارتاپی ادامه
             # دهد (حذفِ دائمی بدونِ ثبت Intent هرگز اتفاق نمی‌افتد).
-            logger.error(
+            print(f"❌ [delete_account] حذف اکانت «{tag}» نیمه‌تمام ماند — "
                   f"Recovery استارتاپی ادامه می‌دهد: {type(e).__name__}: "
                   f"{str(e)[:120]}")
             await event.edit(
@@ -7273,7 +7267,7 @@ class AdminBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"⚠️ [admin_bot] خطا در پشتیبان‌گیری روزانه: {e}")
+                print(f"⚠️ [admin_bot] خطا در پشتیبان‌گیری روزانه: {e}")
                 await asyncio.sleep(3600)
 
     @staticmethod
@@ -7326,7 +7320,7 @@ class AdminBot:
                 timeout=60.0,
             )
             if not ok:
-                logger.warning("⚠️ [admin_bot] ساخت بکاپ روزانه ناموفق بود — ارسال نشد.")
+                print("⚠️ [admin_bot] ساخت بکاپ روزانه ناموفق بود — ارسال نشد.")
                 return
             file_size = os.path.getsize(backup_path)
             now = self.sb.iran_now()
@@ -7336,7 +7330,7 @@ class AdminBot:
                 f"🕐 نوبت: {slot} (ایران) — برنامه: {', '.join(f'{int(h):02d}:00' for h in BACKUP_HOURS_IRAN)}"
             )
             recipients = self._backup_recipient_ids()
-            logger.info(f"📤 [admin_bot] ارسال بکاپ {file_size:,} bytes به {len(recipients)} نفر: {recipients}")
+            print(f"📤 [admin_bot] ارسال بکاپ {file_size:,} bytes به {len(recipients)} نفر: {recipients}")
             for admin_id in recipients:
                 try:
                     await asyncio.wait_for(
@@ -7344,17 +7338,17 @@ class AdminBot:
                                               force_document=True),
                         timeout=300,  # ۵ دقیقه
                     )
-                    logger.info(f"✅ [admin_bot] بکاپ به {admin_id} ارسال شد")
+                    print(f"✅ [admin_bot] بکاپ به {admin_id} ارسال شد")
                 except asyncio.TimeoutError:
                     err_msg = f"⏰ ارسال بکاپ خودکار به شما بیش از ۵ دقیقه طول کشید."
-                    logger.warning(f"⚠️ [admin_bot] Timeout ارسال به {admin_id}")
+                    print(f"⚠️ [admin_bot] Timeout ارسال به {admin_id}")
                     try:
                         await self.client.send_message(admin_id, err_msg)
                     except Exception:
                         pass
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
-                    logger.warning(f"⚠️ [admin_bot] ارسال بکاپ به {admin_id} ناموفق: {err}")
+                    print(f"⚠️ [admin_bot] ارسال بکاپ به {admin_id} ناموفق: {err}")
                     # پیام خطا به خود admin بفرست
                     try:
                         await self.client.send_message(
@@ -7364,7 +7358,7 @@ class AdminBot:
                     except Exception:
                         pass
         except Exception as e:
-            logger.warning(f"⚠️ [admin_bot] خطای کلی در بکاپ: {type(e).__name__}: {e}")
+            print(f"⚠️ [admin_bot] خطای کلی در بکاپ: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -7799,7 +7793,7 @@ class AdminBot:
                     entry.bot.enabled = True
                     entry.bot._persist(enabled=True)
                 except Exception as e:
-                    logger.warning(f"⚠️ [{tag}] ثبت enabled=True پس از لاگین ناموفق بود: {type(e).__name__}")
+                    print(f"⚠️ [{tag}] ثبت enabled=True پس از لاگین ناموفق بود: {type(e).__name__}")
 
         # اگر این ویزارد از مسیر «لاگین مستقیم کاربر عادی» شروع شده بود
         # (یعنی data["owner_user_id"] صراحتاً ست شده بود، نه از
@@ -7907,7 +7901,7 @@ class AdminBot:
             try:
                 await self._handle_wizard_input(event, wiz)
             except Exception as e:
-                logger.warning(f"⚠️ [admin_bot] خطا در پردازش ویزارد: {e}")
+                print(f"⚠️ [admin_bot] خطا در پردازش ویزارد: {e}")
                 await event.respond(f"❌ خطای غیرمنتظره: {str(e)[:150]}\nویزارد لغو شد.")
                 await self._cancel_wizard(event.sender_id)
 
@@ -8186,7 +8180,7 @@ class AdminBot:
         except Exception as e:
             # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
             # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
-            logger.warning(f"⚠️ [admin_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
+            print(f"⚠️ [admin_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
             try:
                 await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
             except Exception:
@@ -8231,7 +8225,7 @@ async def run_admin_bot_forever(selfbot_module):
         except Exception as e:
             consecutive_failures += 1
             wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-            logger.warning(f"⚠️ [admin_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
+            print(f"⚠️ [admin_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
             await asyncio.sleep(wait_time)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -8525,53 +8519,15 @@ class SaaSBot:
         # هندلر جداگانه ثبت نمی‌کند (فقط متدهایش مستقیماً فراخوانی می‌شوند)
         self.admin_panel.client = self.client
 
-        # FIX BUG #1: SaaSBot متد _register_handlers نداره.
-        # این متد مال AdminBot هست که در self.admin_panel قرار داره.
-        # بدون این fix، startup با خطای 'SaaSBot' object has no attribute
-        # '_register_handlers' fail می‌شد.
-        self.admin_panel._register_handlers()
+        self._register_handlers()
 
-        # FIX BUG #2: _expiry_loop متد AdminBot هست، نه SaaSBot.
-        # (همان pattern bug #1: _register_handlers)
-        # اگر صدا زده نشه، expiry خودکار غیرفعال می‌شه و
-        # کاربران منقضی پاک نمی‌شن.
         if self._expiry_task is None or self._expiry_task.done():
-            self._expiry_task = asyncio.create_task(
-                self.admin_panel._expiry_loop()
-            )
+            self._expiry_task = asyncio.create_task(self._expiry_loop())
         if self.admin_panel._backup_task is None or self.admin_panel._backup_task.done():
             self.admin_panel._backup_task = asyncio.create_task(self.admin_panel._daily_backup_loop())
 
-        # Auto-update loop: هر ۵ دقیقه چک کنه. اگه آپدیتی بود، graceful
-        # disable همه‌ی اکانت‌ها → pull → restart → re-enable همه → notify.
-        try:
-            from cianet_updater import auto_update_loop, propagation_marker_present, propagate_to_accounts
-            self._update_task = asyncio.create_task(
-                auto_update_loop(
-                    interval=300,
-                    admin_notify_func=self._notify_admin_update,
-                )
-            )
-            # اگه از آپدیت قبلی restart شدیم و اکانت‌ها باید re-enable شن:
-            if propagation_marker_present():
-                async def _post_update_propagate():
-                    await asyncio.sleep(5)  # بذار همه‌چیز ready شه
-                    await propagate_to_accounts(admin_bot=self)
-                self._propagate_task = asyncio.create_task(_post_update_propagate())
-        except Exception as e:
-            logger.warning(f"⚠️ auto-update init failed (continuing): {e}")
-
-        logger.info("🤖 ربات CiaNetSelf (نقش‌محور) با موفقیت روشن شد.")
+        print("🤖 ربات CiaNetSelf (نقش‌محور) با موفقیت روشن شد.")
         return self.client
-
-    async def _notify_admin_update(self, text: str) -> None:
-        """notify admin وقتی آپدیت پیدا شد."""
-        try:
-            owner = OWNER_ID if isinstance(OWNER_ID, int) else (OWNER_ID[0] if OWNER_ID else None)
-            if owner and self.client:
-                await self.client.send_message(owner, text)
-        except Exception as e:
-            logger.info(f"notify update failed: {e}")
 
     def _role(self, user_id: int) -> str:
         return get_role(user_id, OWNER_ID)
@@ -9262,17 +9218,9 @@ class SaaSBot:
             UI.go("📊 آمار تیکت‌ها", "admin_ticket_stats"),
         ]
         # Ⅳ سیستم
-        # دکمه‌ی آپدیت با badge دینامیک: 🔄 آپدیت (3) اگه ۳ commit منتظر باشن
-        try:
-            from cianet_updater import get_pending_commits
-            pending_n = len(get_pending_commits())
-            upd_label = f"🔄 به‌روزرسانی{badge(pending_n)}" if pending_n else "🔄 به‌روزرسانی"
-        except Exception:
-            upd_label = "🔄 به‌روزرسانی"
         sec4 = [
             UI.go("📢 کانال عضویت", "owner_channel_set", primary=True),
             UI.go("💼 کیف پول USDT", "admin_wallet"),
-            UI.go(upd_label, "admin_update"),
             UI.go("💾 بکاپ و بازیابی", "admin_backup"),
         ]
         # Ⅴ امنیت (فقط OWNER)
@@ -9550,10 +9498,10 @@ class SaaSBot:
                     except Exception:
                         pass
             except Exception as e:
-                logger.warning(f"⚠️ [reseller] اطلاع به OWNER: {e}")
+                print(f"⚠️ [reseller] اطلاع به OWNER: {e}")
 
         except Exception as e:
-            logger.warning(f"⚠️ [reseller] ثبت درخواست ناموفق: {e}")
+            print(f"⚠️ [reseller] ثبت درخواست ناموفق: {e}")
             await event.answer("خطا در ثبت درخواست. دوباره امتحان کن.", alert=True)
             return
 
@@ -10097,143 +10045,4023 @@ class SaaSBot:
         )
 
     # ─────────────────────────────────────────────────────
-    #  آپدیت سیستم — Auto-Update & Propagation
+    #  بخش OWNER/ADMIN
     # ─────────────────────────────────────────────────────
 
-    async def _admin_show_update_hub(self, event):
-        """هاب مرکزی آپدیت. وضعیت + commit info + دکمه‌های عملیاتی."""
+    def _filter_users(self, users: list, fkey: str) -> list:
+        """فیلتر لیست کاربران برای صفحه‌ی «کاربران». «بدون اشتراک» و «منقضی»
+        دو فیلتر جدا هستند و «اضافه‌شده‌ی دستی» هم فیلتر مستقل خودش را
+        دارد:
+          all/active/expired/nosub/manual/hasbot/nobot
+        """
+        if fkey == "active":
+            return [u for u in users if self._user_sub_status(u["user_id"])["active"]]
+        if fkey == "expired":
+            return [u for u in users if self._user_sub_status(u["user_id"])["expired"]]
+        if fkey == "nosub":
+            return [u for u in users if self._user_sub_status(u["user_id"])["nosub"]]
+        if fkey == "manual":
+            return [u for u in users if self._user_manual_bot_count(u["user_id"]) > 0]
+        if fkey == "hasbot":
+            return [u for u in users if self._user_selfbot_stats(u["user_id"])[0] > 0]
+        if fkey == "nobot":
+            return [u for u in users if self._user_selfbot_stats(u["user_id"])[0] == 0]
+        return users
+
+    async def _owner_show_users(self, event, fkey: str = "all", page: int = 0):
+        """لیست کاربران به‌صورت کارت (با فیلتر و صفحه‌بندی). هر کارت
+        وضعیت اشتراک (روز باقی‌مانده) و آمار SelfBotهای همان کاربر را
+        نشان می‌دهد و دکمه‌ی «⚙️ مدیریت» به صفحه‌ی مدیریت آن کاربر می‌رود."""
+        all_users = list_all_users()
+        users = self._filter_users(all_users, fkey)
+        buttons = [[UI.go("🔍 جستجوی کاربر", b"user_search_start")]]
+        if not users:
+            await event.edit(
+                "📭 هنوز هیچ کاربری ثبت نشده.",
+                buttons=buttons + [UI.nav_row()],
+            )
+            return
+        PAGE_SIZE = 8
+        total_pages = max(1, (len(users) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(0, min(page, total_pages - 1))
+        shown = users[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+        fkey_label = {"all": "همه", "active": "فعال", "expired": "منقضی",
+                      "nosub": "بدون اشتراک", "manual": "اضافه شده دستی",
+                      "hasbot": "دارای SelfBot", "nobot": "بدون SelfBot"}.get(fkey, fkey)
+        body = []
+        for u in shown:
+            body.extend(self._user_card_lines(u))
+            body.append("")
+            # مسیر بازگشت دیگر در دکمه جاسازی نمی‌شود — پشته‌ی ناوبری
+            # خودش می‌داند کاربر از کدام فیلتر/صفحه آمده است.
+            buttons.append([UI.item(
+                str(u.get("username") or u["user_id"]),
+                self._sub_ui_state(self._user_sub_status(u["user_id"])),
+                f"user_manage:{u['user_id']}",
+            )])
+        lines = [UI.screen(
+            f"👥 کاربران — {fkey_label}",
+            body=body,
+            subtitle=f"صفحه {page + 1} از {total_pages} • {len(users)} کاربر در این فیلتر",
+        )]
+        nav = []
+        if page > 0:
+            nav.append(UI.btn(f"{UI.PREV} قبلی", f"users_list:{fkey}:{page - 1}"))
+        if total_pages > 1:
+            nav.append(UI.btn(f"{page + 1}/{total_pages}", NAV_NOOP))
+        if page < total_pages - 1:
+            nav.append(UI.btn(f"بعدی {UI.NEXT}", f"users_list:{fkey}:{page + 1}"))
+        if nav:
+            buttons.append(nav)
+        # فیلترهای سریع — در همان صفحه‌ی لیست، نه یک لایه‌ی پایین‌تر.
+        # فیلترِ فعال برای کاربری که از قبل در حال مشاهده‌ی آن است، آبیِ
+        # پررنگ می‌گیرد تا بداند کجاست (نه سبز — سبز یعنی «روشن/تایید»).
+        # شمارش‌ها از کشِ آمار می‌آیند (TTL کوتاه) تا هر بار رندرِ لیست،
+        # N بار خواندنِ دیتابیس نکند.
+        st_all = self._users_stats(all_users, use_cache=True)
+        _fcount = {"all": st_all["total"], "active": st_all["active"],
+                   "expired": st_all["expired"], "nosub": st_all["nosub"]}
+        filter_row = [
+            UI.btn(f"همه ({fa_digits(_fcount['all'])})", "users_list:all:0",
+                   style="primary" if fkey == "all" else None),
+            UI.btn(f"فعال ({fa_digits(_fcount['active'])})", "users_list:active:0",
+                   style="primary" if fkey == "active" else None),
+            UI.btn(f"منقضی ({fa_digits(_fcount['expired'])})", "users_list:expired:0",
+                   style="primary" if fkey == "expired" else None),
+            UI.btn("بدون اشتراک", "users_list:nosub:0",
+                   style="primary" if fkey == "nosub" else None),
+        ]
+        buttons.append(filter_row)
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _start_user_search(self, event, back_data: bytes = b"owner_users"):
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_USER_SEARCH, {"back_data": back_data})
+        await event.edit(
+            "🔍 آیدی عددی کاربر یا بخشی از یوزرنیمش (با یا بدون @) را بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _start_section_search(self, event, section: str):
+        """v1.8.0: جستجوی کاربر در یک بخش خاص (direct/resellers/admins)."""
         try:
-            from cianet_updater import get_version_info
-            info = get_version_info()
-            local = (info.get("local_commit") or "unknown")[:8]
-            remote = (info.get("remote_commit") or "unknown")[:8]
-            pending = info.get("pending_commits", [])
-            last_check = info.get("last_check", 0)
-            last_update = info.get("last_update_at", 0)
+            await event.answer()
+        except Exception:
+            pass
+        await self._clear_admin_panel_wizard(event.sender_id)
+        # ویزارد رو با section فعال کن
+        back_data = f"users_section_{section}".encode()
+        self._start_own_wizard(
+            event.sender_id, WIZ_USER_SEARCH,
+            {"back_data": back_data, "section": section},
+        )
+        section_name = {
+            "direct": "اشتراک‌های مستقیم",
+            "resellers": "نمایندگان و زیرمجموعه‌ها",
+            "admins": "ادمین‌ها و اپراتورها",
+        }.get(section, "این بخش")
+        await event.edit(
+            f"🔍 جستجو در بخش «{section_name}»\n\n"
+            "آیدی عددی یا بخشی از یوزرنیم کاربر رو بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
 
-            if pending:
-                status = f"🔄 {len(pending)} آپدیت موجود"
-                status_color = UI.YELLOW
-                body = [
-                    f"**وضعیت:** {status_color} {status}",
-                    "",
-                    f"local:  `{local}`",
-                    f"remote: `{remote}`",
-                    "",
-                    "**Commit‌های جدید:**",
-                    "\n".join(f"  • `{c}`" for c in pending[:8]),
-                ]
-                if len(pending) > 8:
-                    body.append(f"  … و {len(pending) - 8} commit دیگر")
+    async def _show_user_search_results(self, event, query: str, back_data: bytes):
+        results = search_users(query)
+        if not results:
+            await event.edit(
+                f"❌ هیچ کاربری با «{query}» پیدا نشد.",
+                buttons=[[UI.go("🔍 جستجوی دوباره", b"user_search_start")],
+                         UI.nav_row()],
+            )
+            return
+        if len(results) == 1:
+            await self._show_user_management_panel(event, results[0]["user_id"], back_data=back_data)
+            return
+        buttons = []
+        for u in results[:20]:
+            label = u.get("username") or str(u["user_id"])
+            buttons.append([UI.go(f"👤 {label}", f"user_manage:{u['user_id']}".encode())])
+        buttons.append(UI.nav_row())
+        await event.edit(f"🔍 {len(results)} کاربر با «{query}» پیدا شد:", buttons=buttons)
+
+    def _build_user_management_view(self, target_user_id: int, back_data: bytes,
+                                    viewer_role: str = None):
+        """
+        متن و دکمه‌های پنل مدیریت یک کاربر را می‌سازد — بدون اینکه خودش
+        پیامی بفرستد، تا هم از callback (با event.edit) و هم از پیام متنی
+        معمولی (با event.respond، مثلاً بعد از نتیجه‌ی جستجو یا تمدید)
+        قابل استفاده باشد؛ بدون این تفکیک، کد نمایش این پنل باید دوبار
+        (یک‌بار برای edit، یک‌بار برای respond) تکرار می‌شد.
+
+        viewer_role: نقشِ بیننده. برای RESELLER دکمه‌ی مخرب «حذف کامل
+        کاربر» نمایش داده نمی‌شود؛ به‌جایش «🚪 حذف از نمایندگی» می‌آید
+        (فقط جدا کردن reseller_id — بدون حذف تاریخچه).
+
+        بازمی‌گرداند: (text, buttons) یا (None, None) اگر کاربر پیدا نشود.
+        """
+        u = get_user(target_user_id)
+        if not u:
+            return None, None
+        st = self._user_sub_status(target_user_id)
+        role = self._role(target_user_id)
+        name = u.get("username") or f"کاربر {target_user_id}"
+        # وضعیت اشتراک با همان پالتِ سراسری: سبز = فعال، زرد = رو به
+        # اتمام (آخرین روز)، قرمز = منقضی، خاکستری = اصلاً ندارد.
+        if st["active"]:
+            sub_state = "warn" if st["days"] == 0 else "active"
+            sub_line = "امروز آخرین روز" if st["days"] == 0 else f"{st['days']} روز باقی‌مانده"
+        elif st["expired"]:
+            sub_state, sub_line = "expired", "منقضی شده"
+        else:
+            sub_state, sub_line = "none", "بدون اشتراک فعال"
+
+        total, active, stopped = self._user_selfbot_stats(target_user_id)
+
+        # SelfBotهای کاربر — مستقیماً در همین صفحه، نه پشت یک دکمه.
+        # سه موردِ اول نشان داده می‌شوند؛ بقیه پشت «همه SelfBotها». این یک
+        # لایه‌ی کاملِ ناوبری را از مسیرِ روزمره حذف می‌کند.
+        cfg = self.sb.load_config()
+        mine = list(accounts_of_user(cfg, target_user_id).items())
+        shown_bots = mine[:3]
+
+        body = [
+            f"👤 {name}",
+            f"🆔 `{u['user_id']}`",
+            f"🎭 نقش: {role}",
+            f"⭐ پلن: {st['plan'] if st['plan'] else '—'}",
+            f"{UI.state_dot(sub_state)} اشتراک: {sub_line}",
+        ]
+        if u.get("reseller_id"):
+            body.append(f"👥 زیرمجموعه‌ی نماینده: `{u['reseller_id']}`")
+        body.append(UI.SEP)
+        if total:
+            body.append(f"🤖 **SelfBotها** — {fa_digits(active)} فعال"
+                        + (f" · {fa_digits(stopped)} متوقف" if stopped else ""))
+        else:
+            body.append(f"🤖 **SelfBotها**")
+        if not mine:
+            body.append(f"{UI.GRAY} هنوز SelfBotی ندارد")
+        else:
+            for tag, acc in shown_bots:
+                state, note = _acc_ui_state(acc, tag)
+                body.append(f"{UI.state_dot(state)} `{tag}` — {note}")
+            if len(mine) > len(shown_bots):
+                body.append(f"{UI.GRAY} … و {fa_digits(len(mine) - len(shown_bots))} مورد دیگر")
+
+        text = UI.screen("👤 مدیریت کاربر", body=body,
+                         hint="روی هر SelfBot بزن تا کنترل کاملش باز شود.")
+
+        buttons = []
+        for tag, acc in shown_bots:
+            state, _ = _acc_ui_state(acc, tag)
+            buttons.append([UI.item(tag, state, f"user_acc:{target_user_id}:{tag}")])
+        if len(mine) > len(shown_bots):
+            buttons.append([UI.go(f"👥 همه SelfBotها ({fa_digits(len(mine))})",
+                                  f"user_accounts:{target_user_id}")])
+        buttons.append([UI.go("➕ افزودن SelfBot",
+                              f"user_add_bot:{target_user_id}", tone="success")])
+        buttons.append([UI.item("⏳ مدیریت اشتراک", sub_state,
+                                f"user_sub_admin:{target_user_id}")])
+        buttons.append([UI.go("🧾 سفارش‌ها", f"user_orders_admin:{target_user_id}")])
+        if viewer_role == ROLE_RESELLER:
+            # نماینده هرگز «حذف کامل» ندارد — فقط جداسازی مشتری از نمایندگی
+            buttons.append([UI.neutral("حذف از نمایندگی", f"user_unlink_confirm:{target_user_id}")])
+        else:
+            # حذف کامل فقط برای OWNER/ADMIN — جدا از عملیات عادی، پایین صفحه
+            buttons.append([UI.danger("حذف کامل کاربر", f"user_delete_confirm:{target_user_id}")])
+        buttons.append(UI.nav_row())
+        return text, buttons
+
+    async def _show_user_sub_admin(self, event, target_user_id: int, back_data: bytes):
+        """⏳ مدیریت اشتراک یک کاربر — اطلاعات پلن/روز باقی‌مانده + تمدید/لغو.
+        لایسنس از این‌جا ساخته نمی‌شود (فقط از «🎫 لایسنس و دسترسی‌ها»)."""
+        st = self._user_sub_status(target_user_id)
+        if st["active"]:
+            state = "warn" if st["days"] == 0 else "active"
+            body = [
+                f"{UI.state_dot(state)} فعال" + ("  — امروز آخرین روز" if st["days"] == 0 else ""),
+                f"⭐ پلن: {st['plan']}",
+                f"⏳ روز باقی‌مانده: {st['days']}",
+                f"📅 تاریخ پایان: {st['expire']}",
+            ]
+        elif st["expired"]:
+            body = [
+                f"{UI.RED} منقضی شده",
+                f"⭐ پلن: {st['plan']}",
+                f"📅 تاریخ پایان: {st['expire']}",
+            ]
+        else:
+            body = [f"{UI.GRAY} این کاربر اشتراکی ندارد."]
+
+        buttons = [[UI.confirm("تمدید اشتراک", f"user_extend_start:{target_user_id}")]]
+        if st["active"]:
+            buttons.append([UI.danger("لغو اشتراک", f"user_expire:{target_user_id}")])
+        buttons.append(UI.nav_row())
+        await event.edit(
+            UI.screen("⏳ مدیریت اشتراک", body=body,
+                      hint="تمدید از امروز یا از تاریخ پایانِ فعلی حساب می‌شود."),
+            buttons=buttons,
+        )
+
+    async def _show_user_management_panel(self, event, target_user_id: int, back_data: bytes = b"owner_users"):
+        """
+        پنل مدیریت یک کاربر خاص از یک callback (دکمه) — با event.edit روی
+        همان پیام. نقطه‌ی مشترک برای OWNER/ADMIN/RESELLER؛ نمایندگان فقط
+        برای کاربرانی که واقعاً مشتری خودشان هستند این پنل را می‌بینند (چک
+        دسترسی قبل از فراخوانی این تابع انجام می‌شود).
+        """
+        text, buttons = self._build_user_management_view(
+            target_user_id, back_data, viewer_role=self._role(event.sender_id))
+        if text is None:
+            await self._nav_heal(event, "این کاربر پیدا نشد (شاید حذف شده).")
+            return
+        await event.edit(text, buttons=buttons)
+
+    async def _render_user_management_panel_as_message(self, event, target_user_id: int, back_data: bytes):
+        """
+        همان پنل مدیریت کاربر، ولی به‌عنوان یک پیام جدید (event.respond) —
+        برای استفاده از داخل ویزاردهای متنی (جستجو، تمدید دستی) که در آن‌ها
+        رویداد فعلی یک پیام معمولی است، نه یک callback قابل edit.
+        """
+        text, buttons = self._build_user_management_view(
+            target_user_id, back_data, viewer_role=self._role(event.sender_id))
+        if text is None:
+            await event.respond("❌ این کاربر پیدا نشد (شاید حذف شده).")
+            return
+        # این صفحه از مسیرِ روتر نیامده (نتیجه‌ی یک ویزاردِ متنی است)، پس
+        # خودش باید در پشته ثبت شود؛ وگرنه «بازگشت» روی آن، صفحه‌ی قبلِ
+        # شروعِ ویزارد را باز می‌کرد و کاربر یک قدم بیشتر از انتظار عقب
+        # می‌رفت.
+        self.nav.push(event.sender_id, f"user_manage:{target_user_id}")
+        await event.respond(text, buttons=buttons)
+
+    def _build_user_accounts_view(self, target_user_id: int, back_data: bytes):
+        """
+        🤖 لیست SelfBotهای یک کاربر — فقط اکانت‌هایی که owner_user_id آنها
+        برابر همین کاربر است (نه همه‌ی اکانت‌های سیستم). خروجی (text,
+        buttons) تا هم با event.edit (callback) و هم event.respond (بعد از
+        ویزارد ساخت اکانت) قابل استفاده باشد.
+        """
+        u = get_user(target_user_id)
+        name = f"@{u['username']}" if (u and u.get("username")) else f"کاربر {target_user_id}"
+        cfg = self.sb.load_config()
+        mine = accounts_of_user(cfg, target_user_id)
+        if not mine:
+            text = f"🤖 **SelfBotهای {name}**\n\nاین کاربر هنوز هیچ اکانتی ندارد — با «➕ افزودن SelfBot» یکی بساز:"
+            buttons = [
+                [UI.go("➕ افزودن SelfBot", f"user_add_bot:{target_user_id}".encode(), tone="success")],
+                UI.nav_row(),
+            ]
+            return text, buttons
+        body = []
+        buttons = []
+        n_on = 0
+        for tag, acc in mine.items():
+            state, note = _acc_ui_state(acc, tag)
+            n_on += 1 if state == "ready" else 0
+            body.append(f"{UI.state_dot(state)} `{tag}` — {note}")
+            buttons.append([UI.item(tag, state, f"user_acc:{target_user_id}:{tag}")])
+        buttons.append([UI.go("➕ افزودن SelfBot", f"user_add_bot:{target_user_id}", primary=True, tone="success")])
+        buttons.append(UI.nav_row())
+        text = UI.screen(
+            f"🤖 SelfBotهای {name}",
+            body=body,
+            subtitle=f"{UI.GREEN} {n_on} فعال از {len(mine)}",
+            hint="روی هر SelfBot بزن تا کنترل کاملش باز شود.",
+        )
+        return text, buttons
+
+    async def _show_user_accounts(self, event, target_user_id: int, back_data: bytes):
+        text, buttons = self._build_user_accounts_view(target_user_id, back_data)
+        # زنجیره‌ی بازگشت را دیگر اینجا دستی نگه نمی‌داریم — پشته‌ی ناوبری
+        # خودش مسیرِ واقعیِ طی‌شده را دارد.
+        await event.edit(text, buttons=buttons)
+
+    async def _show_user_accounts_as_message(self, event, target_user_id: int, back_data: bytes):
+        text, buttons = self._build_user_accounts_view(target_user_id, back_data)
+        # مثل _render_user_management_panel_as_message: صفحه‌ای که خارج از
+        # روتر رندر می‌شود باید خودش را در پشته ثبت کند.
+        self.nav.push(event.sender_id, f"user_accounts:{target_user_id}")
+        await event.respond(text, buttons=buttons)
+
+    async def _show_user_acc(self, event, target_user_id: int, tag: str):
+        """
+        ⚙️ مدیریت یک SelfBot از داخل مدیریت کاربر — دقیقاً همان هاب اکانت
+        (قابلیت‌ها/ظاهر/ابزارها/اتصال/وضعیت). «بازگشت» به لیست SelfBotهای
+        همان کاربر برمی‌گردد چون پشته‌ی ناوبری مسیر واقعی را نگه داشته.
+
+        مالکیت دوباره چک می‌شود: tag باید متعلق به target_user_id باشد و
+        فقط OWNER/ADMIN یا نماینده‌ی مالکِ آن کاربر می‌تواند وارد شود
+        (چک در دیسپچ قبل از این تابع انجام شده).
+        """
+        cfg = self.sb.load_config()
+        acc = cfg.get(tag)
+        if not account_belongs_to(acc, tag, target_user_id):
+            await self._nav_heal(event, "این اکانت متعلق به این کاربر نیست.")
+            return
+        # مسیرِ بازگشت از پشته می‌آید — دیگر لازم نیست مقصد را اینجا
+        # بسازیم و در callback_data جاسازی کنیم.
+        await self.admin_panel._show_account_detail(event, tag)
+
+    async def _start_user_add_bot(self, event, target_user_id: int, back_data: bytes):
+        """➕ افزودن SelfBot برای یک کاربر خاص — ویزارد لاگین را با مالکِ از
+        پیش تعیین‌شده باز می‌کند تا اکانتِ ساخته‌شده به همین کاربر تعلق
+        بگیرد. دسترسی (OWNER/ADMIN یا نماینده‌ی صاحبِ کاربر) قبل از این
+        تابع در دیسپچ چک شده است."""
+        u = get_user(target_user_id)
+        if not u:
+            await event.answer("این کاربر پیدا نشد.", alert=True)
+            return
+        # ویزارد پنلِ قبلی (اگر وسطِ کار بود) پاک شود تا تداخل نکرده
+        await self._clear_admin_panel_wizard(event.sender_id)
+        await self.admin_panel._start_add_wizard(
+            event, preset_owner_id=target_user_id,
+            preset_data={"add_back": back_data},
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  «🤖 سلف من» — UI اختصاصی کاربر عادی (نه پنل کامل ادمین)
+    # ─────────────────────────────────────────────────────
+
+    def _build_my_bots_view(self, uid: int):
+        """🤖 سلف من — متن و دکمه‌های لیست SelfBotهای خودِ کاربر. مالکیتِ
+        SelfBot معیار نمایش این بخش است (نه اشتراک)؛ دکمه‌ی «➕ افزودن
+        SelfBot» فقط با اشتراک فعال نمایش داده می‌شود."""
+        cfg = self.sb.load_config()
+        mine = accounts_of_user(cfg, uid)
+        total, active, stopped = self._user_selfbot_stats(uid)
+        body = []
+        buttons = []
+        if not mine:
+            body.append(f"{UI.GRAY} هنوز هیچ اکانتی نداری.")
+        else:
+            for tag, acc in mine.items():
+                state, note = _acc_ui_state(acc, tag)
+                body.append(f"{UI.state_dot(state)} `{tag}` — {note}")
+                buttons.append([UI.item(tag, state, f"my_acc:{tag}")])
+        has_sub = self._user_sub_status(uid)["active"]
+        # افزودن SelfBot جدید فقط با اشتراک فعال — هم نمایش، هم چک Backend
+        if has_sub:
+            buttons.append([UI.go("➕ افزودن SelfBot", "user_my_add_bot", primary=True, tone="success")])
+        buttons.append(UI.nav_row())
+        text = UI.screen(
+            "🤖 سلف من",
+            body=body,
+            subtitle=(f"{UI.GREEN} {active} فعال   {UI.RED} {stopped} متوقف"
+                      if total else None),
+            hint=("روی هر اکانت بزن تا قابلیت‌هایش را کنترل کنی."
+                  if total else "برای ساختن اولین سلف، اشتراک فعال لازم است."),
+        )
+        return text, buttons
+
+    async def _show_user_own_bots(self, event):
+        """نمایش «🤖 سلف من» — فقط خودِ کاربر (role USER) و فقط اکانت‌های خودش.
+        scope پنل (owner_filter) هم قبل از هر چیز روی همین کاربر تنظیم می‌شود
+        تا رندر لیست و عملیات بعدی با scope کهنه‌ی کاربرِ دیگری برخورد نکنند."""
+        async with self._panel_lock:
+            self._sync_admin_panel_scope(event.sender_id)
+            text, buttons = self._build_my_bots_view(event.sender_id)
+        await event.edit(text, buttons=buttons)
+
+    async def _show_my_acc(self, event, tag: str):
+        """⚙️ مدیریت یک SelfBot خودِ کاربر — همان هاب کامل مدیریت اکانت
+        (قابلیت‌ها/ظاهر/ابزارها/اتصال/وضعیت/توقف/حذف). «بازگشت» طبق پشته‌ی
+        ناوبری به «سلف من» برمی‌گردد."""
+        cfg = self.sb.load_config()
+        acc = cfg.get(tag)
+        if not account_belongs_to(acc, tag, event.sender_id):
+            await self._nav_heal(event, "این اکانت متعلق به تو نیست یا وجود ندارد.")
+            return
+        async with self._panel_lock:
+            self._sync_admin_panel_scope(event.sender_id)
+            await self.admin_panel._show_account_detail(event, tag)
+
+    async def _user_my_add_bot(self, event):
+        """➕ افزودن SelfBot توسط خودِ کاربر — Backend: فقط با اشتراک فعال.
+        (حذف دکمه از UI کافی نیست؛ callback دستی هم باید رد شود.)"""
+        if not self._user_sub_status(event.sender_id)["active"]:
+            await event.answer("❌ برای افزودن SelfBot باید اشتراک فعال داشته باشید.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        async with self._panel_lock:
+            self._sync_admin_panel_scope(event.sender_id)
+            await self.admin_panel.start_login_wizard_for_user(event, event.sender_id)
+
+
+
+
+    async def _show_user_orders_admin(self, event, target_user_id: int, back_data: bytes):
+        """🧾 سفارش‌های یک کاربر (نمای ادمین) — فقط‌خواندنی."""
+        orders = list_user_orders(target_user_id)
+        if not orders:
+            await event.edit(
+                "🧾 این کاربر هنوز سفارشی ثبت نکرده.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        labels = {
+            ORDER_STATUS_PENDING: "⏳ در انتظار پرداخت",
+            ORDER_STATUS_PAID: "✅ پرداخت شد",
+            ORDER_STATUS_EXPIRED: "❌ منقضی شد",
+            ORDER_STATUS_CANCELLED: "🚫 لغو شد",
+        }
+        lines = [f"🧾 **سفارش‌های کاربر `{target_user_id}`:**\n"]
+        for o in orders[:10]:
+            lines.append(f"`{o['order_no']}` — {o['plan']} — {o['amount_toman']:,} تومان "
+                         f"— {labels.get(o['status'], o['status'])}")
+        await event.edit("\n".join(lines), buttons=[UI.nav_row()])
+
+    async def _owner_show_orders(self, event):
+        """📊 سفارش‌های اخیر کل سیستم (نمای مالی) — فقط‌خواندنی."""
+        orders = list_recent_orders(20)
+        if not orders:
+            await event.edit(
+                "📭 هنوز سفارشی ثبت نشده.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        labels = {
+            ORDER_STATUS_PENDING: "⏳ در انتظار پرداخت",
+            ORDER_STATUS_PAID: "✅ پرداخت شد",
+            ORDER_STATUS_EXPIRED: "❌ منقضی شد",
+            ORDER_STATUS_CANCELLED: "🚫 لغو شد",
+        }
+        lines = ["📊 **سفارش‌های اخیر** (۲۰ تای آخر):\n"]
+        for o in orders:
+            lines.append(
+                f"`{o['order_no']}` — کاربر `{o['user_id']}` — {o['plan']} — "
+                f"{o['amount_toman']:,} تومان — {labels.get(o['status'], o['status'])}"
+            )
+        lines.append("")
+        lines.append("🔍 جزئیات کامل هر سفارش از صفحه‌ی همان کاربر (🧾 سفارش‌ها) قابل مشاهده است.")
+        buttons = [UI.nav_row()]
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _owner_show_payments(self, event):
+        payments = list_pending_payments()
+        if not payments:
+            await event.edit("📭 هیچ پرداخت در‌انتظاری نیست.",
+                              buttons=[UI.nav_row()])
+            return
+        buttons = []
+        lines = ["💳 **پرداخت‌های در انتظار تایید:**\n"]
+        for p in payments[:20]:
+            lines.append(f"#{p['id']} — کاربر `{p['user_id']}` — پلن {p['plan']} — {p['amount']} تومان")
+            buttons.append([
+                UI.confirm(f"تایید #{p['id']}", f"pay_approve:{p['id']}"),
+                UI.danger(f"رد #{p['id']}", f"pay_reject:{p['id']}"),
+            ])
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _resume_user_selfbots(self, user_id: int):
+        """
+        بعد از تمدید/پرداخت موفق: سلف‌بات‌هایی که سرِ انقضای اشتراک متوقف و
+        disabled شده بودند دوباره فعال می‌شوند — هم در config (تا در استارت
+        بعدی هم روشن بمانند) و هم زنده (run_bot برای تگ‌های متوقف‌شده).
+        Idempotent: فقط تگ‌هایی را لمس می‌کند که disabled هستند و هنوز در
+        ACCOUNTS ثبت نشده‌اند.
+        """
+        cfg = self.sb.load_config()
+        to_start = []
+        changed = False
+        for tag, acc in cfg.items():
+            if not account_belongs_to(acc, tag, user_id):
+                continue
+            if not acc.get("disabled"):
+                continue
+            # فقط سلف‌بات‌هایی که دلیلِ قطعیِ خاموش‌شدنشان subscription_expired
+            # است دوباره روشن می‌شوند. disabled_reason=None (legacy — معلوم نیست
+            # چرا خاموش شده، شاید ادمین دستی) هرگز AUTO RESUME نمی‌شود؛ باید
+            # دستی/توسط ادمین روشن شود.
+            reason = acc.get("disabled_reason")
+            if reason != "subscription_expired":
+                continue
+            acc["disabled"] = False
+            acc.pop("disabled_reason", None)
+            changed = True
+            if tag not in self.sb.ACCOUNTS and tag not in self._resume_inflight:
+                to_start.append((tag, acc))
+        if changed:
+            self.sb.save_config(cfg)
+        for tag, acc in to_start:
+            if tag in self._resume_inflight or tag in self.sb.ACCOUNTS:
+                continue
+            self._resume_inflight.add(tag)
+            try:
+                # حیاتی: این تسک یک await شصت‌ثانیه‌ای دارد و در finallyِ
+                # خودش tag را از _resume_inflight برمی‌دارد. اگر وسطِ آن
+                # await توسط GC نابود می‌شد، finally اجرا نمی‌شد و آن تگ
+                # تا ری‌استارتِ پروسه گیر می‌کرد — یعنی آن اکانت دیگر
+                # هرگز خودکار resume نمی‌شد.
+                _spawn_bg(self._start_resumed_bot(tag, acc), f"resume:{tag}")
+            except Exception as e:
+                self._resume_inflight.discard(tag)
+                print(f"⚠️ [resume] ساخت task برای اکانت {tag} ناموفق: "
+                      f"{type(e).__name__}: {e}")
+
+    async def _start_resumed_bot(self, tag: str, acc: dict):
+        """استارتِ واقعیِ یک اکانتِ رزوم‌شده — با قفلِ in-flight تا duplicate
+        نشود و با Runtime Manager مرکزی (اگر اکانت در حال اجراست/در حال
+        شروع است، همان Runtime reuse/await می‌شود — Client دوم ساخته نمی‌شود)."""
+        try:
+            if tag in self.sb.ACCOUNTS:
+                return
+            await ensure_started(tag, acc, caller="resume",
+                                 runner=self.sb.run_bot, wait_seconds=60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # دیگر هرگز silent swallow — فقط تگ + نوع خطا + پیامِ امن (بدون
+            # token/session در لاگ).
+            print(f"⚠️ [resume] استارت اکانت {tag} ناموفق بود: "
+                  f"{type(e).__name__}: {str(e)[:120]}")
+        finally:
+            self._resume_inflight.discard(tag)
+
+    async def _stop_and_disable_user_selfbots(self, user_id: int):
+        """
+        سلف‌بات‌های وابسته به اشتراکِ یک کاربر را متوقف و disabled می‌کند
+        (انقضای اشتراک). سشن/config حذف نمی‌شود — فقط runtime و flag؛ بعد از
+        تمدید، _resume_user_selfbots دوباره فعالشان می‌کند. Idempotent.
+
+        قانون provision_source (مهم‌ترین قانون این نسخه): سلف‌باتِ دستی
+        (provision_source=manual) به هیچ عنوان فقط به‌خاطر انقضای اشتراک
+        متوقف/disabled نمی‌شود — چون مستقل از اشتراک ساخته شده. اکانت‌های
+        legacy (منبعِ نامعلوم) هم حدس زده نمی‌شوند و لمس نمی‌شوند — چون ممکن
+        است دستی باشند. فقط subscription و license (که لایسنسش اشتراکِ
+        فعال/منقضی‌شده دارد) وابسته به اشتراک‌اند و متوقف می‌شوند و دلیل‌شان
+        disabled_reason='subscription_expired' ثبت می‌شود تا Resume اتوماتیک
+        فقط همین‌ها را روشن کند.
+        """
+        cfg = self.sb.load_config()
+        if config_state() != CONFIG_VALID:
+            print(
+                f"⛔ [expiry] توقف سلف‌بات‌های کاربر {user_id} رد شد — "
+                f"config.json خراب است و نباید overwrite شود."
+            )
+            return
+        changed = False
+        for tag, acc in cfg.items():
+            if not account_belongs_to(acc, tag, user_id):
+                continue
+            # فقط اکانت‌هایی که منبعِ قطعیِ وابسته به اشتراک دارند متوقف می‌شوند:
+            # subscription یا license. هر چیز دیگر — manual، legacy (منبعِ نامعلوم)
+            # یا بدون provision_source — حدس زده نمی‌شود و لمس نمی‌شود (ممکن است
+            # دستی/مستقل از اشتراک باشد).
+            if acc.get("provision_source") not in (PROVISION_SUBSCRIPTION, PROVISION_LICENSE):
+                continue
+            await ensure_stopped(tag, "expiry._stop_and_disable_user_selfbots")
+            if not acc.get("disabled"):
+                acc["disabled"] = True
+                acc["disabled_reason"] = "subscription_expired"
+                changed = True
+        if changed:
+            self.sb.save_config(cfg)
+
+    async def _owner_review_payment(self, event, payment_id: int, approve: bool,
+                                    from_notif: bool = False):
+        """from_notif=True یعنی دکمه روی پیامِ اعلانِ رسید زده شده (نه لیستِ
+        بررسی پرداخت‌ها): نتیجه روی همان پیامِ اعلان edit می‌شود تا ادمین
+        بدون رفتن به «بررسی پرداخت‌ها» از همان‌جا تایید/رد کند."""
+        pay = get_payment(payment_id)
+        if not pay:
+            await event.answer("این پرداخت پیدا نشد.", alert=True)
+            if from_notif:
+                try:
+                    await event.edit("❌ این پرداخت پیدا نشد.")
+                except Exception:
+                    pass
             else:
-                status_color = UI.GREEN
-                body = [
-                    f"**وضعیت:** {status_color} ✅ به‌روز",
-                    "",
-                    f"local:  `{local}`",
-                    f"remote: `{remote}`",
-                ]
+                await self._owner_show_payments(event)
+            return
 
-            if last_check:
-                diff = int(time.time() - last_check)
-                if diff < 60:
-                    body.append("\nآخرین چک: همین الان")
-                elif diff < 3600:
-                    body.append(f"\nآخرین چک: {diff // 60} دقیقه پیش")
-                elif diff < 86400:
-                    body.append(f"\nآخرین چک: {diff // 3600} ساعت پیش")
-                else:
-                    body.append(f"\nآخرین چک: {diff // 86400} روز پیش")
-            if last_update:
-                diff = int(time.time() - last_update)
-                if diff < 60:
-                    body.append("آخرین آپدیت: همین الان")
-                elif diff < 3600:
-                    body.append(f"آخرین آپدیت: {diff // 60} دقیقه پیش")
-                elif diff < 86400:
-                    body.append(f"آخرین آپدیت: {diff // 3600} ساعت پیش")
-                else:
-                    body.append(f"آخرین آپدیت: {diff // 86400} روز پیش")
+        # عملیات اتمیک: فقط اگر هنوز pending باشد اثر می‌کند — جلوی این را
+        # می‌گیرد که دو ادمین هم‌زمان روی یک پرداخت هر دو تایید/رد بزنند و
+        # هر دو اثر (مثلاً دو بار create_subscription) اعمال شود.
+        if approve:
+            # تایید: payment + اشتراک + فاکتور در یک تراکنش واحد
+            res = approve_card_payment_atomic(payment_id, event.sender_id)
+            applied = res["applied"]
+            if applied and res["dedicated"]:
+                # ربات اختصاصی: اشتراک ساخته نمی‌شود — درخواستِ در انتظارِ این
+                # نماینده فعال و فرآیندِ جدا برای آن راه‌اندازی می‌شود.
+                await self._activate_dedicated_bot(pay)
+            elif applied:
+                # بعد از پرداخت موفق، اگر سلف‌باتِ کاربر به‌خاطر انقضای قبلی
+                # متوقف شده بود، دوباره فعال می‌شود (رزوم).
+                try:
+                    await self._resume_user_selfbots(res["user_id"])
+                except Exception:
+                    pass
+                try:
+                    await self.client.send_message(
+                        res["user_id"],
+                        f"✅ پرداخت شما تایید شد و اشتراک «{res['plan']}» فعال شد!\n\n"
+                        f"برای اینکه سلف روی اکانت تلگرامت نصب و فعال بشه، باید اکانتت رو لاگین کنی.",
+                        buttons=[[UI.go("🔐 لاگین اکانت", b"user_login_account")]],
+                    )
+                except Exception:
+                    pass
+        else:
+            applied = review_payment_atomic(payment_id, False, event.sender_id)
+        if not applied:
+            await event.answer("این پرداخت قبلاً توسط شخص دیگری بررسی شده.", alert=True)
+            if from_notif:
+                try:
+                    await event.edit("⏳ این پرداخت قبلاً توسط شخص دیگری بررسی شده.")
+                except Exception:
+                    pass
+            else:
+                await self._owner_show_payments(event)
+            return
 
-            buttons = []
-            if pending:
-                buttons.append([UI.confirm(
-                    f"⬇️ اعمال آپدیت ({len(pending)} commit)",
-                    "admin_update_apply",
-                    tone="primary",
-                )])
-            buttons.append([UI.go("🔍 چک مجدد", "admin_update_check")])
-            buttons.append([UI.go("📜 تاریخچه آپدیت‌ها", "admin_update_history")])
+        if not approve:
+            try:
+                await self.client.send_message(
+                    pay["user_id"], "❌ پرداخت شما توسط ادمین رد شد. لطفاً با پشتیبانی تماس بگیرید."
+                )
+            except Exception:
+                pass
+        await event.answer("انجام شد.")
+        if from_notif:
+            # پیامِ اعلان را به نتیجه تبدیل کن — بدون نیاز به رفتن به
+            # «بررسی پرداخت‌ها»؛ دکمه‌ی لیست هم برای مرور بقیه هست.
+            try:
+                await event.edit(
+                    f"{'✅' if approve else '❌'} پرداخت #{pay['id']} "
+                    f"از `{pay['user_id']}` — {'تایید شد' if approve else 'رد شد'}",
+                    buttons=[[UI.go("💳 بررسی پرداخت‌ها", b"owner_payments")]],
+                )
+            except Exception:
+                pass
+        else:
+            await self._owner_show_payments(event)
+
+    # ─────────────────────────────────────────────────────
+    #  ربات اختصاصی (نمایندگی) — فعال‌سازی بعد از تایید پرداخت
+    # ─────────────────────────────────────────────────────
+
+    async def _notify_owner(self, text: str):
+        """اعلان رویدادهای مهم (ربات اختصاصی و ...) به مدیر اصلی."""
+        try:
+            await self.client.send_message(OWNER_ID, text)
+        except Exception:
+            pass
+
+    async def _activate_dedicated_bot(self, pay: dict):
+        """تایید پرداختِ پلن «ربات اختصاصی»: درخواستِ در انتظارِ این نماینده را
+        فعال می‌کند و فرآیند جدا را راه‌اندازی می‌کند."""
+        bot = get_pending_dedicated_bot_for_reseller(pay["user_id"])
+        if not bot:
+            try:
+                await self.client.send_message(
+                    pay["user_id"],
+                    "✅ پرداخت تایید شد، ولی هیچ درخواستِ ربات اختصاصیِ در انتظاری "
+                    "برای تو پیدا نشد. دوباره از منوی نمایندگی «🤖 ربات اختصاصی» رو بزن "
+                    "و توکن + آیدی مالک رو بفرست.",
+                )
+            except Exception:
+                pass
+            return
+        try:
+            bot_dir = _spawn_dedicated_bot(bot["id"], bot["owner_id"], bot["token"])
+            pid = _read_pidfile(bot_dir)
+            expire_days = int(get_setting("dedicated_bot_days", "30"))
+            expire_date = _format_date(datetime.now(timezone.utc) + timedelta(days=expire_days))
+            update_dedicated_bot_status(
+                bot["id"], "active", payment_id=pay["id"], bot_dir=bot_dir,
+                pid=pid, expire_date=expire_date,
+            )
+            log_action(pay["user_id"], "dedicated_bot_activated",
+                       f"bot#{bot['id']} owner={bot['owner_id']} pid={pid}")
+            await self._notify_owner(
+                f"🟢 **ربات اختصاصی ساخته و راه‌اندازی شد**\n"
+                f"ربات: #{bot['id']} | مالک: `{bot['owner_id']}` | "
+                f"نماینده: `{pay['user_id']}` | انقضا: {expire_date}"
+            )
+            try:
+                await self.client.send_message(
+                    pay["user_id"],
+                    f"🤖 **ربات اختصاصی #{bot['id']} ساخته و راه‌اندازی شد!**\n\n"
+                    f"مالک: `{bot['owner_id']}` — با تمام قابلیت‌های ادمین اصلی.\n"
+                    "مالک می‌تونه /start رو توی ربات جدیدش بزنه و از همه‌چیز استفاده کنه.",
+                )
+                await self.client.send_message(
+                    bot["owner_id"],
+                    "🤖 **ربات اختصاصی تو ساخته شد!**\n"
+                    "از /start استفاده کن — پنل کامل مدیریت سلف‌بات در اختیارته.",
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            update_dedicated_bot_status(bot["id"], "rejected")
+            log_action(pay["user_id"], "dedicated_bot_failed", str(e)[:200])
+            try:
+                await self.client.send_message(
+                    pay["user_id"],
+                    f"❌ ساخت ربات اختصاصی با خطا مواجه شد: {str(e)[:120]} — با پشتیبانی تماس بگیر.",
+                )
+            except Exception:
+                pass
+
+    async def _start_dedicated_bot_wizard(self, event):
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_DEDICATED_TOKEN, {})
+        price = dedicated_bot_price()
+        await event.edit(
+            "🤖 **ساخت ربات اختصاصی**\n\n"
+            f"هزینه: **{price:,} تومان** (یک‌بار)\n\n"
+            "توکن ربات رو از @BotFather بگیر و اینجا بفرست (قالب: `123456789:AAF...`):",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _validate_bot_token(self, token: str):
+        """بررسی زنده‌ی توکن با تلگرام. خروجی: (ok: bool, info: str)."""
+        try:
+            api_id, api_hash = _first_account_creds(self.sb.load_config())
+            from telethon.sessions import StringSession
+            temp = TelegramClient(StringSession(), api_id, api_hash)
+            await asyncio.wait_for(temp.start(bot_token=token), timeout=20)
+            me = await temp.get_me()
+            try:
+                await temp.disconnect()
+            except Exception:
+                pass
+            username = getattr(me, "username", None)
+            return True, f"@{username}" if username else f"bot id {getattr(me, 'id', '?')}"
+        except Exception as e:
+            return False, str(e)[:120]
+
+    async def _owner_show_dedicated_bots(self, event):
+        bots = list_dedicated_bots(limit=20)
+        if not bots:
+            await event.edit("🤖 هنوز هیچ ربات اختصاصی‌ای ثبت نشده.",
+                             buttons=[UI.nav_row()])
+            return
+        body = []
+        buttons = []
+        n_ok = 0
+        for b in bots:
+            state = DEDICATED_UI_STATE.get(b["status"], "off")
+            alive = _process_alive(b.get("pid") or 0)
+            # «active در دیتابیس ولی پروسه مرده» مهم‌ترین حالتِ خطاست و باید
+            # قرمز دیده شود، نه سبز.
+            if b["status"] == "active" and not alive:
+                state, suffix = "error", " — پروسه خاموش است"
+            else:
+                suffix = ""
+                n_ok += 1 if state == "active" else 0
+            body.append(f"{UI.state_dot(state)} #{b['id']} — مالک `{b['owner_id']}` — "
+                        f"نماینده `{b['reseller_id']}` — {b['status']}{suffix}")
+            buttons.append([UI.item(f"مدیریت #{b['id']}", state, f"dedicated_manage:{b['id']}")])
+        buttons.append(UI.nav_row())
+        await event.edit(
+            UI.screen("🤖 ربات‌های اختصاصی", body=body,
+                      subtitle=f"{UI.GREEN} {n_ok} سالم از {len(bots)}"),
+            buttons=buttons,
+        )
+
+    async def _owner_show_dedicated_bot_detail(self, event, bot_id: int):
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("این ربات اختصاصی پیدا نشد.", alert=True)
+            await self._owner_show_dedicated_bots(event)
+            return
+        pid = b.get("pid") or _read_pidfile(b.get("bot_dir") or "")
+        alive = _process_alive(pid)
+        state = DEDICATED_UI_STATE.get(b["status"], "off")
+        if b["status"] == "active" and not alive:
+            state = "error"
+        body = [
+            f"{UI.state_dot(state)} وضعیت: {b['status']}",
+            f"👤 مالک: `{b['owner_id']}`",
+            f"🤝 نماینده: `{b['reseller_id']}`",
+        ]
+        if b["status"] == "active":
+            body.append(f"{UI.dot(alive)} پروسه: "
+                        + (f"در حال اجرا (PID {pid})" if alive else "خاموش — فرآیند مرده"))
+            if b.get("expire_date"):
+                try:
+                    days = (_parse_date(b["expire_date"]) - _parse_date(_now_date())).days
+                    body.append(f"{UI.state_dot('warn' if days <= 3 else 'active')} "
+                                f"باقی‌مانده: **{days} روز** (تا {b['expire_date']})")
+                except Exception:
+                    body.append(f"⏳ انقضا: {b['expire_date']}")
+        else:
+            body.append(f"{UI.state_dot('paused' if not alive else 'warn')} پروسه: "
+                        + ("متوقف" if not alive else "هنوز زنده است"))
+            if b.get("expire_date"):
+                body.append(f"⏳ انقضا ثبت‌شده: {b['expire_date']}")
+        buttons = []
+        # مجوزِ حساس — OWNER می‌بیند که این ربات آیا ابزارهای امنیتی
+        # اکانت را در اختیار دارد یا نه، و می‌تواند آن را بدهد/بگیرد.
+        if b["status"] in ("active", "stopped", "revoked"):
+            sec_on = capability_grant_exists(b["owner_id"], CAP_ACCOUNT_SECURITY,
+                                             SCOPE_DEDICATED_BOT, str(b["id"]))
+            body.append(f"{UI.dot(sec_on)} مجوز امنیت اکانت: "
+                        + ("فعال" if sec_on else "غیرفعال"))
+            buttons.append([UI.go("🔐 مجوز امنیت اکانت", f"dbcap:{b['id']}")])
+        if b["status"] == "active":
+            buttons.append([UI.neutral("توقف موقت", f"dedicated_toggle:{b['id']}")])
+        elif b["status"] in ("stopped", "revoked"):
+            buttons.append([UI.confirm("اجرای دوباره", f"dedicated_toggle:{b['id']}")])
+        if b["status"] in ("active", "stopped", "revoked"):
+            buttons.append([
+                UI.go("➕ تمدید", f"dedicated_extend:{b['id']}", tone="success"),
+                UI.go("🔍 بررسی سلامت", f"dedicated_health:{b['id']}"),
+            ])
+            if b["status"] != "revoked":
+                buttons.append([UI.danger("لغو دسترسی (revoke)", f"dedicated_revoke:{b['id']}")])
+        buttons.append(UI.nav_row())
+        await event.edit(
+            UI.screen(f"🤖 ربات اختصاصی #{b['id']}", body=body),
+            buttons=buttons,
+        )
+
+    async def _dedicated_bot_toggle(self, event, bot_id: int):
+        """توقف/اجرای دوباره‌ی ربات اختصاصی."""
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        if b["status"] == "active":
+            pid = b.get("pid") or _read_pidfile(b.get("bot_dir") or "")
+            stopped = await _stop_process_by_pid(pid)
+            update_dedicated_bot_status(bot_id, "stopped")
+            log_action(event.sender_id, "dedicated_bot_stopped", f"bot#{bot_id} pid={pid}")
+            msg = "⏸ ربات اختصاصی متوقف شد." if stopped else \
+                "⏸ ربات متوقف علامت‌گذاری شد (فرآیندی در جریان نبود)."
+            await event.answer(msg)
+            try:
+                await self.client.send_message(
+                    b["owner_id"], "⏸ ربات اختصاصی تو متوقف شد. در صورت نیاز با پشتیبانی تماس بگیر."
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                bot_dir = _spawn_dedicated_bot(bot_id, b["owner_id"], b["token"])
+                pid = _read_pidfile(bot_dir)
+                update_dedicated_bot_status(
+                    bot_id, "active", bot_dir=bot_dir, pid=pid,
+                    expire_date=b.get("expire_date") or _format_date(
+                        datetime.now(timezone.utc)
+                        + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
+                    ),
+                )
+                log_action(event.sender_id, "dedicated_bot_restarted", f"bot#{bot_id} pid={pid}")
+                await event.answer("▶️ ربات اختصاصی دوباره راه‌اندازی شد.")
+                try:
+                    await self.client.send_message(
+                        b["owner_id"], "▶️ ربات اختصاصی تو دوباره راه‌اندازی شد."
+                    )
+                except Exception:
+                    pass
+            except Exception as e:
+                await event.answer(f"❌ راه‌اندازی مجدد ناموفق بود: {str(e)[:100]}", alert=True)
+        await self._owner_show_dedicated_bot_detail(event, bot_id)
+
+    async def _dedicated_bot_revoke(self, event, bot_id: int):
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        await event.edit(
+            f"⚠️ ربات اختصاصی #{bot_id} برای همیشه لغو شود؟\n"
+            f"فرآیندش متوقف و وضعیت روی revoke می‌رود. (دیتای پوشه‌اش حفظ می‌شود)\n\n"
+            f"یا اگر می‌خوای **همه‌چیز** پاک شود، «حذف کامل» را بزن "
+            f"(پوشه، دیتابیس، سشن و لاگ‌های ربات هم حذف می‌شود — غیرقابل‌بازگشت).",
+            buttons=[
+                [UI.danger("بله، لغو کن", f"dedicated_revoke_go:{bot_id}".encode())],
+                [UI.danger("حذف کامل", f"dedicated_delete_go:{bot_id}")],
+                [UI.neutral("نه، برگرد", NAV_BACK)],
+            ],
+        )
+
+    async def _dedicated_bot_revoke_go(self, event, bot_id: int):
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        pid = b.get("pid") or _read_pidfile(b.get("bot_dir") or "")
+        await _stop_process_by_pid(pid)
+        update_dedicated_bot_status(bot_id, "revoked")
+        log_action(event.sender_id, "dedicated_bot_revoked", f"bot#{bot_id}")
+        await self._notify_owner(
+            f"⛔ **ربات اختصاصی لغو شد**\n"
+            f"ربات: #{bot_id} | مالک: `{b['owner_id']}` | توسط: `{event.sender_id}`"
+        )
+        await event.answer("⛔ ربات اختصاصی لغو شد.")
+        try:
+            await self.client.send_message(
+                b["owner_id"],
+                "⛔ ربات اختصاصی تو لغو (revoke) شد و دیگر در دسترس نیست. با پشتیبانی تماس بگیر.",
+            )
+        except Exception:
+            pass
+        await self._owner_show_dedicated_bots(event)
+
+    async def _dedicated_bot_delete_go(self, event, bot_id: int):
+        """حذف کامل ربات اختصاصی: فرآیند + پوشه‌ی dedicated_bots/<id>/ (دیتابیس/سشن/لاگ)."""
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        pid = b.get("pid") or _read_pidfile(b.get("bot_dir") or "")
+        await _stop_process_by_pid(pid)
+        # پاک‌سازی فقط مسیرِ اختصاصیِ خودِ این ربات — نه هیچ مسیر دیگری.
+        # چکِ امنیتی: مسیر ثبت‌شده باید دقیقاً برابر dedicated_bots/<id>/ باشد
+        # تا حتی اگر bot_dir در DB دستکاری شده باشد، جای اشتباهی پاک نشود.
+        bot_dir = b.get("bot_dir")
+        expected = os.path.join(
+            _project_dir(), "dedicated_bots", str(bot_id)
+        )
+        if bot_dir and os.path.abspath(bot_dir) == expected and os.path.isdir(bot_dir):
+            shutil.rmtree(bot_dir, ignore_errors=True)
+        update_dedicated_bot_status(bot_id, "deleted")
+        log_action(event.sender_id, "dedicated_bot_deleted", f"bot#{bot_id}")
+        await self._notify_owner(
+            f"🗑 **ربات اختصاصی حذف کامل شد**\n"
+            f"ربات: #{bot_id} | مالک: `{b['owner_id']}` | توسط: `{event.sender_id}` | "
+            f"پوشه و دیتابیس‌هایش پاک شد"
+        )
+        await event.answer("🗑 ربات اختصاصی به‌طور کامل حذف شد.")
+        try:
+            await self.client.send_message(
+                b["owner_id"],
+                "🗑 ربات اختصاصی تو به‌طور کامل حذف شد (دیتا و دیتابیس‌هایش پاک شد). "
+                "با پشتیبانی تماس بگیر.",
+            )
+        except Exception:
+            pass
+        await self._owner_show_dedicated_bots(event)
+
+    async def _dedicated_bot_extend_start(self, event, bot_id: int):
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_DEDICATED_EXTEND_DAYS, {"bot_id": bot_id})
+        await event.edit(
+            f"➕ چند روز به ربات اختصاصی #{bot_id} اضافه شود؟ یک عدد بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _dedicated_bot_health(self, event, bot_id: int):
+        """بررسی سلامت: (۱) زنده‌بودن پروسه (۲) پاسخ‌دادن توکن به تلگرام."""
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        pid = b.get("pid") or _read_pidfile(b.get("bot_dir") or "")
+        alive = _process_alive(pid)
+        ok_token, info = await self._validate_bot_token(b["token"])
+        if alive and ok_token:
+            msg = f"🟢 **ربات #{bot_id} سالم است**\nپروسه: زنده (PID {pid})\nتوکن: پاسخ می‌دهد ({info})"
+        elif not alive:
+            msg = f"🔴 **ربات #{bot_id} خاموش است**\nپروسه‌ای در جریان نیست. با «▶️ اجرای دوباره» راه‌اندازی کن."
+        else:
+            msg = f"🟡 **ربات #{bot_id} نیمه‌سالم است**\nپروسه زنده است ولی توکن به تلگرام پاسخ نمی‌دهد ({info})."
+        await event.edit(
+            msg,
+            buttons=[UI.nav_row()],
+        )
+
+    async def _owner_show_channel_settings(self, event):
+        current = (get_setting("required_channel") or "").strip()
+        is_owner = self._role(event.sender_id) == ROLE_OWNER
+        title = (get_setting("required_channel_title") or "").strip()
+        blocked_n = get_setting("gate_blocked_count", "0")
+        rejoined_n = get_setting("gate_rejoined_count", "0")
+        if current:
+            name_line = f"📢 {title} (`{current}`)" if title else f"📢 کانال: `{current}`"
+            text = (f"**کانال اجباری عضویت:**\n{name_line}\n\n"
+                    "همه (به‌جز ادمین اصلی) برای استفاده از ربات باید عضو این کانال باشن.\n\n"
+                    f"📊 آمار گیت: {blocked_n} بسته‌شدن | {rejoined_n} دوباره‌عضویت")
+            buttons = [[UI.go("🔍 بررسی کانال", b"owner_channel_check")]]
+            if is_owner:
+                buttons.append([UI.go("✏️ تغییر کانال", b"owner_channel_set")])
+                buttons.append([UI.danger("حذف شرط عضویت", "owner_channel_clear")])
             buttons.append(UI.nav_row())
+        else:
+            text = ("📢 **کانال اجباری عضویت:** تنظیم نشده — همه بدون شرط "
+                    "می‌توانند از ربات استفاده کنند.")
+            buttons = []
+            if is_owner:
+                buttons.append([UI.go("📢 تنظیم کانال", b"owner_channel_set")])
+            buttons.append(UI.nav_row())
+        await event.edit(text, buttons=buttons)
 
-            await event.edit(
-                UI.screen(
-                    "🔄 به‌روزرسانی سیستم",
-                    body=body,
-                    subtitle="هر آپدیت از GitHub. polling هر ۵ دقیقه + watchdog.",
-                    hint="آپدیت اتوماتیک است؛ این پنل برای کنترل دستی است.",
-                ),
-                buttons=buttons,
-            )
-        except Exception as e:
-            await event.edit(
-                UI.screen(
-                    "🔄 به‌روزرسانی سیستم",
-                    body=[f"❌ خطا: {e}"],
-                    subtitle="",
-                ),
-                buttons=UI.nav_row(),
-            )
+    async def _owner_check_channel(self, event):
+        """بررسی زنده‌ی کانال ذخیره‌شده با تلگرام — بدون تغییر چیزی."""
+        channel = (get_setting("required_channel") or "").strip()
+        is_owner = self._role(event.sender_id) == ROLE_OWNER
+        if not channel:
+            buttons = []
+            if is_owner:
+                buttons.append([UI.go("📢 تنظیم کانال", b"owner_channel_set")])
+            await event.edit("📢 کانالی تنظیم نشده — اول یکی تنظیم کن.", buttons=buttons)
+            return
+        await event.edit("🔄 در حال بررسی کانال با تلگرام…")
+        ok, info, norm = await self._resolve_channel(channel)
+        if ok:
+            # خود-ترمیمی عنوان: اگر کانال بعد از ذخیره تغییر نام داده باشد،
+            # عنوانِ resolveشده ذخیره می‌شود تا کارت شیشه‌ای و صفحه‌ی تنظیمات
+            # نامِ تازه را نشان دهند — بدون داده‌ی کهنه.
+            stored_title = (get_setting("required_channel_title") or "").strip()
+            healed = bool(stored_title) and stored_title != info
+            if healed:
+                set_setting("required_channel_title", info)
+            text = (f"✅ **کانال پیدا شد و معتبر است:**\n\n"
+                    f"📢 {info}\nhttps://t.me/{norm}"
+                    + ("\n\n_تغییرِ نامِ کانال تشخیص داده شد و عنوان به‌روز شد._"
+                       if healed else ""))
+        else:
+            text = (f"❌ **کانال پیدا نشد یا قابل دسترسی نیست!**\n\n"
+                    f"`{channel}`\n({info})\n\n"
+                    "⚠️ گیت عضویت fail-closed است — همه غیر از ادمین اصلی "
+                    "فعلاً بسته‌اند. کانال درست رو تنظیم کن.")
+        buttons = []
+        if is_owner:
+            buttons.append([UI.go("✏️ تغییر کانال", b"owner_channel_set")])
+        buttons.append(UI.nav_row())
+        await event.edit(text, buttons=buttons)
 
-    async def _admin_update_check(self, event):
-        """چک دستی برای آپدیت (بدون apply)."""
+    async def _start_channel_set(self, event):
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_SET_CHANNEL, {})
+        await event.edit(
+            "یوزرنیم کانال رو بفرست (مثلاً `@MyChannel` یا `mychannel` یا لینک t.me):\n\n"
+            "⚠️ کانال باید **عمومی** باشه تا بتونیم عضویت رو چک کنیم.",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _owner_show_tickets(self, event):
+        tickets = list_open_tickets()
+        if not tickets:
+            await event.edit("📭 هیچ تیکت بازی نیست.",
+                              buttons=[UI.nav_row()])
+            return
+        buttons = []
+        lines = ["📨 **تیکت‌های باز:**\n"]
+        for t in tickets[:20]:
+            lines.append(f"تیکت #{t['id']} — کاربر `{t['user_id']}`")
+            buttons.append([
+                UI.go(f"💬 پاسخ به #{t['id']}", f"ticket_reply:{t['id']}".encode()),
+                UI.go(f"🔒 بستن #{t['id']}", f"ticket_close:{t['id']}".encode()),
+            ])
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _owner_ticket_close(self, event, ticket_id: int):
+        """🔒 بستن تیکت — مرحله‌ی تأیید. فقط OWNER/ADMIN؛ فقط تیکتِ باز."""
+        t = get_ticket(ticket_id)
+        if not t:
+            await event.answer("تیکت پیدا نشد.", alert=True)
+            return
+        if t["status"] != "open":
+            await event.edit(
+                "⏳ این تیکت قبلاً بسته شده است.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        await event.edit(
+            f"⚠️ **بستن تیکت #{ticket_id}**\n\n"
+            f"آیا مطمئنی می‌خواهی این تیکت را ببندی؟",
+            buttons=[
+                [UI.confirm("بله، ببند", f"ticket_close_go:{ticket_id}".encode()),
+                 UI.neutral(UI.L_CANCEL, NAV_BACK)],
+            ],
+        )
+
+    async def _owner_ticket_close_go(self, event, ticket_id: int):
+        t = get_ticket(ticket_id)
+        if not t or t["status"] != "open":
+            await event.edit(
+                "⏳ این تیکت قبلاً بسته شده است.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        close_ticket(ticket_id)
+        # اطلاع به کاربرِ صاحب تیکت
         try:
-            from cianet_updater import get_pending_commits
-            pending = get_pending_commits()
-            if pending:
-                msg = f"🔄 {len(pending)} آپدیت موجود. به هاب برگرد و «اعمال آپدیت» رو بزن."
+            await self.client.send_message(
+                t["user_id"], f"✅ تیکت #{ticket_id} توسط پشتیبانی بسته شد.\n\n"
+                               f"اگر باز هم سوالی داشتی، از «📞 پشتیبانی» تیکت جدیدی باز کن."
+            )
+        except Exception:
+            pass
+        await self._owner_show_tickets(event)
+
+    async def _owner_start_ticket_reply(self, event, ticket_id: int):
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_OWNER_TICKET_REPLY, {"ticket_id": ticket_id})
+        msgs = list_ticket_messages(ticket_id)
+        history = "\n".join(
+            f"{'👤' if m['sender_role'] == 'user' else '🛠'} {m['text']}" for m in msgs[-10:]
+        )
+        await event.edit(
+            f"💬 **تاریخچه‌ی تیکت #{ticket_id}:**\n\n{history}\n\nپاسخت رو بفرست:",
+            buttons=[
+                [UI.go("🔒 بستن تیکت", f"ticket_close:{ticket_id}".encode()),
+                 UI.neutral(UI.L_CANCEL, NAV_BACK)],
+            ],
+        )
+
+    async def _owner_show_backup(self, event):
+        """💾 Backup — بکاپ کامل و معتبر پروژه را برای OWNER می‌فرستد.
+
+        v1.9.2: استفاده از _panel_lock برای جلوگیری از race condition.
+        قبلاً اگه کاربر دوبار روی دکمه می‌زد (یا تأخیر شبکه)، دو بکاپ
+        هم‌زمان ساخته می‌شد و ممکن بود فایل‌های ZIP خراب شوند یا send_file
+        دو بار صدا زده بشه.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER به Backup دسترسی دارد.", alert=True)
+            return
+        if self._panel_lock.locked():
+            await event.answer("⏳ یک عملیات پنل در حال اجراست؛ کمی صبر کن.", alert=True)
+            return
+        async with self._panel_lock:
+            await self._owner_show_backup_locked(event)
+
+    async def _owner_show_backup_locked(self, event):
+        """بدنه‌ی واقعی _owner_show_backup زیر _panel_lock."""
+        await event.answer("⏳ در حال ساخت Backup...")
+
+        # فیکس مهم v1.7.0: قبل از بکاپ، مطمئن می‌شیم که DB schema آماده‌ست.
+        # اگه main.py به‌تازگی آپدیت شده باشه و init_db هنوز اجرا نشده باشه،
+        # validate_backup_zip شکست می‌خوره. اینجا init_db رو فراخوانی می‌کنیم
+        # تا DB آماده باشه.
+        try:
+            await asyncio.to_thread(init_db)
+        except Exception as e:
+            print(f"⚠️ [backup] init_db در حین بکاپ خطا داد: {e}")
+
+        backup_path = os.path.join(tempfile.gettempdir(), _backup_file_name())
+        try:
+            # v1.9.3: timeout ۶۰ ثانیه. اگه session قفل باشه، sqlite.backup()
+            # بی‌نهایت hang می‌کرد. callback تلگرام بعد از ۳۰ ثانیه بسته
+            # می‌شد و کاربر فکر می‌کرد بکاپ نرفت.
+            ok = await asyncio.wait_for(
+                asyncio.to_thread(build_backup_zip, backup_path),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            print(f"⚠️ [backup] build_backup_zip بیش از ۶۰ ثانیه طول کشید — احتمالاً Session قفل است")
+            ok = False
+        except Exception as e:
+            print(f"⚠️ [backup] build_backup_zip exception: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            ok = False
+        if not ok:
+            # v1.9.3: پیام دقیق‌تر + پیشنهاد حل مشکل قفل سشن.
+            # قبلاً همیشه یه پیام عمومی می‌فرستاد. حالا اگه Runtime سشن‌ها
+            # فعال باشن، راهنمای توقف اکانت‌ها رو می‌ده.
+            active = self._active_runtime_tags_safe() if hasattr(self, "_active_runtime_tags_safe") else []
+            msg = (
+                "❌ ساخت Backup ناموفق بود — فایل ناقصی ساخته نشد.\n\n"
+                "💡 علت احتمالی: سشن یا دیتابیس قفل شده.\n"
+            )
+            if active:
+                tags_short = ", ".join(active[:5])
+                if len(active) > 5:
+                    tags_short += f" و {len(active)-5} اکانت دیگر"
+                msg += (
+                    f"⚠️ {len(active)} اکانت الان روشن و Session قفل است: {tags_short}\n\n"
+                    "۱. اکانت‌ها را از پنل «مدیریت اکانت‌ها» خاموش کن.\n"
+                    "۲. یا ربات را ری‌استارت کن:\n"
+                    "`sudo systemctl restart selfbot`\n"
+                    "۳. بعد دوباره بکاپ بزن."
+                )
             else:
-                msg = "✅ سیستم به‌روز است."
-            await event.answer(msg, alert=True)
-        except Exception as e:
-            await event.answer(f"❌ خطا: {e}", alert=True)
-
-    async def _admin_update_apply(self, event):
-        """apply آپدیت: disable accounts → pull → restart → re-enable."""
-        await event.answer("🔄 در حال آپدیت...", alert=False)
+                msg += (
+                    "یک‌بار ربات را ری‌استارت کنید:\n"
+                    "`sudo systemctl restart selfbot`"
+                )
+            try:
+                await self.client.send_message(event.chat_id, msg)
+                print(f"✅ [backup] پیام خطای مفصل به کاربر ارسال شد")
+            except Exception as ee:
+                print(f"⚠️ [backup] حتی پیام خطا هم ارسال نشد: {ee}")
+            return
+        print(f"✅ [backup] ساخته شد: {backup_path} ({os.path.getsize(backup_path):,} bytes)")
+        # v1.9.2: کل فرآیند send_file و send_message زیر یه try/except مستقل
+        # و با لاگ کامل. قبلاً اگه send_file فیل می‌شد، حتی پیام خطا هم
+        # به کاربر نمی‌رسید (silent fail). حالا هر خطا با traceback کامل
+        # لاگ می‌شه + حداقل یه پیام کوتاه به کاربر می‌رسه.
+        send_error = None
+        file_sent = False
+        file_size = os.path.getsize(backup_path)
+        print(f"📤 [backup] در حال ارسال فایل {file_size:,} bytes به {event.chat_id}...")
         try:
-            from cianet_updater import apply_update
-            success, msg = apply_update()
-            # apply_update خودش restart می‌کنه. این کد معمولاً اجرا نمی‌شه
-            # چون systemd restart می‌کنه process رو.
-            await event.answer(msg[:200] if len(msg) > 200 else msg, alert=True)
-        except Exception as e:
-            await event.answer(f"❌ خطا: {e}", alert=True)
-
-    async def _admin_update_history(self, event):
-        """تاریخچه آپدیت‌ها (git log)."""
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["git", "log", "--oneline", "-20"],
-                cwd="/opt/cianet", capture_output=True, text=True, timeout=10,
-            )
-            log_text = result.stdout.strip() or "(خالی)"
-            body = ["**۲۰ commit اخیر:**", "```", log_text[:1500], "```"]
-            await event.edit(
-                UI.screen(
-                    "📜 تاریخچه",
-                    body=body,
-                    subtitle="git log",
+            # v1.9.2: timeout ۵ دقیقه برای فایل‌های بزرگ. اگه network کند باشه
+            # یا session فایل‌ها چند ده MB باشن، upload زمان می‌بره.
+            await asyncio.wait_for(
+                self.client.send_file(
+                    event.chat_id, backup_path,
+                    caption=f"💾 بکاپ کامل (Backup) — {_now()}",
+                    force_document=True,
                 ),
+                timeout=300,  # ۵ دقیقه
+            )
+            file_sent = True
+            print(f"✅ [backup] فایل به {event.chat_id} ارسال شد")
+        except asyncio.TimeoutError:
+            send_error = "ارسال فایل بیش از ۵ دقیقه طول کشید (Timeout)"
+            print(f"⚠️ [backup] send_file Timeout: {send_error}")
+        except Exception as e:
+            send_error = f"{type(e).__name__}: {e}"
+            print(f"⚠️ [backup] send_file فیل شد: {send_error}")
+            import traceback
+            traceback.print_exc()
+        if file_sent:
+            # پیام تأیید - اختیاری، اگه فیل شد مهم نیست
+            try:
+                await self.client.send_message(
+                    event.chat_id,
+                    "✅ Backup ساخته و ارسال شد.\n\n"
+                    "برای بازیابی: «♻️ Restore» را بزن و همین فایل را بفرست."
+                )
+            except Exception as e:
+                print(f"⚠️ [backup] پیام تأیید فیل شد (اما فایل ارسال شده): {e}")
+        elif send_error:
+            # send_file فیل شده - حتماً پیام خطا بفرست
+            try:
+                await self.client.send_message(
+                    event.chat_id,
+                    f"❌ ارسال Backup ناموفق:\n{send_error[:300]}"
+                )
+                print(f"✅ [backup] پیام خطا به کاربر ارسال شد")
+            except Exception as ee:
+                print(f"⚠️ [backup] حتی پیام خطا هم به کاربر نرسید: {ee}")
+        # پاک کردن فایل موقت - حتی اگه ارسال نشد
+        try:
+            os.remove(backup_path)
+        except Exception as e:
+            print(f"⚠️ [backup] حذف فایل موقت فیل شد: {e}")
+
+    async def _owner_manage_roles_menu(self, event):
+        """callbak قدیمی — برای سازگاری، به هاب «لایسنس و دسترسی‌ها» می‌رود."""
+        await self._owner_show_license_hub(event)
+
+    async def _owner_show_license_hub(self, event):
+        """🎫 لایسنس و دسترسی‌ها — ساخت لایسنس + مدیریت نقش‌ها."""
+        lines = ["🎫 **لایسنس و دسترسی‌ها**\n\nاز اینجا لایسنس بساز و نقش‌ها را مدیریت کن:"]
+        items = [
+            UI.go("➕ ساخت لایسنس", b"owner_create_license", tone="success"),
+            UI.go("📋 لایسنس‌های ساخته‌شده", b"license_access_list", tone="success"),
+        ]
+        if self._role(event.sender_id) == ROLE_OWNER:
+            items.extend([
+                UI.go("👑 ادمین‌های فعال", b"license_access_admins"),
+                UI.go("🤝 نماینده‌های فعال", b"license_access_resellers"),
+            ])
+        buttons = self._pair_buttons(items)
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _owner_show_role_list(self, event, role: str):
+        entries = [e for e in list_admins_and_resellers() if e["role"] == role]
+        label = ("👑 **ادمین‌های فعال:**" if role == ROLE_ADMIN
+                 else "🤝 **نماینده‌های فعال:**")
+        if not entries:
+            await event.edit(
+                label + "\n\n(هیچ موردی ثبت نشده.)",
+                buttons=[UI.nav_row()],
+            )
+            return
+        lines = [label + "\n"]
+        buttons = []
+        for e in entries:
+            extra = f" — 👥 سقف: {e['reseller_max_users']} مشتری" if e.get("reseller_max_users") else ""
+            lines.append(f"👤 `{e['user_id']}` — 🛡 {e['role']}{extra} — 🕐 {e['created_at']}")
+            buttons.append([UI.danger(f"حذف دسترسی {e['user_id']}", f"role_del:{e['user_id']}")])
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    # ════════════════════════════════════════════════════════════════
+    #  مدیریتِ مجوزهای حساس — فقط مالکِ اصلی
+    # ════════════════════════════════════════════════════════════════
+    #  اینجا OWNER می‌بیند چه کسی ظرفیتِ «مدیریتِ امنیتِ اکانت» را دارد،
+    #  به او می‌دهد یا می‌گیرد. این grant authority است — کاملاً جدا از
+    #  use authority. هیچ نماینده‌ای نمی‌تواند از اینجا چیزی بدهد.
+
+    def _cap_owner_only(self, event) -> bool:
+        """فقط OWNER می‌تواند مجوزها را مدیریت کند. پیامِ کوتاه اگر نه."""
+        if self._role(event.sender_id) == ROLE_OWNER:
+            return True
+        try:
+            event.answer("این بخش فقط برای مالک سیستم است.", alert=True)
+        except Exception:
+            pass
+        return False
+
+    async def _owner_show_capability_list(self, event):
+        """فهرستِ همه‌ی کسانی که مجوزِ حساس دارند (یا کسانی که می‌توان بدهیم)."""
+        # v1.8.0: فیکس - قبلاً event.answer() صدا زده نمی‌شد و تلگرام spinner
+        # رو نشون می‌داد تا timeout. این باعث می‌شد کاربر فکر کنه دکمه خرابه.
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        if not self._cap_owner_only(event):
+            return
+        grants = list_capability_grants(CAP_ACCOUNT_SECURITY, active_only=True)
+        body = []
+        if not grants:
+            body.append(f"{UI.GRAY} هیچ‌کس این مجوز را ندارد.")
+            body.append("")
+            body.append("این یک ابزار قدرتمند است (مدیریت دستگاه، رمز دومرحله‌ای و کد ورود اکانت)؛")
+            body.append("به‌طور پیش‌فرض به کسی داده نمی‌شود.")
+        else:
+            body.append("کسانی که مجوز دارند:")
+        buttons = []
+        for g in grants:
+            scope_lbl = _SCOPE_LABELS.get(g["scope_type"], g["scope_type"])
+            body.append(f"{UI.GREEN} `{g['subject_user_id']}` — {scope_lbl}"
+                        + (f" — {g['created_at']}" if g.get("created_at") else ""))
+            buttons.append([UI.go(f"👤 {g['subject_user_id']}", f"cap_user:{g['subject_user_id']}")])
+        # ورودیِ جستجو برای اعطای مجوز — یک ویزاردِ ساده‌ی «آیدی کاربر».
+        buttons.append([UI.go("➕ اعطای مجوز به شخص", "cap_add_start")])
+        buttons.append(UI.nav_row())
+        await event.edit(
+            UI.screen("🔐 مجوزهای حساس", body=body,
+                      subtitle="مدیریت امنیت اکانت",
+                      hint="مجوزها فقط توسط مالک سیستم داده/گرفته می‌شوند."),
+            buttons=buttons,
+        )
+
+    async def _owner_start_capability_add(self, event):
+        """ویزاردِ اعطای مجوز: مرحله‌ی اول — گرفتن آیدیِ کاربر."""
+        if not self._cap_owner_only(event):
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_CAP_USER_ID, {})
+        await event.edit(
+            "🔐 **اعطای مجوزِ حساس**\n\n"
+            "آیدیِ عددیِ شخصی که می‌خوای مجوزِ «مدیریت امنیت اکانت» رو بهش بدی رو بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _owner_show_capability_user(self, event, uid: int):
+        """صفحه‌ی مجوزهای یک شخصِ مشخص."""
+        if not self._cap_owner_only(event):
+            return
+        if not uid:
+            await event.answer("کاربر نامعتبر است.", alert=True)
+            return
+        role = self._role(uid)
+        grants = get_active_grants(uid, CAP_ACCOUNT_SECURITY)
+        body = [
+            f"👤 کاربر: `{uid}`",
+            f"🛡 نقش: {role}",
+        ]
+        buttons = []
+        if not grants:
+            body.append("")
+            body.append(f"{UI.RED} مجوزِ حساس: غیرفعال")
+            body.append("")
+            body.append("این شخص نمی‌تواند ابزارهای امنیتی اکانت را استفاده کند.")
+            buttons.append([UI.go("✅ فعال‌کردن", f"cap_choose_scope:{uid}", tone="success")])
+        else:
+            for g in grants:
+                scope_lbl = _SCOPE_LABELS.get(g["scope_type"], g["scope_type"])
+                body.append("")
+                body.append(f"{UI.GREEN} مجوزِ حساس: فعال")
+                body.append(f"{UI.GRAY} دامنه: {scope_lbl}")
+                body.append(f"{UI.GRAY} داده‌شده توسط: `{g.get('granted_by')}`")
+                body.append(f"{UI.GRAY} در تاریخ: {g.get('created_at')}")
+                buttons.append([UI.danger("⛔ سلبِ مجوز",
+                                          f"cap_revoke:{uid}:{g['scope_type']}")])
+            buttons.append([UI.go("🔁 تغییرِ دامنه", f"cap_choose_scope:{uid}")])
+        buttons.append([UI.go("🔐 فهرستِ مجوزها", "cap_list")])
+        buttons.append(UI.nav_row())
+        await event.edit(UI.screen("🔐 مجوزِ حساس", body=body), buttons=buttons)
+
+    async def _owner_choose_capability_scope(self, event, uid: int):
+        """انتخابِ دامنه‌ی مجوز قبل از تأیید."""
+        if not self._cap_owner_only(event):
+            return
+        if not uid:
+            await event.answer("کاربر نامعتبر است.", alert=True)
+            return
+        role = self._role(uid)
+        body = [
+            f"👤 کاربر: `{uid}` — نقش: {role}",
+            "",
+            "دامنه‌ی دسترسی را انتخاب کن:",
+            "",
+            f"{UI.GRAY} • «مشتریانِ خودم»: برای اکانت‌های خودش و مشتریانش.",
+            f"{UI.GRAY} • «فقط این ربات اختصاصی»: لازم است بعداً ربات را انتخاب کنی.",
+        ]
+        buttons = [
+            [UI.go("👥 مشتریانِ خودم", f"cap_confirm:{uid}:{SCOPE_RESELLER}")],
+            [UI.neutral("انصراف", f"cap_user:{uid}")],
+        ]
+        await event.edit(UI.screen("🔐 انتخابِ دامنه", body=body), buttons=buttons)
+
+    async def _owner_confirm_capability(self, event, uid: int, scope: str):
+        """تأییدِ نهاییِ اعطا — یک کلیکِ تصادفی نباید مجوز بدهد."""
+        if not self._cap_owner_only(event):
+            return
+        if not uid or scope not in _SCOPE_LABELS:
+            await event.answer("درخواست نامعتبر است.", alert=True)
+            return
+        scope_id = str(uid) if scope == SCOPE_RESELLER else None
+        scope_lbl = _SCOPE_LABELS.get(scope, scope)
+        body = [
+            f"{UI.AMBER} در حال اعطای یک مجوز قدرتمند:",
+            "",
+            f"👤 کاربر: `{uid}`",
+            f"🎯 دامنه: {scope_lbl}",
+            "",
+            "با این کار او می‌تواند:",
+            f"{UI.GRAY} • دستگاه‌های لاگین‌شده‌ی اکانت‌ها را ببیند و ببندد",
+            f"{UI.GRAY} • وضعیت رمز دو مرحله‌ای را ببیند و بازنشانی کند",
+            f"{UI.GRAY} • کد ورود اکانت را دریافت کند",
+            "",
+            f"{UI.RED} این مجوز فقط در دامنه‌ی انتخاب‌شده کار می‌کند.",
+        ]
+        buttons = [
+            [UI.danger("بله، اعطا کن", f"cap_grant:{uid}:{scope}")],
+            [UI.neutral("انصراف", f"cap_user:{uid}")],
+        ]
+        await event.edit(UI.screen("⚠️ تأییدِ اعطای مجوز", body=body), buttons=buttons)
+
+    async def _owner_grant_capability(self, event, uid: int, scope: str):
+        """اجرای اعطا — بعد ثبتِ لاگ و بازگشت به صفحه‌ی کاربر."""
+        if not self._cap_owner_only(event):
+            return
+        if not uid or scope not in _SCOPE_LABELS:
+            await event.answer("درخواست نامعتبر است.", alert=True)
+            return
+        scope_id = str(uid) if scope == SCOPE_RESELLER else None
+        grant_capability(uid, CAP_ACCOUNT_SECURITY, scope, scope_id,
+                         granted_by=event.sender_id)
+        log_action(event.sender_id, "capability_granted",
+                   f"to={uid} scope={scope} cap={CAP_ACCOUNT_SECURITY}")
+        try:
+            await event.answer("✅ مجوز اعطا شد.")
+        except Exception:
+            pass
+        await self._owner_show_capability_user(event, uid)
+
+    async def _owner_revoke_capability(self, event, uid: int, scope: str = None):
+        """سلبِ مجوز — اثربخشی فوری."""
+        if not self._cap_owner_only(event):
+            return
+        if not uid:
+            await event.answer("کاربر نامعتبر است.", alert=True)
+            return
+        n = revoke_capability(uid, CAP_ACCOUNT_SECURITY, scope_type=scope,
+                              revoked_by=event.sender_id)
+        log_action(event.sender_id, "capability_revoked",
+                   f"from={uid} scope={scope} rows={n}")
+        try:
+            await event.answer("⛔ مجوز سلب شد." if n else "مجوزی برای سلب نبود.",
+                               alert=True)
+        except Exception:
+            pass
+        await self._owner_show_capability_user(event, uid)
+
+    async def _owner_show_dbot_capability(self, event, bot_id: int):
+        """صفحه‌ی مجوزِ یک ربات اختصاصیِ مشخص."""
+        if not self._cap_owner_only(event):
+            return
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        on = capability_grant_exists(b["owner_id"], CAP_ACCOUNT_SECURITY,
+                                     SCOPE_DEDICATED_BOT, str(bot_id))
+        body = [
+            f"🤖 ربات اختصاصی #{b['id']}",
+            f"👤 مالک: `{b['owner_id']}`",
+            f"🤝 نماینده: `{b['reseller_id']}`",
+            "",
+            (f"{UI.GREEN} مجوزِ حساس: فعال" if on else f"{UI.RED} مجوزِ حساس: غیرفعال"),
+        ]
+        if on:
+            body.append(f"{UI.GRAY} دامنه: فقط اکانت‌های این ربات")
+        buttons = []
+        if on:
+            buttons.append([UI.danger("⛔ غیرفعال‌کردن", f"dbcap_revoke:{bot_id}")])
+        else:
+            buttons.append([UI.go("✅ فعال‌کردن", f"dbcap_grant:{bot_id}", tone="success")])
+        buttons.append([UI.neutral("↩️ برگشت به ربات", f"dedicated_manage:{bot_id}")])
+        buttons.append(UI.nav_row())
+        await event.edit(UI.screen("🔐 مجوزِ حساس", body=body), buttons=buttons)
+
+    async def _owner_grant_dbot_capability(self, event, bot_id: int):
+        if not self._cap_owner_only(event):
+            return
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        grant_capability(b["owner_id"], CAP_ACCOUNT_SECURITY, SCOPE_DEDICATED_BOT,
+                         str(bot_id), granted_by=event.sender_id)
+        log_action(event.sender_id, "capability_granted",
+                   f"to=bot#{bot_id} owner={b['owner_id']} scope=dedicated_bot")
+        try:
+            await event.answer("✅ مجوز اعطا شد.")
+        except Exception:
+            pass
+        await self._owner_show_dbot_capability(event, bot_id)
+
+    async def _owner_revoke_dbot_capability(self, event, bot_id: int):
+        if not self._cap_owner_only(event):
+            return
+        b = get_dedicated_bot(bot_id)
+        if not b:
+            await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        revoke_capability(b["owner_id"], CAP_ACCOUNT_SECURITY,
+                          scope_type=SCOPE_DEDICATED_BOT, scope_id=str(bot_id),
+                          revoked_by=event.sender_id)
+        log_action(event.sender_id, "capability_revoked",
+                   f"from=bot#{bot_id} owner={b['owner_id']} scope=dedicated_bot")
+        try:
+            await event.answer("⛔ مجوز سلب شد.")
+        except Exception:
+            pass
+        await self._owner_show_dbot_capability(event, bot_id)
+
+    async def _owner_show_licenses(self, event):
+        # نماینده فقط لایسنس‌های خودش را می‌بیند (نه لایسنس‌های بقیه)
+        created_by = event.sender_id if self._role(event.sender_id) == ROLE_RESELLER else None
+        lic_list = list_licenses(30, created_by=created_by)
+        if not lic_list:
+            await event.edit(
+                "📭 هنوز لایسنسی ساخته نشده.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        lines = (["🎫 **لایسنس‌های ساخته‌شده توسط من** (۳۰ تای آخر):\n"]
+                 if created_by is not None
+                 else ["🎫 **لایسنس‌های ساخته‌شده** (۳۰ تای آخر):\n"])
+        for lic in lic_list:
+            tname = _TYPE_NAMES.get(lic["license_type"], lic["license_type"])
+            status = "✅ فعال" if lic["is_active"] else "⛔ غیرفعال"
+            lines.append(
+                f"`{lic['code']}` — {tname} — مصرف: {lic['used_count']}/{lic['max_uses']} — {status} — 🕐 {lic['created_at']}"
+            )
+        lines.append("")
+        lines.append("🔒 همه‌ی لایسنس‌های جدید یک‌بارمصرف‌اند (max_uses=1).")
+        buttons = [UI.nav_row()]
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _owner_start_set_card(self, event):
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER می‌تواند شماره کارت را تغییر دهد.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_SET_CARD, {})
+        current_number = get_setting("card_number", DEFAULT_CARD_NUMBER)
+        current_holder = get_setting("card_holder", DEFAULT_CARD_HOLDER)
+        await event.edit(
+            f"💳 **تنظیم شماره کارت**\n\n"
+            f"فعلی: `{current_number}` — به نام {current_holder}\n\n"
+            f"کافیه خودِ شماره‌ی کارت (۱۶ رقم) رو بفرستی.\n"
+            f"اگه می‌خوای نام صاحب حساب هم ذخیره بشه، بعد از `|` بنویس:\n"
+            f"مثال: `6219861462625319|امیدرضا پیلسم`",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _owner_show_pricing(self, event):
+        """⚙️ قیمت‌ها و پلن‌ها: تغییر قیمت/مدت هر پلن و قیمت ربات اختصاصی."""
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER.", alert=True)
+            return
+        lines = ["⚙️ **قیمت‌ها و پلن‌ها:**\n"]
+        buttons = []
+        for p in list_pricing():
+            lines.append(f"`{p['plan']}` — {p['price_toman']:,} تومان — {p['duration_days']} روز")
+            buttons.append([
+                UI.go(f"💲 قیمت {p['plan']}", f"plan_price:{p['plan']}".encode()),
+                UI.go(f"📅 مدت {p['plan']}", f"plan_days:{p['plan']}".encode()),
+            ])
+        dbot_n = dedicated_bot_price()
+        lines.append(f"🤖 ربات اختصاصی (یک‌بار) — {dbot_n:,} تومان")
+        buttons.append([UI.go("💲 قیمت ربات اختصاصی", b"plan_price:__dedicated__")])
+        buttons.append([UI.go("➕ پلن جدید", b"plan_new", tone="success")])
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _owner_start_plan_price(self, event, plan: str):
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_PRICING_PRICE,
+                               {"plan": plan, "days": None})
+        label = "قیمت ربات اختصاصی (تومان، یک‌بار) چنده؟" if plan == "__dedicated__" \
+            else f"قیمت جدید پلن «{plan}» به تومان چنده؟"
+        await event.edit(label, buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]])
+
+    async def _owner_start_plan_days(self, event, plan: str):
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_PRICING_DAYS, {"plan": plan})
+        await event.edit(
+            f"مدت اشتراک پلن «{plan}» چند روزه بشه؟",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _owner_start_plan_new(self, event):
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_PRICING_NEW_NAME, {})
+        await event.edit(
+            "➕ اسم پلن جدید رو بفرست (مثلاً `۴۵ روزه`):",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _owner_start_set_wallet(self, event):
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_SET_WALLET, {})
+        current = get_setting("usdt_wallet", "")
+        await event.edit(
+            "💵 **آدرس کیف پول تتر (TRC20)**\n\n"
+            f"فعلی: `{current}`\n\n"
+            "آدرس جدید رو بفرست (باید با `T` شروع و ۳۴ کاراکتر باشد):",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _owner_db_backup(self, event):
+        """💾 بکاپ کامل (callback قدیمی — همان Backup جدید)."""
+        await self._owner_show_backup(event)
+
+    async def _owner_start_db_restore(self, event):
+        """♻️ Restore — OWNER فایل ZIP بکاپ را می‌فرستد."""
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("فقط OWNER.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_DB_RESTORE, {})
+        await event.edit(
+            "♻️ **Restore**\n\n"
+            "فایل Backup را همینجا ارسال کنید.\n"
+            "فقط Backup معتبر پروژه پذیرفته می‌شود.\n\n"
+            "⚠️ **توجه:** قبل از Restore، ابتدا یک Backup بگیرید.\n"
+            "سلف‌بات‌های روشن در حین Restore متوقف می‌شوند.",
+            buttons=[[UI.neutral(UI.L_CANCEL, "owner_db_restore_cancel")]],
+        )
+
+    async def _handle_document_wizard(self, event, wiz: dict) -> bool:
+        """دریافت فایل بکاپ برای Restore (فقط OWNER): دانلود → validate → تأیید."""
+        if wiz["state"] != WIZ_DB_RESTORE:
+            return False
+        sender = event.sender_id
+        if self._role(sender) != ROLE_OWNER:
+            self.wizards.pop(sender, None)
+            await event.respond("فقط OWNER می‌تواند Restore کند.")
+            return True
+        fname = (getattr(getattr(event, "file", None), "name", "") or "backup.zip").lower()
+        # BUG #4 — نام موقتِ Restore باید یکتا باشد (دو سند از یک کاربر در یک
+        # ثانیه نباید به یک فایل برسند و هم‌دیگر را overwrite کنند). mkstemp
+        # یکتا می‌سازد؛ فایلِ خالیِ placeholder با دانلود (open 'wb') overwrite
+        # می‌شود و پاک‌سازیِ موجود (شکست/لغو/تکمیل) دست‌نخورده می‌ماند.
+        _tmp_fd, tmp = tempfile.mkstemp(prefix="restore_", suffix=".zip")
+        os.close(_tmp_fd)
+        try:
+            dl = getattr(getattr(event, "message", None), "download_media", None)
+            if dl is None:
+                await event.respond("⚠️ امکان دانلود فایل در این محیط نیست.")
+                return True
+            await event.respond("⏳ در حال بررسی فایل Backup...")
+            await dl(file=tmp)
+        except Exception as e:
+            self.wizards.pop(sender, None)
+            await event.respond(f"❌ دانلود فایل ناموفق: {str(e)[:60]}")
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return True
+
+        if not fname.endswith(".zip"):
+            self.wizards.pop(sender, None)
+            await event.respond(
+                "❌ این فایل بکاپ معتبر پروژه نیست.\n\n"
+                "فقط فایل ZIP بکاپ (ساخته‌شده توسط «💾 Backup») پذیرفته می‌شود."
+            )
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return True
+
+        ok, msg = validate_backup_zip(tmp)
+        if not ok:
+            self.wizards.pop(sender, None)
+            await event.respond(
+                "❌ Restore انجام نشد.\n\nBackup فعلی تغییری نکرده است.\n\nخطا:\n" + msg
+            )
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return True
+
+        # معتبر → مرحله‌ی تأیید
+        wiz["state"] = WIZ_DB_RESTORE_CONFIRM
+        wiz["data"]["tmp_zip"] = tmp
+        await event.respond(
+            "🔍 در حال بررسی سلامت Backup...\n\n"
+            "📦 Backup معتبر است.\n\n"
+            "⚠️ **تأیید Restore**\n\n"
+            "با Restore کردن این فایل، اطلاعات فعلی سیستم با اطلاعات موجود "
+            "در Backup جایگزین می‌شود.\n"
+            "قبل از Restore یک Backup اضطراری از وضعیت فعلی ساخته خواهد شد.\n\n"
+            "آیا مطمئن هستید؟",
+            buttons=[
+                [UI.danger("بله، Restore کن", b"owner_db_restore_go")],
+                [UI.neutral(UI.L_CANCEL, "owner_db_restore_cancel")],
+            ],
+        )
+        return True
+
+    async def _owner_db_restore_go(self, event):
+        """✅ بله، Restore کن — اعمال اتمیک بعد از تأیید."""
+        wiz = self.wizards.pop(event.sender_id, None)
+        tmp = (wiz or {}).get("data", {}).get("tmp_zip")
+        if not tmp or (wiz or {}).get("state") != WIZ_DB_RESTORE_CONFIRM:
+            await event.answer("هیچ عملیات Restore در انتظار تأیید نیست.", alert=True)
+            return
+        await event.edit("♻️ در حال Restore (اول Runtimeها متوقف می‌شوند)...")
+        try:
+            # نسخه‌ی Runtime-safe: Maintenance Mode + توقف کامل Runtimeها قبل
+            # از جایگزینی فایل‌ها + استارت مجدد اکانت‌های روشن بعد از موفقیت.
+            ok, msg = await restore_backup_from_zip_async(tmp)
+        except Exception as e:
+            ok, msg = False, f"خطای غیرمنتظره: {str(e)[:80]}"
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        if ok:
+            await event.respond(
+                "✅ Restore با موفقیت انجام شد.\n\n"
+                "اطلاعات سیستم با موفقیت بازیابی شد.\n"
+                "برای اعمال کامل روی سلف‌بات‌های روشن، ربات را ری‌استارت کن."
+            )
+            await self._show_menu_for_role(event.chat_id, ROLE_OWNER)
+        else:
+            await event.respond(
+                "❌ Restore انجام نشد.\n\nBackup فعلی تغییری نکرده است.\n\nخطا:\n" + msg
+            )
+
+    async def _owner_db_restore_cancel(self, event):
+        """❌ لغو Restore — ویزارد بسته و فایل موقت پاک می‌شود."""
+        wiz = self.wizards.pop(event.sender_id, None)
+        tmp = (wiz or {}).get("data", {}).get("tmp_zip")
+        if tmp:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        await event.edit(
+            "❌ لغو شد.",
+            buttons=[UI.nav_row()],
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  بخش RESELLER
+    # ─────────────────────────────────────────────────────
+
+    async def _reseller_show_users(self, event):
+        users = list_users_for_reseller(event.sender_id)
+        buttons = [[UI.go("🔍 جستجو در مشتریانم", b"reseller_user_search_start")]]
+        if not users:
+            await event.edit(
+                "📭 هنوز هیچ مشتری‌ای زیرمجموعه‌ات نیست.\n\n"
+                "وقتی کسی با لایسنسی که تو ساختی فعال‌سازی کند، اینجا نمایش داده می‌شود.",
+                buttons=buttons + [UI.nav_row()],
+            )
+            return
+        # نمایش کاربرمحور (کارت هر مشتری: اشتراک + روز باقی‌مانده + آمار
+        # SelfBotها) — مثل صفحه‌ی OWNER، اما فقط برای مشتریانِ همین نماینده
+        # (list_users_for_reseller همان scope را اعمال کرده).
+        lines = ["👥 **کاربران من:** (کارت هر مشتری را ببین و مدیریت کن)\n"]
+        for u in users[:30]:
+            lines.append("━━━━━━━━━━━━━━")
+            lines.extend(self._user_card_lines(u))
+            lines.append("")
+            buttons.append([UI.go(
+                f"⚙️ مدیریت {u.get('username') or u['user_id']}",
+                f"user_manage:{u['user_id']}".encode(),
+            )])
+        if len(users) > 30:
+            lines.append(f"نمایش ۳۰ مشتری اول از {len(users)}.")
+        lines.append("━━━━━━━━━━━━━━")
+        buttons.append(UI.nav_row())
+        await event.edit("\n".join(lines), buttons=buttons)
+
+    async def _start_reseller_user_search(self, event):
+        # فیکس محدودیت دسترسی: جستجوی نماینده باید فقط بین مشتریان خودش
+        # باشد، نه همه‌ی کاربران سیستم — برای همین state جدا از جستجوی
+        # OWNER استفاده می‌کنیم تا در پردازش، لیست results با
+        # list_users_for_reseller فیلتر شود.
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_USER_SEARCH, {
+            "back_data": b"reseller_users",
+            "reseller_scope": event.sender_id,
+        })
+        await event.edit(
+            "🔍 آیدی عددی یا بخشی از یوزرنیم مشتری‌ات را بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _reseller_show_sub_status(self, event):
+        users = list_users_for_reseller(event.sender_id)
+        lines = ["⏳ **وضعیت اشتراک کاربران من:**\n"]
+        for u in users:
+            sub = get_active_subscription(u["user_id"])
+            status = f"فعال تا {sub['expire_date']}" if sub else "بدون اشتراک/منقضی"
+            lines.append(f"`{u['user_id']}` — {status}")
+        if not users:
+            lines.append("(هنوز کاربری نداری)")
+        await event.edit("\n".join(lines), buttons=[UI.nav_row()])
+
+    async def _reseller_start_create_license(self, event):
+        """
+        [Legacy callback — سازگاری] دیگر مسیر UI جداگانه‌ای برای ساخت لایسنس
+        وجود ندارد: نماینده هم از همان هابِ یکپارچه‌ی «🎫 لایسنس و دسترسی‌ها»
+        (که برای نقشش فقط نوع account را نشان می‌دهد) لایسنس می‌سازد.
+        """
+        await self._owner_show_license_hub(event)
+
+    # ─────────────────────────────────────────────────────
+    #  بخش USER
+    # ─────────────────────────────────────────────────────
+
+    async def _user_support_start(self, event):
+        """
+        v1.8.0: شروع پشتیبانی - ابتدا واحد رو بپرس، تیکت نساز الکی.
+
+        قبلاً با زدن «☎️ پشتیبانی» بلافاصله یه تیکت ساخته می‌شد حتی اگه
+        کاربر پیامی نمی‌فرستاد. این باعث می‌شد لیست تیکت‌های باز پر از
+        تیکت‌های خالی بشه. حالا:
+        1. لیست واحدهای پشتیبانی نمایش داده می‌شه
+        2. کاربر یکی رو انتخاب می‌کنه
+        3. پیامش رو می‌فرسته
+        4. تیکت ساخته می‌شه
+        """
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        # اگه از قبل تیکت باز داره، مستقیم بره سراغش
+        existing = get_open_ticket(event.sender_id)
+        if existing and ticket_message_count(existing["id"]) > 0:
+            # تیکت فعال داره (حداقل یه پیام) - مستقیم بره
+            await self._clear_admin_panel_wizard(event.sender_id)
+            self._start_own_wizard(
+                event.sender_id, WIZ_TICKET_MSG,
+                {"ticket_id": existing["id"]},
+            )
+            await event.edit(
+                f"✅ تیکت #{existing['id']} باز داری.\n\n"
+                "پیام بعدیت رو بفرست:",
+                buttons=[[UI.neutral("پایان گفتگو", "user_support_end")],
+                         UI.nav_row(home=False)],
+            )
+            return
+
+        # تیکت بازِ خالی (که هیچ پیامی نداره) رو می‌بندیم
+        if existing:
+            close_ticket(existing["id"])
+
+        # نمایش واحدهای پشتیبانی
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_TICKET_UNIT, {})
+        buttons = []
+        for unit_id, unit_name, unit_desc in SUPPORT_UNITS:
+            buttons.append([UI.go(unit_name, f"ticket_unit:{unit_id}")])
+        buttons.append(UI.nav_row(home=False))
+        await event.edit(
+            "☎️ **پشتیبانی**\n\n"
+            "لطفاً واحد مورد نظرت رو انتخاب کن، بعد پیامت رو بفرست.\n"
+            "(تیکت فقط بعد از ارسال پیام ساخته می‌شه)",
+            buttons=buttons,
+        )
+
+    async def _select_ticket_unit(self, event, unit_id: str):
+        """v1.8.0: کاربر واحد رو انتخاب کرد - ویزارد پیام فعال بشه."""
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        unit_name = next((n for u, n, _ in SUPPORT_UNITS if u == unit_id), unit_id)
+        # ویزارد رو به حالت پیام تغییر بده
+        self._start_own_wizard(
+            event.sender_id, WIZ_TICKET_MSG,
+            {"unit": unit_id, "unit_name": unit_name},
+        )
+        await event.edit(
+            f"✅ واحد «{unit_name}» انتخاب شد.\n\n"
+            "پیام خود را ارسال کنید. هر چه جزئیات بیشتر = پاسخ بهتر.",
+            buttons=[[UI.neutral("پایان گفتگو", "user_support_end")],
+                     UI.nav_row(home=False)],
+        )
+
+    async def _user_support_end(self, event):
+        wiz = self.wizards.pop(event.sender_id, None)
+        if wiz:
+            ticket_id = wiz["data"]["ticket_id"]
+            # فقط اگر واقعاً پیامی رد و بدل شده، تیکت را ببند؛ وگرنه یک
+            # تیکت خالی (که هیچ‌وقت پیامی نداشته) در دیتابیس رها نکن —
+            # کاربر می‌تواند بعداً با «📞 پشتیبانی» همان تیکت باز را ادامه دهد.
+            if ticket_message_count(ticket_id) > 0:
+                close_ticket(ticket_id)
+        # فیکس v1.7.1: نقش واقعی کاربر رو بگیر، نه ROLE_USER رو hardcode کن.
+        # قبلاً اینجا همیشه ROLE_USER پاس داده می‌شد — یعنی اگه OWNER یا
+        # ADMIN یا RESELLER می‌زد «پایان گفتگو»، تبدیل به کاربر عادی
+        # می‌شد (دکمه‌ی «ادمین» از منوش ناپدید می‌شد).
+        real_role = self._role(event.sender_id)
+        await self._show_menu_for_role(event.chat_id, real_role, edit_event=event)
+
+    async def _user_show_sub_status(self, event):
+        sub = get_active_subscription(event.sender_id)
+        if not sub:
+            await event.edit(
+                "شما در حال حاضر اشتراک فعالی ندارید.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        await event.edit(
+            f"⭐ **اشتراک فعال**\n\n"
+            f"پلن: {sub['plan']}\n"
+            f"تاریخ شروع: {sub['start_date']}\n"
+            f"تاریخ پایان: {sub['expire_date']}\n",
+            buttons=[UI.nav_row()],
+        )
+
+    async def _user_start_renew(self, event):
+        plans = list_pricing()
+        buttons = [
+            [UI.go(f"{p['plan']} — {p['price_toman']:,} تومان", f"renew_plan:{p['plan']}".encode())]
+            for p in plans
+        ]
+        buttons.append(UI.nav_row())
+        await event.edit("💳 یکی از پلن‌ها رو انتخاب کن:", buttons=buttons)
+
+    async def _compute_order_amounts(self, toman: int) -> tuple:
+        """مبلغ تومان → معادل تتر با نرخ لحظه‌ای؛ fallback به تنظیم/ثابت.
+        خروجی: (amount_usdt, rate_toman). +۱٪ بافر برای نوسان قیمت."""
+        rate = None
+        try:
+            rate = await _get_usd_toman_rate()
+        except Exception:
+            rate = None
+        if not rate or rate <= 0:
+            try:
+                rate = float(get_setting("usdt_toman_rate", "0") or 0)
+            except Exception:
+                rate = 0.0
+        if not rate or rate <= 0:
+            rate = USDT_TOMAN_FALLBACK
+        usdt = round(toman / rate * 1.01, 2)
+        return usdt, rate
+
+    async def _show_invoice(self, event, order: dict, rate: float):
+        """رندر فاکتور با شماره‌ی سفارش، مبلغ دقیق (تومان+تتر) و انقضای پرداخت."""
+        wallet = (get_setting("usdt_wallet") or "").strip()
+        wallet_line = f"`{wallet}`" if wallet else "⚠️ کیف پول تتر هنوز تنظیم نشده — با پشتیبانی تماس بگیر."
+        text = (
+            f"🧾 **فاکتور {order['order_no']}**\n\n"
+            f"پلن: {order['plan']}\n"
+            f"مبلغ: {order['amount_toman']:,} تومان\n"
+            f"معادل تتر: **{order['amount_usdt']:.2f} USDT** (شبکه TRC20) "
+            f"— نرخ ~{rate:,.0f} تومان\n\n"
+            f"⏳ این فاکتور تا `{order['expires_at']}` معتبر است.\n\n"
+            f"💵 **پرداخت تتری (خودکار):**\n{wallet_line}\n\n"
+            f"بعد از واریز، «پرداخت با تتر» را بزن و هش تراکنش را بفرست — "
+            f"به‌صورت خودکار تایید می‌شود."
+        )
+        buttons = [
+            [UI.go("💵 پرداخت با تتر (TRC20)", f"order_tron:{order['id']}".encode())],
+            [UI.go("💳 پرداخت با کارت", f"order_card:{order['id']}".encode())],
+            [UI.go("🧾 سفارش‌های من", b"user_orders")],
+            [UI.danger("لغو فاکتور", f"order_cancel:{order['id']}")],
+            UI.nav_row(),
+        ]
+        # فاکتور همیشه از یک callback می‌آید → edit. (event.query همان
+        # تشخیصِ قابل‌اطمینانِ CallbackQuery است؛ هم‌چنین برای امنیت اگر
+        # جایی از مسیر پیام متنی صدا زده شد، respond بفرستد.)
+        if getattr(event, "query", None) is None:
+            await event.respond(text, buttons=buttons)
+        else:
+            await event.edit(text, buttons=buttons)
+
+    async def _user_plan_chosen(self, event, plan: str):
+        plans = {p["plan"]: p for p in list_pricing()}
+        info = plans.get(plan)
+        if not info:
+            await event.answer("پلن نامعتبر است.", alert=True)
+            return
+        usdt, rate = await self._compute_order_amounts(info["price_toman"])
+        order = create_order(event.sender_id, plan, info["price_toman"], usdt)
+        await self._show_invoice(event, order, rate)
+
+    async def _user_show_orders(self, event):
+        orders = list_user_orders(event.sender_id)
+        if not orders:
+            await event.edit(
+                "🧾 هنوز سفارشی ثبت نکردی. از «💳 تمدید اشتراک» شروع کن.",
+                buttons=[UI.nav_row()],
+            )
+            return
+        labels = {
+            ORDER_STATUS_PENDING: "⏳ در انتظار پرداخت",
+            ORDER_STATUS_PAID: "✅ پرداخت شد",
+            ORDER_STATUS_EXPIRED: "❌ منقضی شد",
+            ORDER_STATUS_CANCELLED: "🚫 لغو شد",
+        }
+        lines = ["🧾 **سفارش‌های من:**\n"]
+        for o in orders[:10]:
+            lines.append(f"`{o['order_no']}` — {o['plan']} — {o['amount_toman']:,} تومان "
+                         f"— {labels.get(o['status'], o['status'])}")
+            if o["status"] == ORDER_STATUS_PAID and o["pay_method"] == "trc20":
+                lines.append(f"   تتر: `{o['txid']}`")
+        lines.append("\n⏳ فاکتورهای در انتظار تا ۲۴ ساعت معتبرند.")
+        await event.edit(
+            "\n".join(lines),
+            buttons=[UI.nav_row()],
+        )
+
+    async def _user_start_trx_pay(self, event, order_id: int):
+        order = get_order(order_id)
+        if not order or order["user_id"] != event.sender_id or order["status"] != ORDER_STATUS_PENDING:
+            await event.answer("این فاکتور معتبر نیست (شاید منقضی یا پرداخت شده).", alert=True)
+            return
+        wallet = (get_setting("usdt_wallet") or "").strip()
+        if not wallet:
+            await event.answer("کیف پول تتر تنظیم نشده — با پشتیبانی تماس بگیر.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_TRX_HASH, {"order_id": order_id})
+        await event.edit(
+            f"💵 مبلغ دقیق: **{order['amount_usdt']:.2f} USDT** (شبکه TRC20)\n\n"
+            f"آدرس کیف پول:\n`{wallet}`\n\n"
+            "بعد از واریز، **هش تراکنش** (۶۴ کاراکتر hex) را بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _user_start_card_pay(self, event, order_id: int):
+        order = get_order(order_id)
+        if not order or order["user_id"] != event.sender_id or order["status"] != ORDER_STATUS_PENDING:
+            await event.answer("این فاکتور معتبر نیست (شاید منقضی یا پرداخت شده).", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(
+            event.sender_id, WIZ_PAYMENT_RECEIPT,
+            {"order_id": order_id, "plan": order["plan"], "amount": order["amount_toman"]},
+        )
+        card_number = get_setting("card_number", DEFAULT_CARD_NUMBER)
+        card_holder = get_setting("card_holder", DEFAULT_CARD_HOLDER)
+        await event.edit(
+            f"فاکتور {order['order_no']}\n\n"
+            f"شماره کارت:\n`{card_number}`\nبه نام: {card_holder}\n\n"
+            f"مبلغ: {order['amount_toman']:,} تومان\n\n"
+            "لطفاً تصویر رسید پرداخت را ارسال کنید.",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    async def _user_cancel_order(self, event, order_id: int):
+        order = get_order(order_id)
+        if not order or order["user_id"] != event.sender_id:
+            await event.answer("فاکتور پیدا نشد.", alert=True)
+            return
+        cancel_order(order_id, event.sender_id)
+        await event.answer("فاکتور لغو شد.")
+        await self._user_show_orders(event)
+
+    async def _user_start_activate_license(self, event):
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_LICENSE_CODE, {})
+        await event.edit(
+            "🔑 کد لایسنس رو بفرست (مثلاً `SELF-XXXX-XXXX`):",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  پردازش ورودی متنی ویزاردها (مشترک بین همه‌ی نقش‌ها)
+    # ─────────────────────────────────────────────────────
+
+    async def _handle_text_wizard(self, event, wiz: dict) -> bool:
+        state = wiz["state"]
+        data = wiz["data"]
+        text = (event.raw_text or "").strip()
+
+        if state == WIZ_TICKET_MSG:
+            # v1.8.0: اگه تیکت هنوز ساخته نشده (اولین پیام بعد از انتخاب واحد)،
+            # الان بساز. این کار از ساختن تیکت‌های الکی جلوگیری می‌کنه.
+            if "ticket_id" not in data or not data.get("ticket_id"):
+                tid = create_ticket(event.sender_id)
+                # واحد رو در description ذخیره کن (اگه موجوده)
+                unit_name = data.get("unit_name", "")
+                if unit_name:
+                    try:
+                        with _conn() as c:
+                            c.execute(
+                                "UPDATE tickets SET unit = ? WHERE id = ?",
+                                (data.get("unit", ""), tid),
+                            )
+                    except Exception:
+                        pass
+                data["ticket_id"] = tid
+                # ذخیره در ویزارد state
+                self.wizards[event.sender_id]["data"] = data
+
+            # تیکتِ بسته پاسخ نمی‌گیرد (بخش ۲۴) — کاربر باید تیکت جدید باز کند.
+            _trow = get_ticket(data["ticket_id"])
+            if not _trow or _trow["status"] != "open":
+                self.wizards.pop(event.sender_id, None)
+                await event.respond(
+                    "⏳ این تیکت قبلاً بسته شده است. برای پیگیری، از «📞 پشتیبانی» تیکت جدیدی باز کن."
+                )
+                return True
+            add_ticket_message(data["ticket_id"], "user", event.sender_id, text)
+            upsert_user(event.sender_id, event.sender.username if event.sender else None)
+            for admin_entry in list_admins_and_resellers():
+                if admin_entry["role"] == ROLE_ADMIN:
+                    try:
+                        await self.client.send_message(
+                            admin_entry["user_id"],
+                            f"📨 پیام جدید در تیکت #{data['ticket_id']} از `{event.sender_id}`:\n{text}",
+                        )
+                    except Exception:
+                        pass
+            try:
+                await self.client.send_message(
+                    OWNER_ID, f"📨 پیام جدید در تیکت #{data['ticket_id']} از `{event.sender_id}`:\n{text}"
+                )
+            except Exception:
+                pass
+            await event.respond("✅ پیام شما ارسال شد. منتظر پاسخ پشتیبانی بمانید.")
+            return True
+
+        if state == WIZ_OWNER_TICKET_REPLY:
+            tid = data["ticket_id"]
+            # تیکتِ بسته پاسخ نمی‌گیرد (بخش ۲۴) — پاسخ فقط برای تیکتِ باز.
+            ticket_row = get_ticket(tid)
+            if not ticket_row:
+                self.wizards.pop(event.sender_id, None)
+                await event.respond("❌ این تیکت پیدا نشد.")
+                return True
+            if ticket_row["status"] != "open":
+                self.wizards.pop(event.sender_id, None)
+                await event.respond(
+                    "⏳ این تیکت قبلاً بسته شده است؛ برای پاسخ باید تیکت جدیدی باز شود."
+                )
+                return True
+            add_ticket_message(tid, "admin", event.sender_id, text)
+            self.wizards.pop(event.sender_id, None)
+            try:
+                await self.client.send_message(
+                    ticket_row["user_id"], f"📨 **پاسخ پشتیبانی:**\n{text}"
+                )
+            except Exception:
+                pass
+            await event.respond("✅ پاسخ ارسال شد.")
+            return True
+
+        if state == WIZ_LICENSE_CODE:
+            self.wizards.pop(event.sender_id, None)
+            code = text.strip().upper()
+            username = event.sender.username if event.sender else None
+            # فعال‌سازی اتمیک: مصرفِ لایسنس + ساخت اشتراک/نقش در یک تراکنش
+            # واحد (activate_license) — هیچ‌وقت «لایسنس مصرف شده ولی اثرش
+            # اعمال نشده» یا برعکس پیش نمی‌آید.
+            res = activate_license(code, event.sender_id, username=username)
+            if not res["ok"]:
+                err = res["error"]
+                if err == "invalid":
+                    msg = "❌ این لایسنس معتبر نیست."
+                elif err == "inactive":
+                    msg = "❌ این لایسنس غیرفعال شده است."
+                elif err == "used":
+                    msg = "❌ این لایسنس قبلاً استفاده شده است."
+                elif err == "reseller_limit":
+                    msg = "❌ سقف مشتری‌های این نماینده پر شده است؛ لایسنس مصرف نشد."
+                elif err == "owner":
+                    msg = "❌ مالک اصلی را نمی‌توان با لایسنس تغییر داد."
+                elif err == "role_guard":
+                    msg = "❌ این لایسنس با نقش فعلی شما سازگار نیست (فقط OWNER می‌تواند نقش را عوض کند)."
+                else:
+                    msg = "❌ نوع این لایسنس معتبر نیست."
+                await event.respond(msg)
+                return True
+            if res["type"] == LICENSE_TYPE_ACCOUNT:
+                # اگر سلف‌بات‌های کاربر به‌خاطر انقضای قبلی متوقف شده بودند،
+                # با فعال‌شدن اشتراک جدید دوباره فعال می‌شوند (رزوم).
+                try:
+                    await self._resume_user_selfbots(event.sender_id)
+                except Exception:
+                    pass
+                await event.respond(
+                    f"✅ لایسنس فعال شد! اشتراک شما به مدت {res['duration_days']} روز فعال است.\n\n"
+                    f"برای اینکه سلف روی اکانت تلگرامت نصب و فعال بشه، باید اکانتت رو لاگین کنی.",
+                    buttons=[[UI.go("🔐 لاگین اکانت", b"user_login_account")]],
+                )
+            elif res["type"] == LICENSE_TYPE_RESELLER:
+                await event.respond(
+                    "✅ لایسنس نمایندگی فعال شد! حالا به پنل نمایندگی دسترسی داری. /start بزن."
+                )
+            else:  # admin
+                await event.respond(
+                    "✅ دسترسی مدیریت برای شما فعال شد.\n\n"
+                    "از این پس می‌توانید از پنل مدیریت استفاده کنید. /start بزن."
+                )
+            return True
+
+        if state == WIZ_CL_RESELLER_LIMIT:
+            try:
+                limit = int(text)
+                assert limit > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد صحیح مثبت بفرست (سقف مشتری):")
+                return True
+            lic = create_license(
+                LICENSE_TYPE_RESELLER, duration_days=None, created_by=event.sender_id,
+                reseller_user_limit=limit,
+            )
+            self.wizards.pop(event.sender_id, None)
+            await event.respond(_license_result_text(lic))
+            return True
+
+        if state == WIZ_SET_CARD:
+            self.wizards.pop(event.sender_id, None)
+            # نام صاحب حساب اختیاری است و ترتیبش هم مهم نیست:
+            #   «6219...|امید» ، «امید|6219...» یا فقط خودِ «6219...» همگی
+            # پذیرفته می‌شوند. قبلاً ارسالِ تنها شماره با «فرمت درست نیست»
+            # رد می‌شد و نماینده‌ها در ربات اختصاصی‌اشان گیر می‌کردند.
+            number, holder = text.strip(), ""
+            if "|" in text:
+                left, right = (p.strip() for p in text.split("|", 1))
+                # سمتی که بعد از نرمال‌سازی ۱۶ رقم می‌شود شماره‌ی کارت است؛
+                # سمتی که رقمِ کافی ندارد نام صاحب حساب است.
+                if len(normalize_card_number(right)) == 16 and len(normalize_card_number(left)) < 16:
+                    number, holder = right, left
+                else:
+                    number, holder = left, right
+            number = normalize_card_number(number)
+            if len(number) != 16:
+                await event.respond(
+                    "❌ شماره کارت باید ۱۶ رقم باشد. می‌تونی فقط شماره رو "
+                    "بفرستی، یا به‌صورت `شماره|نام`. دوباره از منو تلاش کن."
+                )
+                return True
+            holder = holder.strip() or DEFAULT_CARD_HOLDER
+            set_setting("card_number", number)
+            set_setting("card_holder", holder)
+            await event.respond(f"✅ شماره کارت به‌روزرسانی شد:\n`{number}`\nبه نام: {holder}")
+            return True
+
+        if state == WIZ_SET_WALLET:
+            w = text.strip()
+            if not (w.startswith("T") and len(w) == 34):
+                await event.respond(
+                    "❌ آدرس TRC20 معتبر نیست (باید با `T` شروع و ۳۴ کاراکتر باشد). "
+                    "دوباره بفرست:"
+                )
+                return True
+            set_setting("usdt_wallet", w)
+            self.wizards.pop(event.sender_id, None)
+            await event.respond(f"✅ آدرس کیف پول تتر ذخیره شد:\n`{w}`")
+            return True
+
+        if state == WIZ_PRICING_NEW_NAME:
+            name = text.strip()
+            if not name or len(name) > 30:
+                await event.respond("❌ اسم پلن باید ۱ تا ۳۰ کاراکتر باشد. دوباره بفرست:")
+                return True
+            if any(p["plan"] == name for p in list_pricing()):
+                await event.respond(f"❌ پلن «{name}» از قبل وجود دارد.")
+                return True
+            self.wizards[event.sender_id] = {"state": WIZ_PRICING_PRICE,
+                                             "data": {"plan": name, "days": None}}
+            await event.respond(f"قیمت پلن «{name}» به تومان چنده؟")
+            return True
+
+        if state == WIZ_PRICING_PRICE:
+            try:
+                price = int(text.replace(",", "").strip())
+            except Exception:
+                price = 0
+            if price <= 0:
+                await event.respond("❌ عدد معتبر (بزرگ‌تر از صفر) بفرست:")
+                return True
+            plan = data["plan"]
+            if plan == "__dedicated__":
+                set_setting("dedicated_bot_price", str(price))
+                self.wizards.pop(event.sender_id, None)
+                await event.respond(f"✅ قیمت ربات اختصاصی: {price:,} تومان شد.")
+                return True
+            days = data.get("days")
+            if days is None:
+                self.wizards[event.sender_id] = {"state": WIZ_PRICING_DAYS,
+                                                 "data": {"plan": plan, "price": price}}
+                await event.respond(f"مدت اشتراک پلن «{plan}» چند روزه بشه؟")
+                return True
+            set_pricing(plan, price, days)
+            self.wizards.pop(event.sender_id, None)
+            await event.respond(f"✅ پلن «{plan}» → {price:,} تومان / {days} روز ذخیره شد.")
+            return True
+
+        if state == WIZ_PRICING_DAYS:
+            try:
+                days = int(text.strip())
+            except Exception:
+                days = 0
+            if not (1 <= days <= 3650):
+                await event.respond("❌ تعداد روز باید بین ۱ تا ۳۶۵۰ باشد. دوباره بفرست:")
+                return True
+            if "price" in data:
+                set_pricing(data["plan"], data["price"], days)
+                self.wizards.pop(event.sender_id, None)
+                await event.respond(
+                    f"✅ پلن «{data['plan']}» → {data['price']:,} تومان / {days} روز ذخیره شد."
+                )
+            else:
+                plan_info = get_pricing(data["plan"])
+                if not plan_info:
+                    await event.respond("❌ این پلن پیدا نشد.")
+                    return True
+                set_pricing(data["plan"], plan_info["price_toman"], days)
+                self.wizards.pop(event.sender_id, None)
+                await event.respond(
+                    f"✅ مدت پلن «{data['plan']}» → {days} روز شد "
+                    f"({plan_info['price_toman']:,} تومان)."
+                )
+            return True
+
+        if state == WIZ_TRX_HASH:
+            txid = text.strip()
+            order = get_order(data.get("order_id", 0))
+            if not order or order["user_id"] != event.sender_id \
+                    or order["status"] != ORDER_STATUS_PENDING:
+                self.wizards.pop(event.sender_id, None)
+                await event.respond("❌ این فاکتور دیگر معتبر نیست (منقضی یا پرداخت شده).")
+                return True
+            wallet = (get_setting("usdt_wallet") or "").strip()
+            if not wallet:
+                self.wizards.pop(event.sender_id, None)
+                await event.respond("❌ کیف پول تتر تنظیم نشده — با پشتیبانی تماس بگیر.")
+                return True
+            await event.respond("🔍 در حال بررسی تراکنش روی TronGrid… (حداکثر ۲۰ ثانیه)")
+            try:
+                ok, msg = await asyncio.wait_for(
+                    _verify_trc20_transfer(txid, wallet, order["amount_usdt"]), timeout=20)
+            except asyncio.TimeoutError:
+                ok, msg = False, "بررسی TronGrid تایم اوت شد؛ کمی بعد دوباره امتحان کن"
+            except Exception as e:
+                ok, msg = False, f"خطا در بررسی تراکنش: {str(e)[:80]}"
+            if ok:
+                # اتمیک + ضد replay: فاکتور paid و اشتراک در یک تراکنش؛ یک
+                # txid هرگز برای دو فاکتور قبول نمی‌شود.
+                res = pay_order_trc20_atomic(order["id"], txid)
+                if not res["ok"]:
+                    if res["error"] == "replay":
+                        await event.respond(
+                            "❌ این هش قبلاً برای فاکتور دیگری استفاده شده است. "
+                            "هر تراکنش فقط یک‌بار قابل استفاده است."
+                        )
+                    elif res["error"] == "invalid":
+                        await event.respond(
+                            "❌ این فاکتور دیگر معتبر نیست (منقضی یا پرداخت شده)."
+                        )
+                    else:
+                        await event.respond(
+                            "❌ خطا در ثبت پرداخت؛ با پشتیبانی تماس بگیر."
+                        )
+                    self.wizards.pop(event.sender_id, None)
+                    return True
+                self.wizards.pop(event.sender_id, None)
+                # بعد از پرداخت موفق، اگر سلف‌باتِ کاربر به‌خاطر انقضای قبلی
+                # متوقف شده بود، دوباره فعال می‌شود (رزوم).
+                try:
+                    await self._resume_user_selfbots(event.sender_id)
+                except Exception:
+                    pass
+                await event.respond(
+                    f"✅ پرداخت تایید شد ({msg}) و اشتراک «{res['plan']}» فعال شد! 🎉\n\n"
+                    "برای لاگین اکانت تلگرامت از منوی اصلی اقدام کن."
+                )
+                try:
+                    await self._notify_owner(
+                        f"💵 **پرداخت خودکار تتر تایید شد**\n"
+                        f"فاکتور {order['order_no']} — کاربر `{event.sender_id}` — "
+                        f"{order['amount_usdt']:.2f} USDT\nپلن: {order['plan']}"
+                    )
+                except Exception:
+                    pass
+            else:
+                await event.respond(
+                    f"❌ {msg}\n\nاگر هش درست است، چند دقیقه صبر کن و دوباره بفرست."
+                )
+            return True
+
+        if state == WIZ_SET_CHANNEL:
+            # resolve واقعی کانال قبل از ذخیره — کانالِ پیدا‌نشده هرگز ذخیره نمی‌شود
+            ok, info, norm = await self._resolve_channel(text)
+            if not ok:
+                await event.respond(
+                    f"❌ کانال «{text.strip()}» پیدا نشد یا قابل دسترسی نیست ({info}).\n\n"
+                    "یوزرنیم درست رو بفرست (کانال باید **عمومی** باشه):"
+                )
+                return True
+            self.wizards[event.sender_id] = {
+                "state": WIZ_SET_CHANNEL, "data": {"channel": norm, "title": info},
+            }
+            await event.respond(
+                f"✅ **کانال پیدا شد:**\n\n"
+                f"📢 {info}\nhttps://t.me/{norm}\n\n"
+                "این کانال ذخیره شود؟ از این به بعد همه (به‌جز ادمین اصلی) باید "
+                "عضو این کانال باشن.",
                 buttons=[
-                    [UI.go("🔙 برگشت", "admin_update")],
-                    UI.nav_row(),
+                    [UI.confirm("بله، ذخیره کن", b"channel_confirm_save")],
+                    [UI.neutral("نه، دوباره بفرستم", "owner_channel_set")],
                 ],
             )
-        except Exception as e:
-            await event.answer(f"❌ خطا: {e}", alert=True)
+            return True
 
+        if state == WIZ_DEDICATED_TOKEN:
+            token = text.strip()
+            if not re.fullmatch(r"\d+:[A-Za-z0-9_-]{30,}", token):
+                await event.respond(
+                    "❌ قالب توکن درست نیست. از @BotFather کپی کن (مثلاً `123456789:AAF...`):"
+                )
+                return True
+            ok, info = await self._validate_bot_token(token)
+            if not ok:
+                await event.respond(
+                    f"❌ توکن معتبر نیست (تلگرام پاسخ نداد): {info}\n\n"
+                    "توکن درست رو از @BotFather بگیر و دوباره بفرست:"
+                )
+                return True
+            data["token"] = token
+            data["bot_username"] = info
+            self.wizards[event.sender_id] = {"state": WIZ_DEDICATED_OWNER_ID, "data": data}
+            await event.respond(
+                "✅ توکن معتبر است. حالا **آیدی عددی** کسی که می‌خوای مالک ربات "
+                "اختصاصی باشه رو بفرست (مثلاً `123456789` — از @userinfobot می‌تونی "
+                "بگیری):",
+                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+            return True
+
+        if state == WIZ_DEDICATED_OWNER_ID:
+            if not text.strip().lstrip("-").isdigit():
+                await event.respond("❌ آیدی عددی معتبر نیست. فقط عدد بفرست (مثلاً `123456789`):")
+                return True
+            owner_id = int(text.strip())
+            data["owner_id"] = owner_id
+            bot_id = create_dedicated_bot(event.sender_id, owner_id, data["token"])
+            data["bot_id"] = bot_id
+            await self._notify_owner(
+                f"🆕 **درخواست ربات اختصاصی ثبت شد**\n"
+                f"ربات: #{bot_id} | مالک: `{owner_id}` | "
+                f"نماینده: `{event.sender_id}` | وضعیت: منتظر پرداخت"
+            )
+            price = dedicated_bot_price()
+            # مرحله‌ی بعد: رسید پرداخت (عکس) — دقیقاً مثل جریان تمدید اشتراک
+            self._start_own_wizard(event.sender_id, WIZ_PAYMENT_RECEIPT, {
+                "plan": DEDICATED_BOT_PLAN, "amount": price,
+            })
+            card_number = get_setting("card_number", DEFAULT_CARD_NUMBER)
+            card_holder = get_setting("card_holder", DEFAULT_CARD_HOLDER)
+            # دو پیام جدا: اول کارت و مبلغ (اطلاعات پرداخت)، بعد پیامِ جداگانه‌ی
+            # درخواست رسید — طبق خواسته: «شماره کارت و یه رسید جدا براش بیاد».
+            await event.respond(
+                f"🤖 **درخواست ربات اختصاصی #{bot_id} ثبت شد**\n\n"
+                f"مالک: `{owner_id}` | توکن: {data.get('bot_username') or '✓'}\n\n"
+                f"💳 برای فعال‌سازی، مبلغ **{price:,} تومان** رو به کارت زیر واریز کن:\n\n"
+                f"`{card_number}`\nبه نام: {card_holder}\n\n"
+                "پس از واریز، تصویر رسید رو در پیام بعدی بفرست 👇",
+                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+            await event.respond(
+                "🧾 **مرحله‌ی رسید پرداخت**\n\n"
+                "بعد از واریز به شماره کارت بالا، **تصویر رسید** رو همین‌جا بفرست. "
+                "بعد از تایید ادمین، ربات اختصاصی‌ات ساخته و راه‌اندازی می‌شه.",
+                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+            return True
+
+        if state == WIZ_DEDICATED_EXTEND_DAYS:
+            self.wizards.pop(event.sender_id, None)
+            bot_id = data["bot_id"]
+            b = get_dedicated_bot(bot_id)
+            if not b:
+                await event.respond("❌ این ربات اختصاصی پیدا نشد.")
+                return True
+            try:
+                days = int(text.strip())
+                assert days > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یک عدد صحیح مثبت (تعداد روز) بفرست:")
+                return True
+            old_expire = _parse_date(b["expire_date"]) if b.get("expire_date") else datetime.now(timezone.utc)
+            new_expire = _format_date(max(old_expire, datetime.now(timezone.utc)) + timedelta(days=days))
+            update_dedicated_bot_status(bot_id, b["status"], expire_date=new_expire)
+            log_action(event.sender_id, "dedicated_bot_extended", f"bot#{bot_id} +{days} روز")
+            await self._notify_owner(
+                f"➕ **ربات اختصاصی تمدید شد**\n"
+                f"ربات: #{bot_id} | +{days} روز | انقضای جدید: {new_expire} | "
+                f"توسط: `{event.sender_id}`"
+            )
+            await event.respond(
+                f"✅ ربات اختصاصی #{bot_id} به مدت {days} روز تمدید شد (انقضا: {new_expire}).",
+                buttons=[UI.nav_row()],
+            )
+            try:
+                await self.client.send_message(
+                    b["owner_id"],
+                    f"✅ ربات اختصاصی تو به مدت {days} روز تمدید شد (تا {new_expire}).",
+                )
+            except Exception:
+                pass
+            return True
+
+
+
+
+        if state == WIZ_ORPHAN_ASSIGN:
+            # تعیینِ مالکِ یک سلفِ بدون مالک — فقط OWNER/ADMIN.
+            if self._role(event.sender_id) not in (ROLE_OWNER, ROLE_ADMIN):
+                self.wizards.pop(event.sender_id, None)
+                await event.respond("⛔ دسترسی نداری.")
+                return True
+            tag = data.get("tag")
+            q = (text or "").strip().lstrip("@")
+            if q.isdigit():
+                target = int(q)
+                u = get_user(target)
+            else:
+                matches = search_users(q)
+                if not matches:
+                    await event.respond(
+                        "کاربری با این یوزرنیم پیدا نشد.\n"
+                        "آیدی عددی‌اش را بفرست، یا اول از او بخواه ربات را استارت کند."
+                    )
+                    return True
+                if len(matches) > 1:
+                    await event.respond(
+                        "چند کاربر با این یوزرنیم هست — آیدی عددیِ دقیقش را بفرست:\n"
+                        + "\n".join(f"• `{m['user_id']}` — @{m.get('username') or '—'}"
+                                    for m in matches[:8])
+                    )
+                    return True
+                u = matches[0]
+                target = u["user_id"]
+            self.wizards.pop(event.sender_id, None)
+            if not u:
+                # کاربر هنوز در دیتابیس نیست — ثبتش می‌کنیم تا مالکیت معتبر باشد
+                upsert_user(target)
+            if not self._assign_orphan_owner(tag, target):
+                await event.respond("❌ وصل‌کردن ناموفق بود — این سلف دیگر وجود ندارد یا config قفل است.")
+                return True
+            log_action(event.sender_id, "orphan_assign", f"tag={tag} → user={target}")
+            uname = (u or {}).get("username")
+            await event.respond(
+                UI.screen(
+                    "✅ وصل شد",
+                    body=[f"سلف «{tag}» حالا متعلق به "
+                          + (f"@{uname}" if uname else f"کاربر `{target}`") + " است.",
+                          "",
+                          f"{UI.GREEN} همه‌ی قابلیت‌ها برای او فعال شد و از «🤖 سلف من» "
+                          f"می‌تواند خودش مدیریتش کند."],
+                ),
+                buttons=[[UI.go("👤 مدیریت این کاربر", f"user_manage:{target}")],
+                         [UI.go("⚠️ بقیه‌ی سلف‌های بدون مالک", "owner_orphan_bots")],
+                         UI.nav_row(back=False)],
+            )
+            return True
+
+        if state == WIZ_USER_SEARCH:
+            self.wizards.pop(event.sender_id, None)
+            back_data = data["back_data"]
+            reseller_scope = data.get("reseller_scope")
+            if reseller_scope is not None:
+                # جستجوی نماینده باید فقط داخل مشتریان خودش باشد — نتایج
+                # عمومی search_users را با لیست مشتریان واقعی این نماینده
+                # قطع می‌کنیم تا یک نماینده هرگز نتواند با جستجوی آیدی/
+                # یوزرنیم به اطلاعات کاربری غیرِ مشتریانش برسد.
+                customer_ids = {u["user_id"] for u in list_users_for_reseller(reseller_scope)}
+                all_results = search_users(text)
+                results_for_event = [u for u in all_results if u["user_id"] in customer_ids]
+                if not results_for_event:
+                    await event.respond(
+                        f"❌ هیچ مشتری‌ای با «{text}» در بین کاربران تو پیدا نشد.",
+                        buttons=[[UI.go("🔍 جستجوی دوباره", b"reseller_user_search_start")],
+                                 UI.nav_row()],
+                    )
+                    return True
+                if len(results_for_event) == 1:
+                    await self._render_user_management_panel_as_message(
+                        event, results_for_event[0]["user_id"], back_data
+                    )
+                    return True
+                buttons = []
+                for u in results_for_event[:20]:
+                    label = u.get("username") or str(u["user_id"])
+                    buttons.append([UI.go(
+                        f"👤 {label}", f"user_manage:{u['user_id']}".encode()
+                    )])
+                buttons.append(UI.nav_row())
+                await event.respond(f"🔍 {len(results_for_event)} مشتری با «{text}» پیدا شد:", buttons=buttons)
+                return True
+            else:
+                results = search_users(text)
+                if not results:
+                    await event.respond(
+                        f"❌ هیچ کاربری با «{text}» پیدا نشد.",
+                        buttons=[[UI.go("🔍 جستجوی دوباره", b"user_search_start")],
+                                 UI.nav_row()],
+                    )
+                    return True
+                if len(results) == 1:
+                    await self._render_user_management_panel_as_message(event, results[0]["user_id"], back_data)
+                    return True
+                buttons = []
+                for u in results[:20]:
+                    label = u.get("username") or str(u["user_id"])
+                    buttons.append([UI.go(
+                        f"👤 {label}", f"user_manage:{u['user_id']}".encode()
+                    )])
+                buttons.append(UI.nav_row())
+                await event.respond(f"🔍 {len(results)} کاربر با «{text}» پیدا شد:", buttons=buttons)
+                return True
+
+        if state == WIZ_USER_EXTEND_DAYS:
+            self.wizards.pop(event.sender_id, None)
+            target_user_id = data["target_user_id"]
+            back_data = data["back_data"]
+            reseller_scope = data.get("reseller_scope")
+            if reseller_scope is not None:
+                customer_ids = {u["user_id"] for u in list_users_for_reseller(reseller_scope)}
+                if target_user_id not in customer_ids:
+                    await event.respond("⛔ این کاربر مشتری تو نیست.")
+                    return True
+            try:
+                days = int(text.strip())
+                assert days > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یک عدد صحیح مثبت (تعداد روز) بفرست:")
+                return True
+            # create_subscription حالا در صورتِ تغییرِ هم‌زمانِ اشتراک،
+            # به‌جای ساختنِ اشتراکِ دوم استثنا می‌دهد — اینجا به پیامِ
+            # قابل‌فهم تبدیل می‌شود، نه کرشِ ویزارد.
+            try:
+                create_subscription(target_user_id, "تمدید دستی", days)
+            except Exception as e:
+                print(f"⚠️ [saas_bot] تمدید دستی ناموفق: {type(e).__name__}: {e}")
+                await event.respond(
+                    "❌ تمدید انجام نشد — اشتراک این کاربر هم‌زمان تغییر کرد. "
+                    "یک لحظه صبر کن و دوباره امتحان کن."
+                )
+                return True
+            try:
+                await self.client.send_message(
+                    target_user_id,
+                    f"✅ اشتراک شما به مدت {days} روز توسط پشتیبانی تمدید شد.",
+                )
+            except Exception:
+                pass
+            await event.respond(f"✅ اشتراک کاربر `{target_user_id}` به مدت {days} روز تمدید شد.")
+            await self._render_user_management_panel_as_message(event, target_user_id, back_data)
+            return True
+
+        if state == WIZ_CAP_USER_ID:
+            # ورودیِ نامعتبر → روی همین قدم بمان (قاعده‌ی کلیِ ویزارد).
+            try:
+                uid = int((text or "").strip().lstrip("@"))
+                assert uid > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یک آیدیِ عددیِ معتبر بفرست:")
+                return True
+            self.wizards.pop(event.sender_id, None)
+            # به‌جای ساختِ صفحه با event.edit (که در یک پیامِ متنی جواب نمی‌دهد)،
+            # صفحه‌ی انتخابِ دامنه را برای این کاربر رندر می‌کنیم.
+            await self._owner_choose_capability_scope(event, uid)
+            return True
+
+        return False
+
+    async def _handle_photo_wizard(self, event, wiz: dict) -> bool:
+        if wiz["state"] != WIZ_PAYMENT_RECEIPT:
+            return False
+        data = wiz["data"]
+        upsert_user(event.sender_id, event.sender.username if event.sender else None)
+        # receipt_ref یک مرجع قابل‌بازیابی به خودِ پیام است (chat_id:message_id)
+        # نه صرفاً event.photo.id که به‌تنهایی برای دانلود مجدد کافی نیست.
+        receipt_ref = f"{event.chat_id}:{event.message.id}"
+        order_no = ""
+        if data.get("order_id"):
+            order = get_order(data["order_id"])
+            if order and order["user_id"] == event.sender_id \
+                    and order["status"] == ORDER_STATUS_PENDING:
+                order_no = order["order_no"]
+        pay_id = create_payment(event.sender_id, data["plan"], data["amount"], receipt_ref)
+        if data.get("order_id") and order_no:
+            set_order_payment_id(data["order_id"], pay_id)
+        self.wizards.pop(event.sender_id, None)
+        await event.respond("✅ رسید شما ثبت شد.\n\nپس از بررسی مدیریت تایید خواهد شد.")
+        pay_ref = f" (فاکتور {order_no})" if order_no else ""
+        # اعلانِ پرداخت با دکمه‌های تایید/ردِ شیشه‌ای — ادمین از همین پیام
+        # می‌تواند تایید/رد کند و دیگر لازم نیست به «بررسی پرداخت‌ها» برود.
+        # پسوند «:n» (notif) به callback اضافه می‌شود تا تایید/رد، خودِ پیامِ
+        # اعلان را به نتیجه تبدیل کند (نه لیست پرداخت‌ها).
+        notify_buttons = [[
+            UI.confirm(f"تایید #{pay_id}", f"pay_approve:{pay_id}:n"),
+            UI.danger(f"رد #{pay_id}", f"pay_reject:{pay_id}:n"),
+        ]]
+        notify_text = (
+            f"👆 رسید پرداخت #{pay_id}{pay_ref} از `{event.sender_id}`\n\n"
+            f"🧾 پلن: {data['plan']} | مبلغ: {data['amount']:,} تومان\n\n"
+            "از همین‌جا تایید یا رد کن:"
+        )
+        for admin_entry in list_admins_and_resellers():
+            if admin_entry["role"] == ROLE_ADMIN:
+                try:
+                    await self.client.forward_messages(admin_entry["user_id"], event.message)
+                    await self.client.send_message(
+                        admin_entry["user_id"], notify_text, buttons=notify_buttons
+                    )
+                except Exception:
+                    pass
+        try:
+            await self.client.forward_messages(OWNER_ID, event.message)
+            await self.client.send_message(OWNER_ID, notify_text, buttons=notify_buttons)
+        except Exception:
+            pass
+        return True
+
+    # ─────────────────────────────────────────────────────
+    #  حلقه‌ی انقضای خودکار
+    # ─────────────────────────────────────────────────────
+
+    async def _expiry_loop(self):
+        """
+        هر ساعت چک می‌کند: اشتراک‌هایی که کمتر از ۲۴ ساعت تا انقضایشان مانده
+        هشدار می‌گیرند، و اشتراک‌های واقعاً منقضی‌شده status=expired می‌شوند
+        (طبق اسپک: تنظیمات/دیتابیس/سابقه باقی می‌ماند، فقط اشتراک منقضی
+        علامت‌گذاری می‌شود — حذف فیزیکی اکانت سلف مرتبط، اگر selfbot_tag ثبت
+        شده باشد، جدا مدیریت می‌شود).
+        """
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                for sub in list_expiring_subscriptions(within_hours=24):
+                    try:
+                        await self.client.send_message(
+                            sub["user_id"],
+                            "⚠️ کمتر از 24 ساعت تا پایان اشتراک شما باقی مانده است.\n"
+                            "لطفاً سرویس خود را تمدید کنید.",
+                        )
+                    except Exception:
+                        pass
+                    mark_warned(sub["id"])
+
+                for sub in list_expired_subscriptions():
+                    expire_subscription(sub["id"])
+                    # رفتار واقعی با پیام هماهنگ است: سلف‌بات متوقف و
+                    # disabled می‌شود (نه حذف) — تنظیمات و سشن‌ها حفظ می‌شوند
+                    # و بعد از تمدید به‌طور خودکار دوباره فعال می‌شود.
+                    try:
+                        await self._stop_and_disable_user_selfbots(sub["user_id"])
+                    except Exception:
+                        pass
+                    # v1.8.0: پیام هشدار انقضا با پیشنهاد تمدید (طبق درخواست)
+                    try:
+                        await self.client.send_message(
+                            sub["user_id"],
+                            "❌ **اشتراک شما منقضی شد**\n\n"
+                            "SelfBot شما متوقف شد. تنظیمات و سشن‌هایت حفظ "
+                            "شده‌اند، اما اگر تا **۳ روز** دیگر تمدید نکنید، "
+                            "اکانت شما از سرور حذف خواهد شد.\n\n"
+                            "💡 برای تمدید، از منوی اصلی «🛒 خرید سلف» رو بزنید.\n"
+                            "⚠️ بعد از حذف، تمام اطلاعات شما (اکانت‌ها، تنظیمات، "
+                            "لاگ‌ها) از سرور پاک می‌شود و قابل بازیابی نیست.",
+                        )
+                    except Exception:
+                        pass
+
+                # v1.8.0: حذف خودکار اکانت‌هایی که 3 روز از انقضایشان گذشته
+                # (طبق درخواست کاربر: «بعد از سه روز از سرور حذفش کن»)
+                await self._cleanup_long_expired_users(grace_days=3)
+
+                await self._sweep_expired_dedicated_bots()
+
+                # فاکتورهای در انتظاری که انقضایشان گذشته → باطل + اطلاع
+                for order in list_expired_orders():
+                    expire_order(order["id"])
+                    try:
+                        await self.client.send_message(
+                            order["user_id"],
+                            f"⏳ فاکتور `{order['order_no']}` منقضی شد و باطل شد. "
+                            "برای خرید دوباره از «💳 تمدید اشتراک» اقدام کن.",
+                        )
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"⚠️ [saas_bot] خطا در expiry_loop: {e}")
+                await asyncio.sleep(60)
+
+    async def _cleanup_long_expired_users(self, grace_days: int = 3):
+        """
+        v1.8.0: حذف خودکار اکانت‌هایی که بیش از N روز از انقضایشان گذشته.
+
+        طبق درخواست کاربر: «اگر سلفی منقضی شد، خودکار به او پیام بده و
+        اگر تمدید نکرد، بعد از سه روز از سرور حذفش کن تا این‌قدر زیاد نشوند.»
+
+        کارهایی که انجام می‌دهد:
+        1. پیدا کردن اشتراک‌هایی که status=expired و expire_date بیش از
+           grace_days روز قبل بوده.
+        2. توقف و غیرفعال‌سازی سلف‌بات‌هایشان (اگر هنوز فعال بودن).
+        3. حذف session files (فایل‌های .session در sessions/).
+        4. حذف اکانت‌هایشان از config.json.
+        5. حذف رکوردهایشان از جداول users, subscriptions, tickets.
+        6. ارسال پیام آخر «اکانت شما حذف شد» (اگر ممکن باشه).
+        """
+        import glob as _glob
+        import os as _os
+        from datetime import datetime, timedelta, timezone as _tz
+
+        cutoff_date = (datetime.now(_tz.utc) - timedelta(days=grace_days)).strftime("%Y-%m-%d")
+
+        # پیدا کردن اشتراک‌های منقضی + کاربرانشون
+        with _conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT user_id FROM subscriptions "
+                "WHERE status = 'expired' AND expire_date < ?",
+                (cutoff_date,),
+            ).fetchall()
+        expired_user_ids = [r["user_id"] for r in rows]
+        if not expired_user_ids:
+            return
+
+        for uid in expired_user_ids:
+            try:
+                # 1. توقف و disable سلف‌بات‌ها (اگر هنوز فعال بودن)
+                try:
+                    await self._stop_and_disable_user_selfbots(uid)
+                except Exception:
+                    pass
+
+                # 2. حذف session files
+                try:
+                    for session_file in _glob.glob(f"sessions/*_{uid}.session"):
+                        try:
+                            _os.remove(session_file)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # 3. حذف از config.json
+                try:
+                    cfg = self.sb.load_config()
+                    if cfg and config_state() == CONFIG_VALID:
+                        to_remove = [
+                            tag for tag, acc in cfg.items()
+                            if isinstance(acc, dict)
+                            and (acc.get("owner_user_id") == uid
+                                 or account_is_orphan(acc, tag))
+                            and not acc.get("provision_source") == PROVISION_MANUAL
+                        ]
+                        if to_remove:
+                            for tag in to_remove:
+                                cfg.pop(tag, None)
+                            self.sb.save_config(cfg)
+                except Exception:
+                    pass
+
+                # 4. حذف از دیتابیس
+                try:
+                    with _conn() as c:
+                        # حذف رکوردهای کاربر (به ترتیب وابستگی)
+                        c.execute("DELETE FROM tickets WHERE user_id = ?", (uid,))
+                        c.execute("DELETE FROM subscriptions WHERE user_id = ?", (uid,))
+                        c.execute("DELETE FROM purchases WHERE user_id = ?", (uid,))
+                        c.execute("DELETE FROM admins WHERE user_id = ?", (uid,))
+                        c.execute("DELETE FROM users WHERE user_id = ?", (uid,))
+                except Exception as e:
+                    print(f"⚠️ [cleanup] DB error for uid={uid}: {e}")
+
+                # 5. پیام آخر (اگر بتونه)
+                try:
+                    await self.client.send_message(
+                        uid,
+                        "🗑 اکانت شما به دلیل عدم تمدید اشتراک، "
+                        f"بعد از {grace_days} روز از سرور حذف شد.\n\n"
+                        "تمام اطلاعات شما (اکانت‌ها، تنظیمات، لاگ‌ها) پاک شد.\n"
+                        "برای استفاده‌ی مجدد، می‌توانید با /start ربات اکانت جدید بسازید.",
+                    )
+                except Exception:
+                    pass
+
+                print(f"✅ [cleanup] کاربر {uid} بعد از {grace_days} روز انقضا حذف شد.")
+            except Exception as e:
+                print(f"⚠️ [cleanup] خطا در حذف کاربر {uid}: {e}")
+
+    async def _sweep_expired_dedicated_bots(self):
+        """ربات‌های اختصاصی منقضی‌شده: فرآیند متوقف و وضعیت revoke."""
+        for dbot in list_active_dedicated_bots():
+            if not dbot.get("expire_date"):
+                continue
+            try:
+                if _parse_date(dbot["expire_date"]) > datetime.now(timezone.utc):
+                    continue
+            except Exception as e:
+                # تاریخِ خراب/ناخوانا: قبلاً بی‌صدا continue می‌شد — یعنی آن
+                # ربات برای همیشه فعال می‌ماند و هیچ‌جا هم ثبت نمی‌شد.
+                # حالا دست‌کم دیده می‌شود تا OWNER بتواند دستی رسیدگی کند.
+                # عمداً خودکار revoke نمی‌کنیم: حذفِ دسترسیِ یک ربات به‌خاطر
+                # یک فیلدِ خرابِ تاریخ، از خودِ مشکل بدتر است.
+                print(f"⚠️ [dedicated] تاریخ انقضای ربات #{dbot.get('id')} "
+                      f"قابل خواندن نیست ({dbot.get('expire_date')!r}: "
+                      f"{type(e).__name__}) — از انقضای خودکار جا می‌ماند؛ "
+                      f"دستی بررسی کن.")
+                continue
+            pid = dbot.get("pid") or _read_pidfile(dbot.get("bot_dir") or "")
+            await _stop_process_by_pid(pid)
+            update_dedicated_bot_status(dbot["id"], "revoked")
+            log_action(0, "dedicated_bot_expired", f"bot#{dbot['id']}")
+            try:
+                await self.client.send_message(
+                    dbot["owner_id"],
+                    "❌ دوره‌ی ربات اختصاصی تو تمام شد و متوقف گردید. "
+                    "برای تمدید با پشتیبانی تماس بگیر.",
+                )
+            except Exception:
+                pass
+
+    # ─────────────────────────────────────────────────────
+    #  ثبت هندلرها
+    # ─────────────────────────────────────────────────────
+
+    def _register_handlers(self):
+        @self.client.on(events.NewMessage(pattern="/start"))
+        async def start_h(event):
+            self.wizards.pop(event.sender_id, None)
+            await self._clear_admin_panel_wizard(event.sender_id)
+            is_new = get_user(event.sender_id) is None
+            upsert_user(event.sender_id, event.sender.username if event.sender else None,
+                            event.sender.first_name if event.sender else None)
+            # دعوت: «/start ref_<id>» فقط برای کاربرِ تازه ثبت می‌شود — تا
+            # کسی نتواند با /startِ دوباره امتیازِ تکراری بسازد.
+            if is_new:
+                ref = parse_referral_arg(event.raw_text or "")
+                if ref:
+                    try:
+                        if attach_referrer(event.sender_id, ref):
+                            _spawn_bg(self._notify_referrer(ref), "referral")
+                    except Exception as e:
+                        print(f"⚠️ [referral] ثبت دعوت ناموفق: {type(e).__name__}")
+            # گیت عضویت کانال: همه به‌جز ادمین اصلی باید عضو کانالِ تنظیم‌شده
+            # توسط مالک باشند تا بتوانند از ربات استفاده کنند. اگر عضو نباشد،
+            # پیام /start او حذف و پیام گیت (کادر شیشه‌ای کانال + بررسی عضویت)
+            # فرستاده می‌شود.
+            if not await self._channel_gate(event.sender_id):
+                try:
+                    await event.message.delete()
+                except Exception:
+                    pass
+                await self._send_channel_gate_message(event)
+                return
+            # دوباره‌عضو‌شده‌ای که /start می‌زند: پیامِ گیتِ کهنه‌اش پاک
+            # می‌شود تا چت تمیز بماند
+            if event.sender_id in self._gate_blocked:
+                self._gate_blocked.discard(event.sender_id)
+                await self._try_delete_gate_message(event.sender_id, event.chat_id)
+            role = self._role(event.sender_id)
+            await self._show_menu_for_role(event.chat_id, role)
+
+        @self.client.on(events.NewMessage)
+        async def message_h(event):
+            if event.raw_text and event.raw_text.startswith("/"):
+                return
+
+            # گیت همیشگی: اگر کاربر از کانال خارج شده باشد، همین اولین
+            # تعاملِ بعدی دسترسی را می‌بندد تا دوباره عضو شود.
+            if not await self._channel_gate(event.sender_id):
+                await self._send_channel_gate_message(event, denied=True)
+                return
+            # دوباره‌عضو‌شده‌ای که پیام متنی می‌فرستد: پیامِ گیتِ کهنه‌اش
+            # پاک می‌شود تا چت تمیز بماند
+            if event.sender_id in self._gate_blocked:
+                self._gate_blocked.discard(event.sender_id)
+                await self._try_delete_gate_message(event.sender_id, event.chat_id)
+
+            wiz = self.wizards.get(event.sender_id)
+            if wiz:
+                try:
+                    if event.photo:
+                        handled = await self._handle_photo_wizard(event, wiz)
+                    elif getattr(event, "document", None):
+                        # فایل (مثلاً بکاپ دیتابیس برای بازیابی)
+                        handled = await self._handle_document_wizard(event, wiz)
+                    else:
+                        handled = await self._handle_text_wizard(event, wiz)
+                    if handled:
+                        return
+                except Exception as e:
+                    print(f"⚠️ [saas_bot] خطا در ویزارد: {e}")
+                    self.wizards.pop(event.sender_id, None)
+                    await event.respond(f"❌ خطای غیرمنتظره: {str(e)[:150]}")
+                    return
+
+            # اگر ویزاردِ ما این پیام را نخواست، آن را به پنل مدیریت
+            # اکانت‌های سلف هدایت می‌کنیم — صرف‌نظر از نقش و بدون فهرست
+            # جداگانه. این بی‌خطر است چون admin_panel.handle_message بدون
+            # ویزاردِ بازِ مخصوصِ همین کاربر کاری نمی‌کند؛ برای OWNER/ADMIN/
+            # RESELLER (که همیشه مجازند) و برای USER عادیِ وسطِ ویزاردِ
+            # لاگین (تگ/شماره/کد) دقیقاً همین مسیر است. scope پنل هم درست
+            # قبل از فراخوانی روی همین کاربر تنظیم می‌شود — و چون پنل یک
+            # singleton مشترک است، کل (sync + dispatch) زیر _panel_lock می‌رود
+            # تا رویدادِ هم‌زمانِ کاربرِ دیگر نتواند وسطِ dispatch scope را
+            # عوض کند.
+            async with self._panel_lock:
+                self._sync_admin_panel_scope(event.sender_id)
+                await self.admin_panel.handle_message(event)
+
+        @self.client.on(events.CallbackQuery)
+        async def callback_h(event, _route: str = None, _depth: int = 0):
+            """
+            روترِ مرکزی. `_route` فقط وقتی پر می‌شود که «بازگشت» دارد یک
+            مسیرِ ذخیره‌شده را دوباره رندر می‌کند؛ در آن حالت event.data
+            هنوز `nav:back` است و نباید مبنا قرار گیرد.
+
+            نکته‌ی امنیتی مهم: بازگشت، مسیر را از همین‌جا و از ابتدا
+            dispatch می‌کند — یعنی همه‌ی گاردهای نقش/مالکیت (از جمله
+            گاردِ متمرکزِ _TAG_PREFIXES در AdminBot) دقیقاً مثل کلیکِ
+            مستقیم اجرا می‌شوند. پشته‌ی ناوبری هیچ دسترسی‌ای اعطا نمی‌کند؛
+            فقط یادش می‌ماند کاربر کجا بوده.
+            """
+            data = _route if _route is not None else event.data.decode()
+            uid = event.sender_id
+            role = self._role(uid)
+            # گیت همیشگی: هر تعاملِ بعد از خروج از کانال بسته می‌شود. دکمه‌ی
+            # «بررسی عضویت» خودش استثناست (تا کاربرِ تازه‌عضو‌شده بتواند
+            # وارد شود).
+            if data != "channel_retry" and not await self._channel_gate(uid):
+                await self._send_channel_gate_message(event, denied=True)
+                return
+
+            # ─── ناوبری ────────────────────────────────────────────────
+            if data == NAV_NOOP:
+                # دکمه‌ی تزئینی (شمارنده‌ی صفحه) — فقط اسپینر را می‌بندد.
+                await event.answer()
+                return
+
+            if data == NAV_HOME:
+                self.wizards.pop(uid, None)
+                await self._clear_admin_panel_wizard(uid)
+                self.nav.reset(uid)
+                await self._show_menu_for_role(event.chat_id, role, edit_event=event)
+                return
+
+            if data == NAV_BACK:
+                # محافظِ بازگشتِ زنجیره‌ای: اگر مسیرِ ذخیره‌شده خودش دوباره
+                # به بازگشت برسد (نباید بشود، ولی داده‌ی کهنه ممکن است)،
+                # بعد از چند قدم به منوی اصلی می‌رویم نه بازگشتِ بی‌پایان.
+                if _depth >= 4:
+                    self.nav.reset(uid)
+                    await self._show_menu_for_role(event.chat_id, role, edit_event=event)
+                    return
+                self.wizards.pop(uid, None)
+                await self._clear_admin_panel_wizard(uid)
+                prev = self.nav.pop(uid)
+                if not prev:
+                    # ریشه‌ی پشته — یک قدم بالاتر از این، منوی اصلی است.
+                    await self._show_menu_for_role(event.chat_id, role, edit_event=event)
+                    return
+                await callback_h(event, _route=prev, _depth=_depth + 1)
+                return
+
+            # مسیرهای «صفحه» وارد پشته می‌شوند؛ مسیرهای «عمل» نه (وگرنه
+            # بازگشت روی همان صفحه گیر می‌کند). بازگشت هم دوباره push
+            # نمی‌کند — pop خودش پشته را درست کرده است.
+            if _route is None and not _is_nav_action(data):
+                self.nav.push(uid, data)
+
+            try:
+                if data == "admin_users" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._admin_show_users_hub(event, role)
+                    return
+                if data == "admin_tools" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._show_admin_tools(event, role)
+                    return
+                # v1.8.0: تب‌های جدید پنل ادمین
+                if data == "admin_back_to_hub" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._show_admin_hub(event, role)
+                    return
+                if data.startswith("admin_tab_") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    tab = data[len("admin_tab_"):]
+                    await self._show_admin_tab(event, tab, role)
+                    return
+                if data.startswith("users_section_") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    section = data[len("users_section_"):]
+                    await self._show_users_section(event, section, role)
+                    return
+                if data.startswith("user_search_section:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    section = data.split(":", 1)[1]
+                    await self._start_section_search(event, section)
+                    return
+                # v1.9.0: فیکس critical - قبلاً cap_list/cap_add_start/cap_user/cap_grant/cap_revoke
+                # فقط در AdminBot.handle_callback بود ولی وقتی SaaSBot می‌فرسته
+                # به admin_panel.handle_callback، این متدها روی instance خودش
+                # فراخوانی می‌شد (AdminBot) و چون توابع در SaaSBot تعریف شدن،
+                # AttributeError می‌داد و کاربر ارور «خطا در پردازش» می‌دید.
+                if data == "cap_list" and role == ROLE_OWNER:
+                    await self._owner_show_capability_list(event)
+                    return
+                if data == "cap_add_start" and role == ROLE_OWNER:
+                    await self._owner_start_capability_add(event)
+                    return
+                if data.startswith("cap_user:") and role == ROLE_OWNER:
+                    uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_show_capability_user(event, uid)
+                    return
+                if data.startswith("cap_choose_scope:") and role == ROLE_OWNER:
+                    uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_choose_capability_scope(event, uid)
+                    return
+                if data.startswith("cap_confirm:") and role == ROLE_OWNER:
+                    _, uid, scope = data.split(":", 2)
+                    await self._owner_confirm_capability(event, safe_callback_int(uid, 0), scope)
+                    return
+                if data.startswith("cap_grant:") and role == ROLE_OWNER:
+                    _, uid, scope = data.split(":", 2)
+                    await self._owner_grant_capability(event, safe_callback_int(uid, 0), scope)
+                    return
+                if data.startswith("cap_revoke:") and role == ROLE_OWNER:
+                    _, uid, scope = data.split(":", 2)
+                    await self._owner_revoke_capability(event, safe_callback_int(uid, 0), scope)
+                    return
+                if data == "user_account":
+                    await self._show_account_card(event)
+                    return
+                if data == "user_referral":
+                    await self._show_referral(event)
+                    return
+                if data == "admin_hub":
+                    if role not in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    self.wizards.pop(event.sender_id, None)
+                    await self._show_admin_hub(event, role)
+                    return
+                # v2.0: سربرگ‌های بخش‌های پنل ادمین (Ⅰ..Ⅴ) — فقط نمایشی،
+                # کلیک بی‌اثر، اما اگه کلاینت کلیک کنه ما فقط پنل رو
+                # دوباره رندر می‌کنیم تا کاربر حس کنه «اتفاقی افتاد».
+                if data.startswith("hdr:"):
+                    await event.answer()
+                    await self._show_admin_hub(event, role)
+                    return
+                if data == "goto_admin_panel":
+                    if role not in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    self.wizards.pop(event.sender_id, None)
+                    async with self._panel_lock:
+                        self._sync_admin_panel_scope(event.sender_id)
+                        await self.admin_panel._show_main_menu(event.chat_id, edit_event=event)
+                    return
+                if data == "back_role_menu":
+                    self.wizards.pop(event.sender_id, None)
+                    # گیت عضویت کانال — ورود مجدد به منوی اصلی هم باید چک شود
+                    if not await self._channel_gate(event.sender_id):
+                        await self._send_channel_gate_message(event)
+                        return
+                    await self._show_menu_for_role(event.chat_id, role, edit_event=event)
+                    return
+                if data == "channel_retry":
+                    # دکمه‌ی «بررسی عضویت» — بعد از عضویت، دسترسی بدون نیاز
+                    # به /start دوباره بررسی می‌شود (force=True: بدون استفاده
+                    # از کش، چکِ تازه با تلگرام). هر کلیک یک تماس شبکه است؛
+                    # سقف ۵ ثانیه‌ای جلوی اسپمِ کلیک را می‌گیرد.
+                    now = time.time()
+                    if now - self._gate_retry_ts.get(event.sender_id, 0) < _GATE_RETRY_COOLDOWN:
+                        await event.answer("⏳ یک لحظه صبر کن و دوباره بررسی کن.", alert=True)
+                        return
+                    self._gate_retry_ts[event.sender_id] = now
+                    if await self._channel_gate(event.sender_id, force=True):
+                        self.wizards.pop(event.sender_id, None)
+                        if event.sender_id in self._gate_blocked:
+                            # دوباره‌عضو‌شده: پیام خوشامد + آزاد شدن از لیستِ بسته‌ها
+                            self._gate_blocked.discard(event.sender_id)
+                            inc_setting("gate_rejoined_count")
+                            try:
+                                await self.client.send_message(
+                                    event.chat_id,
+                                    "✅ **حالا می‌تونی از ربات استفاده کنی!** 🎉\n\n"
+                                    "خوش اومدی — منوی زیر رو ببین:",
+                                )
+                            except Exception:
+                                pass
+                        await self._show_menu_for_role(
+                            event.chat_id, self._role(event.sender_id), edit_event=event
+                        )
+                    else:
+                        await self._send_channel_gate_message(event, denied=True)
+                    return
+                if data == "owner_channel" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_channel_settings(event)
+                    return
+                if data == "owner_channel_check" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    # بررسیِ کانال فقط خواندنی است (resolve زنده) — به‌خطر
+                    # نیست که ادمین‌های غیرِOWNER هم بزنند. تغییر/حذف شرط
+                    # همچنان فقط OWNER.
+                    await self._owner_check_channel(event)
+                    return
+                if data == "owner_channel_set" and role == ROLE_OWNER:
+                    await self._start_channel_set(event)
+                    return
+                if data == "channel_confirm_save" and role == ROLE_OWNER:
+                    wiz = self.wizards.pop(event.sender_id, None)
+                    ch = (wiz or {}).get("data", {}).get("channel")
+                    title = (wiz or {}).get("data", {}).get("title", "")
+                    if not ch:
+                        await event.answer("کانالی در انتظار تایید نیست.", alert=True)
+                        return
+                    set_setting("required_channel", ch)
+                    # عنوان واقعی کانال ذخیره می‌شود تا کادر شیشه‌ایِ پیام
+                    # گیت به‌جای @username نام واقعی را نشان دهد
+                    set_setting("required_channel_title", title)
+                    self._reset_gate_state()
+                    await event.answer("✅ کانال ذخیره شد.")
+                    await self._owner_show_channel_settings(event)
+                    return
+                if data == "owner_channel_clear" and role == ROLE_OWNER:
+                    set_setting("required_channel", "")
+                    set_setting("required_channel_title", "")
+                    self._reset_gate_state()
+                    await event.answer("✅ شرط عضویت کانال برداشته شد.")
+                    await self._owner_show_channel_settings(event)
+                    return
+                if data == "owner_dedicated_list" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_dedicated_bots(event)
+                    return
+                if data == "reseller_dedicated_bot" and role == ROLE_RESELLER:
+                    await self._start_dedicated_bot_wizard(event)
+                    return
+                if data.startswith("dedicated_manage:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_dedicated_bot_detail(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("dedicated_toggle:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._dedicated_bot_toggle(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("dedicated_extend:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._dedicated_bot_extend_start(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("dedicated_health:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._dedicated_bot_health(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("dedicated_revoke:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._dedicated_bot_revoke(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("dedicated_revoke_go:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._dedicated_bot_revoke_go(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("dedicated_delete_go:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._dedicated_bot_delete_go(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data == "admin_users" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._admin_show_users_hub(event, role)
+                    return
+                if data == "admin_finance" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._admin_show_finance_hub(event, role)
+                    return
+                if data == "admin_tickets" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._admin_show_tickets_hub(event)
+                    return
+                if data == "owner_orders" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_orders(event)
+                    return
+                if data == "owner_orphan_bots" and role == ROLE_OWNER:
+                    await self._owner_show_orphan_bots(event)
+                    return
+                if data.startswith("orphan_own:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._start_orphan_assign(event, data.split(":", 1)[1])
+                    return
+                if data.startswith("orphan_manage:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._open_orphan_full(event, data.split(":", 1)[1])
+                    return
+                if data.startswith("orphan_acc:") and role == ROLE_OWNER:
+                    # فرمت: orphan_acc:{tag} — مدیریت اکانت بدون مالک
+                    await self._show_orphan_acc(event, data.split(":", 1)[1])
+                    return
+                if data == "admin_settings" and role == ROLE_OWNER:
+                    await self._admin_show_settings_hub(event)
+                    return
+                if data == "admin_backup" and role == ROLE_OWNER:
+                    await self._admin_show_backup_hub(event)
+                    return
+                if data == "owner_users" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_users(event)
+                    return
+                if data.startswith("users_list:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    # فرمت: users_list:{filter}:{page}
+                    parts_cb = data.split(":")
+                    fkey = parts_cb[1] if len(parts_cb) > 1 else "all"
+                    page = int(parts_cb[2]) if len(parts_cb) > 2 and parts_cb[2].isdigit() else 0
+                    await self._owner_show_users(event, fkey=fkey, page=page)
+                    return
+                if data == "user_search_start" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._start_user_search(event, back_data=b"owner_users")
+                    return
+                if data.startswith("user_accounts:"):
+                    # فرمت: user_accounts:{user_id}:{back_data} — لیست SelfBotهای یک کاربر
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        await self._show_user_accounts(event, target_id, back_data_cb)
+                    elif role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await self._show_user_accounts(event, target_id, back_data_cb)
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data.startswith("user_acc:"):
+                    # فرمت: user_acc:{user_id}:{tag} — هاب مدیریت یک SelfBot از داخل کاربر
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    tag = parts_cb[2] if len(parts_cb) > 2 else ""
+                    if target_id is None or not tag:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        await self._show_user_acc(event, target_id, tag)
+                    elif role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await self._show_user_acc(event, target_id, tag)
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                # «سلف من» برای *همه‌ی* نقش‌هاست: مدیر و نماینده هم می‌توانند سلفِ
+                # شخصیِ خودشان را داشته باشند. قبلاً به ROLE_USER محدود بود و
+                # دکمه برای آن‌ها بی‌اثر می‌شد. مالکیتِ واقعی داخلِ خودِ متد با
+                # account_belongs_to چک می‌شود، پس محدودکردن نقش اینجا لازم نیست.
+                if data == "user_my_bots":
+                    await self._show_user_own_bots(event)
+                    return
+                if data.startswith("my_acc:"):
+                    # فرمت: my_acc:{tag} — هاب مدیریت یک SelfBot خودِ کاربر
+                    await self._show_my_acc(event, data.split(":", 1)[1])
+                    return
+                if data == "user_my_add_bot":
+                    await self._user_my_add_bot(event)
+                    return
+                if data.startswith("user_sub_admin:"):
+                    # فرمت: user_sub_admin:{user_id}:{back_data} — مدیریت اشتراک یک کاربر
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        await self._show_user_sub_admin(event, target_id, back_data_cb)
+                    elif role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await self._show_user_sub_admin(event, target_id, back_data_cb)
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data.startswith("user_add_bot:"):
+                    # فرمت: user_add_bot:{user_id}:{back_data} — افزودن SelfBot برای این کاربر
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        await self._start_user_add_bot(event, target_id, back_data_cb)
+                    elif role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await self._start_user_add_bot(event, target_id, back_data_cb)
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data.startswith("user_orders_admin:"):
+                    # فرمت: user_orders_admin:{user_id}:{back_data} — سفارش‌های یک کاربر
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        await self._show_user_orders_admin(event, target_id, back_data_cb)
+                    elif role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await self._show_user_orders_admin(event, target_id, back_data_cb)
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data == "reseller_user_search_start" and role == ROLE_RESELLER:
+                    await self._start_reseller_user_search(event)
+                    return
+                if data.startswith("user_manage:"):
+                    # فرمت: user_manage:{user_id}:{back_data}
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        await self._show_user_management_panel(event, target_id, back_data=back_data_cb)
+                    elif role == ROLE_RESELLER:
+                        # فیکس امنیتی: قبل از نمایش پنل مدیریت، دوباره چک
+                        # می‌شود که این کاربر واقعاً مشتریِ همین نماینده است
+                        # — نه صرفاً اعتماد به اینکه دکمه از کجا آمده، چون
+                        # callback data را می‌شود دستی هم ساخت.
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await self._show_user_management_panel(event, target_id, back_data=back_data_cb)
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data.startswith("user_expire:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                    elif role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    ok = set_active_subscription_expired(target_id)
+                    if ok:
+                        await event.answer("✅ اشتراک لغو شد.")
+                        try:
+                            await self.client.send_message(
+                                target_id, "⚠️ اشتراک شما توسط پشتیبانی به‌صورت دستی لغو شد."
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        await event.answer("این کاربر اشتراک فعالی نداشت.", alert=True)
+                    await self._show_user_management_panel(event, target_id, back_data=back_data_cb)
+                    return
+                if data.startswith("user_extend_start:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    reseller_scope = None
+                    if role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        reseller_scope = event.sender_id
+                    elif role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    await self._clear_admin_panel_wizard(event.sender_id)
+                    self._start_own_wizard(event.sender_id, WIZ_USER_EXTEND_DAYS, {
+                        "target_user_id": target_id,
+                        "back_data": back_data_cb,
+                        "reseller_scope": reseller_scope,
+                    })
+                    await event.edit(
+                        f"➕ چند روز به اشتراک کاربر `{target_id}` اضافه شود؟ یک عدد بفرست:",
+                        buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                    )
+                    return
+                if data.startswith("user_delete_confirm:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role == ROLE_RESELLER:
+                        # نماینده هرگز «حذف کامل» ندارد — فقط «حذف از نمایندگی»
+                        await event.answer(
+                            "⛔ نماینده نمی‌تواند کاربر را کامل حذف کند؛ فقط «حذف از نمایندگی» مجاز است.",
+                            alert=True,
+                        )
+                        return
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    await event.edit(
+                        f"⚠️ آیا مطمئنی می‌خوای کاربر `{target_id}` رو کامل حذف کنی؟\n"
+                        f"این کار اشتراک/پرداخت‌ها/تیکت‌های او را هم پاک می‌کند و غیرقابل‌بازگشت است.",
+                        buttons=[
+                            [UI.danger("بله، حذف کن", f"user_delete_go:{target_id}".encode())],
+                            [UI.neutral("نه، برگرد", NAV_BACK)],
+                        ],
+                    )
+                    return
+                if data.startswith("user_delete_go:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role == ROLE_RESELLER:
+                        await event.answer(
+                            "⛔ نماینده نمی‌تواند کاربر را کامل حذف کند؛ فقط «حذف از نمایندگی» مجاز است.",
+                            alert=True,
+                        )
+                        return
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    # قبل از حذف، Runtimeهای سلف‌بات‌های کاربر کامل متوقف می‌شوند
+                    # (نسخه‌ی Runtime-aware — نه صرفاً پاک‌سازی DB/config).
+                    ok = await delete_user_completely_async(target_id)
+                    if ok:
+                        await event.edit(
+                            f"✅ کاربر `{target_id}` کامل حذف شد.",
+                            buttons=[UI.nav_row()],
+                        )
+                    else:
+                        await event.edit(
+                            "❌ این کاربر پیدا نشد (شاید قبلاً حذف شده).",
+                            buttons=[UI.nav_row()],
+                        )
+                    return
+                if data.startswith("user_unlink_confirm:"):
+                    # فرمت: user_unlink_confirm:{user_id}:{back_data} — حذف مشتری از نمایندگی
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"reseller_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role == ROLE_RESELLER:
+                        customer_ids = {u["user_id"] for u in list_users_for_reseller(event.sender_id)}
+                        if target_id not in customer_ids:
+                            await event.answer("⛔ این کاربر مشتری تو نیست.", alert=True)
+                            return
+                    elif role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    await event.edit(
+                        f"🚪 **حذف مشتری از نمایندگی**\n\n"
+                        f"کاربر `{target_id}` از زیرمجموعه‌ی تو جدا می‌شود؛ "
+                        f"هیچ‌کدام از داده‌هایش (اشتراک/سفارش/تیکت) حذف نمی‌شود.\n\n"
+                        f"ادامه می‌دی؟",
+                        buttons=[
+                            [UI.danger("بله، جدا کن", f"user_unlink_go:{target_id}".encode())],
+                            [UI.neutral("نه، برگرد", NAV_BACK)],
+                        ],
+                    )
+                    return
+                if data.startswith("user_unlink_go:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"reseller_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role == ROLE_RESELLER:
+                        ok_unlink = unlink_customer(event.sender_id, target_id)
+                        if not ok_unlink:
+                            await event.answer("این کاربر مشتری تو نیست.", alert=True)
+                            return
+                        await event.edit(
+                            f"✅ کاربر `{target_id}` از نمایندگی تو جدا شد.",
+                            buttons=[UI.nav_row()],
+                        )
+                    elif role in (ROLE_OWNER, ROLE_ADMIN):
+                        # OWNER/ADMIN: جدا کردن از نماینده‌ای که الان مالکش است
+                        u_row = get_user(target_id)
+                        cur_res = u_row["reseller_id"] if u_row else None
+                        if cur_res is None:
+                            await event.answer("این کاربر الان زیرمجموعه‌ی هیچ نماینده‌ای نیست.", alert=True)
+                            return
+                        unlink_customer(cur_res, target_id)
+                        await event.edit(
+                            f"✅ کاربر `{target_id}` از نماینده‌ی `{cur_res}` جدا شد.",
+                            buttons=[UI.nav_row()],
+                        )
+                    else:
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data == "owner_payments" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_payments(event)
+                    return
+                if data.startswith("pay_approve:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    # فرمت‌های مجاز: pay_approve:{id} (از لیست) و
+                    # pay_approve:{id}:n (از پیامِ اعلانِ رسید — از همان‌جا
+                    # تایید/رد می‌شود، بدون رفتن به بخش پرداخت‌ها).
+                    parts = data.split(":")
+                    await self._owner_review_payment(
+                        event, safe_callback_int(parts[1], 0), True, from_notif=len(parts) > 2
+                    )
+                    return
+                if data.startswith("pay_reject:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    parts = data.split(":")
+                    await self._owner_review_payment(
+                        event, safe_callback_int(parts[1], 0), False, from_notif=len(parts) > 2
+                    )
+                    return
+                if data == "owner_tickets" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_tickets(event)
+                    return
+                if data.startswith("ticket_reply:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_start_ticket_reply(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("ticket_close:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_ticket_close(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("ticket_close_go:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_ticket_close_go(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data == "owner_backup" and role == ROLE_OWNER:
+                    await self._owner_show_backup(event)
+                    return
+                if data == "owner_backup":
+                    await event.answer("⛔ دسترسی نداری — فقط OWNER به Backup دسترسی دارد.", alert=True)
+                    return
+                if data == "owner_manage_roles" and role == ROLE_OWNER:
+                    await self._owner_manage_roles_menu(event)
+                    return
+                if data == "owner_set_card" and role == ROLE_OWNER:
+                    await self._owner_start_set_card(event)
+                    return
+                if data == "owner_pricing" and role == ROLE_OWNER:
+                    await self._owner_show_pricing(event)
+                    return
+                if data == "plan_new" and role == ROLE_OWNER:
+                    await self._owner_start_plan_new(event)
+                    return
+                if data.startswith("plan_price:") and role == ROLE_OWNER:
+                    await self._owner_start_plan_price(event, data.split(":", 1)[1])
+                    return
+                if data.startswith("plan_days:") and role == ROLE_OWNER:
+                    await self._owner_start_plan_days(event, data.split(":", 1)[1])
+                    return
+                if data == "owner_set_wallet" and role == ROLE_OWNER:
+                    await self._owner_start_set_wallet(event)
+                    return
+                if data == "owner_db_backup" and role == ROLE_OWNER:
+                    await self._owner_db_backup(event)
+                    return
+                if data == "owner_db_restore" and role == ROLE_OWNER:
+                    await self._owner_start_db_restore(event)
+                    return
+                if data == "owner_db_restore":
+                    await event.answer("⛔ دسترسی نداری — فقط OWNER می‌تواند Restore کند.", alert=True)
+                    return
+                if data == "owner_db_restore_go" and role == ROLE_OWNER:
+                    await self._owner_db_restore_go(event)
+                    return
+                if data == "owner_db_restore_cancel" and role == ROLE_OWNER:
+                    await self._owner_db_restore_cancel(event)
+                    return
+                if data.startswith("role_del:") and role == ROLE_OWNER:
+                    uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    remove_admin_or_reseller(uid, removed_by=event.sender_id)
+                    await self._owner_show_license_hub(event)
+                    return
+                # role_add_admin / role_add_reseller دیگر مسیر اصلی اعطای نقش
+                # نیستند (اسپک: نقش فقط از طریق لایسنس). کالبک قدیمی را
+                # بی‌صدا رها نمی‌کنیم — کاربر را به هاب «لایسنس و دسترسی‌ها»
+                # هدایت می‌کنیم تا از مسیر درست لایسنس بسازد.
+                if data in ("role_add_admin", "role_add_reseller") and role == ROLE_OWNER:
+                    await self._owner_show_license_hub(event)
+                    return
+                if data == "license_access" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
+                    await self._owner_show_license_hub(event)
+                    return
+                if data == "license_access_list" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
+                    await self._owner_show_licenses(event)
+                    return
+                if data == "license_access_admins" and role == ROLE_OWNER:
+                    await self._owner_show_role_list(event, ROLE_ADMIN)
+                    return
+                if data == "license_access_resellers" and role == ROLE_OWNER:
+                    await self._owner_show_role_list(event, ROLE_RESELLER)
+                    return
+                if data == "owner_create_license" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
+                    await self._clear_admin_panel_wizard(event.sender_id)
+                    self._start_own_wizard(event.sender_id, "cl_pending_type", {})
+                    type_buttons = [
+                        UI.go("👤 اشتراک کاربر", b"cl_type:account"),
+                    ]
+                    # فقط OWNER می‌تواند لایسنس ادمین بسازد (ADMIN نه)
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        type_buttons.append(UI.go("🤝 نمایندگی", b"cl_type:reseller"))
+                    if role == ROLE_OWNER:
+                        type_buttons.append(UI.go("🛡 ادمین", b"cl_type:admin"))
+                    await event.edit(
+                        "➕ **ساخت لایسنس**\n\nنوع دسترسی رو انتخاب کن:",
+                        buttons=self._pair_buttons(type_buttons)
+                                + [[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                    )
+                    return
+                if data.startswith("cl_type:"):
+                    ltype = data.split(":", 1)[1]
+                    wiz = self.wizards.get(event.sender_id)
+                    if wiz is None or wiz["state"] != "cl_pending_type":
+                        return
+                    wiz["data"]["license_type"] = ltype
+                    if ltype == LICENSE_TYPE_ADMIN:
+                        # ادمین: بدون سؤال اضافی، مستقیم ساخته می‌شود (فقط OWNER)
+                        if role != ROLE_OWNER:
+                            await event.answer("⛔ فقط OWNER می‌تواند لایسنس ادمین بسازد.", alert=True)
+                            return
+                        self.wizards.pop(event.sender_id, None)
+                        lic = create_license(LICENSE_TYPE_ADMIN, duration_days=None, created_by=event.sender_id)
+                        await event.edit(_license_result_text(lic),
+                                         buttons=[UI.nav_row()])
+                        return
+                    if ltype == LICENSE_TYPE_RESELLER:
+                        # نمایندگی: سقف مشتری را می‌پرسیم
+                        wiz["state"] = WIZ_CL_RESELLER_LIMIT
+                        await event.edit(
+                            "👥 **لایسنس نمایندگی**\n\nسقف مشتری‌های این نماینده رو بفرست "
+                            "(یه عدد، مثلاً `50`):",
+                            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                        )
+                        return
+                    # account → انتخاب مدت
+                    wiz["state"] = "cl_pending_duration"
+                    await event.edit(
+                        "⏳ **مدت اعتبار** رو انتخاب کن:",
+                        buttons=[
+                            [UI.go("۳۰ روز", b"cl_dur:30"), UI.go("۹۰ روز", b"cl_dur:90")],
+                            [UI.go("۱۸۰ روز", b"cl_dur:180"), UI.go("۳۶۵ روز", b"cl_dur:365")],
+                            [UI.neutral(UI.L_CANCEL, NAV_BACK)],
+                        ],
+                    )
+                    return
+                if data.startswith("cl_dur:"):
+                    wiz = self.wizards.get(event.sender_id)
+                    if wiz is None or wiz["state"] != "cl_pending_duration":
+                        return
+                    duration = int(data.split(":", 1)[1])
+                    ltype = wiz["data"].get("license_type", LICENSE_TYPE_ACCOUNT)
+                    self.wizards.pop(event.sender_id, None)
+                    lic = create_license(ltype, duration_days=duration, created_by=event.sender_id)
+                    await event.edit(_license_result_text(lic),
+                                     buttons=[UI.nav_row()])
+                    return
+                if data == "reseller_create_license" and role == ROLE_RESELLER:
+                    await self._reseller_start_create_license(event)
+                    return
+                if data == "reseller_users" and role == ROLE_RESELLER:
+                    await self._reseller_show_users(event)
+                    return
+                if data == "reseller_subs" and role == ROLE_RESELLER:
+                    await self._reseller_show_sub_status(event)
+                    return
+                if data == "user_support":
+                    await self._user_support_start(event)
+                    return
+                if data == "user_support_end":
+                    await self._user_support_end(event)
+                    return
+                if data.startswith("ticket_unit:"):  # v1.8.0
+                    unit_id = data.split(":", 1)[1]
+                    await self._select_ticket_unit(event, unit_id)
+                    return
+                if data == "user_what_is":
+                    await self._show_what_is(event)
+                    return
+                if data == "user_sub_status":
+                    await self._user_show_sub_status(event)
+                    return
+                if data == "user_renew":
+                    await self._user_start_renew(event)
+                    return
+                if data.startswith("renew_plan:"):
+                    await self._user_plan_chosen(event, data.split(":", 1)[1])
+                    return
+                if data == "user_orders":
+                    await self._user_show_orders(event)
+                    return
+                if data.startswith("order_tron:"):
+                    await self._user_start_trx_pay(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("order_card:"):
+                    await self._user_start_card_pay(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data.startswith("order_cancel:"):
+                    await self._user_cancel_order(event, safe_callback_int(data.split(":", 1)[1], 0))
+                    return
+                if data == "user_activate_license":
+                    await self._user_start_activate_license(event)
+                    return
+                if data == "user_login_account":
+                    # فیکس اصلی این نسخه: کاربر عادی که لایسنسش را فعال
+                    # کرده یا پرداختش تایید شده، می‌تواند مستقیماً همین‌جا
+                    # اکانت تلگرامش را لاگین کند — بدون نیاز به دخالت دستی
+                    # پشتیبانی. این مسیر عمداً مستقل از نقش (role) است: هر
+                    # کسی که این دکمه را می‌بیند (که فقط بعد از فعال‌سازی
+                    # واقعی نشان داده می‌شود) مجاز به لاگین است؛ چک صریح
+                    # وجود اشتراک فعال هم به‌عنوان یک لایه‌ی دفاعی اضافه شده
+                    # تا این دکمه با کپی/فوروارد پیام قدیمی توسط کاربر دیگری
+                    # هم قابل سوءاستفاده نباشد.
+                    active_sub = get_active_subscription(event.sender_id)
+                    if not active_sub:
+                        await event.answer(
+                            "برای لاگین اکانت، اول باید اشتراک فعال داشته باشی "
+                            "(لایسنس فعال کن یا اشتراک بخر).",
+                            alert=True,
+                        )
+                        return
+                    # فیکس تکمیل اسپک: گزینه‌ی «لاگین به اکانت» فقط تا قبل از
+                    # اولین لاگین موفق باید وجود داشته باشد. شرط نمایش در منو
+                    # این را اعمال می‌کند، ولی یک دکمه‌ی کهنه/فورواردشده یا
+                    # کالبکِ دست‌ساز می‌تواند بعد از لاگین موفق دوباره این مسیر
+                    # را صدا بزند — اینجا لایه‌ی دوم دفاع است: اگر کاربر قبلاً
+                    # موفق لاگین کرده (اکانتی در config با owner_user_id او)،
+                    # مسیر لاگین مجدد بسته است و ویزارد جدیدی شروع نمی‌شود.
+                    # (اگر اکانتش بعداً توسط پشتیبانی از config حذف شده باشد،
+                    # این تابع دوباره False می‌دهد و لاگین مجدد مجاز است.)
+                    if self._user_has_logged_in_account(event.sender_id):
+                        await event.answer(
+                            "اکانت تو قبلاً با موفقیت لاگین شده — از پنل "
+                            "«مدیریت اکانت‌های سلف» می‌تونی سلفت رو مدیریت کنی.",
+                            alert=True,
+                        )
+                        return
+                    self.wizards.pop(event.sender_id, None)
+                    # قبل از شروع ویزارد لاگین، scope پنل را روی همین کاربر
+                    # تنظیم می‌کنیم (owner_filter={user_id}) تا اگر لاگین
+                    # موفق شد و کاربر به پنل «مدیریت اکانت‌های سلف» فرود آمد،
+                    # فقط اکانت‌های خودش را ببیند و هیچ‌چیز دیگری.
+                    async with self._panel_lock:
+                        self._sync_admin_panel_scope(event.sender_id)
+                        await self.admin_panel.start_login_wizard_for_user(event, event.sender_id)
+                    return
+                if data == "user_reseller_info":
+                    await event.edit(
+                        "👥 برای تبدیل‌شدن به نماینده، باید یک «لایسنس نمایندگی» از OWNER دریافت "
+                        "کنی و از همان بخش «🔑 فعالسازی با لایسنس» فعالش کنی.",
+                        buttons=[UI.nav_row()],
+                    )
+                    return
+                if data == "user_help":
+                    # v1.8.0: قبلاً HELP_TEXT (یه متن طولانی ترکیبی) نمایش
+                    # داده می‌شد. حالا ACTIVATION_HELP_TEXT نمایش داده می‌شه
+                    # که راهنمای قدم‌به‌قدم فعال‌سازیه — دقیقاً همون چیزی که
+                    # کاربر در این صفحه انتظار داره.
+                    await event.edit(ACTIVATION_HELP_TEXT, buttons=[UI.nav_row()])
+                # v2.0: نمایندگی سلف — دو callback
+                if data == "user_reseller_info":
+                    await self._show_reseller_info(event)
+                    return
+                if data == "user_reseller_apply":
+                    await self._apply_reseller(event)
+                    return
+                    return
+            except Exception as e:
+                # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
+                # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
+                print(f"⚠️ [saas_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
+                try:
+                    await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
+                except Exception:
+                    pass
+                return
+
+            # گیت اشتراک برای «افزودن اکانت» توسط USER: کاربر عادی فقط با
+            # اشتراک فعال می‌تواند اکانت جدید اضافه کند. دکمه از UI او حذف
+            # شده، ولی callback دست‌ساز/کهنه‌ی «add» هم باید در Backend رد
+            # شود (حذف دکمه به تنهایی کافی نیست). مدیریتِ SelfBotِ موجود
+            # مشمول این شرط نیست — مالکیت معیار آن است.
+            if role == ROLE_USER and data == "add":
+                if not self._user_sub_status(event.sender_id)["active"]:
+                    await event.answer("❌ برای افزودن SelfBot باید اشتراک فعال داشته باشید.", alert=True)
+                    return
+
+            # اگر هیچ‌کدام از موارد بالا مطابقت نداشت، callback را به پنل
+            # مدیریت اکانت‌های سلف هدایت می‌کنیم — صرف‌نظر از نقش و بدون
+            # فهرست جداگانه از callbackهای پنل. این امن است چون:
+            #   (۱) همه‌ی callbackهای این ماژول اول در زنجیره‌ی بالا
+            #       پردازش می‌شوند و اینجا فقط داده‌ی نامطابقت می‌رسد؛
+            #   (۲) admin_panel.handle_callback داده‌ی ناشناخته را نادیده
+            #       می‌گیرد (False برمی‌گرداند)؛
+            #   (۳) همه‌ی عملیاتِ روی اکانت‌ها با owner_filter (که الان
+            #       روی همین کاربر تنظیم شده) گارد می‌شوند — برای USER
+            #       یعنی فقط اکانت‌های خودش.
+            async with self._panel_lock:
+                self._sync_admin_panel_scope(event.sender_id)
+                await self.admin_panel.handle_callback(event, data=data)
+
+        # ارجاع به روتر، تا صفحات بتوانند «یک قدم دیگر عقب» را درخواست
+        # کنند — مثلاً وقتی هدفِ یک مسیرِ ذخیره‌شده دیگر وجود ندارد
+        # (کاربر/اکانت/ربات حذف شده) و نباید کاربر روی یک صفحه‌ی مرده
+        # با یک alert گیر کند.
+        self._router = callback_h
+
+        # هندل کردن state ساده‌ی "role_add" که مستقیم در _handle_text_wizard
+        # نبود (چون به وضعیت خاص owner نیاز دارد) — با wrap کردن تابع اصلی
+        orig_handle_text_wizard = self._handle_text_wizard
+
+        async def patched_handle_text_wizard(event, wiz):
+            if wiz["state"] == "role_add":
+                text = (event.raw_text or "").strip()
+                try:
+                    new_id = int(text)
+                except ValueError:
+                    await event.respond("❌ یه آیدی عددی معتبر بفرست:")
+                    return True
+                role_to_add = wiz["data"]["role"]
+                self.wizards.pop(event.sender_id, None)
+                add_admin_or_reseller(new_id, role_to_add, added_by=event.sender_id)
+                await event.respond(f"✅ آیدی `{new_id}` به‌عنوان {role_to_add} اضافه شد.")
+                return True
+            return await orig_handle_text_wizard(event, wiz)
+
+        self._handle_text_wizard = patched_handle_text_wizard
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -10427,7 +14255,7 @@ class HelperBot:
             self.client.start(bot_token=HELPER_BOT_TOKEN), timeout=30)
         self._register()
         me = await self.client.get_me()
-        logger.info(f"🤖 ربات راهنما بالا آمد: @{getattr(me, 'username', '?')}")
+        print(f"🤖 ربات راهنما بالا آمد: @{getattr(me, 'username', '?')}")
         return self.client
 
     def _register(self):
@@ -10471,7 +14299,7 @@ class HelperBot:
                         await event.edit(entry[1], buttons=self.back_buttons(lang))
             except Exception as e:
                 # MessageNotModified و امثالش نباید ربات را بشکنند
-                logger.warning(f"⚠️ [helper] دکمه: {type(e).__name__}")
+                print(f"⚠️ [helper] دکمه: {type(e).__name__}")
             finally:
                 try:
                     await event.answer()
@@ -10493,7 +14321,7 @@ class HelperBot:
                     )
                 ], cache_time=0)
             except Exception as e:
-                logger.warning(f"⚠️ [helper] inline: {type(e).__name__}")
+                print(f"⚠️ [helper] inline: {type(e).__name__}")
 
 
 async def run_helper_bot_forever():
@@ -10502,7 +14330,7 @@ async def run_helper_bot_forever():
     خارج می‌شود — نبودِ راهنما هرگز نباید بقیه‌ی سیستم را متوقف کند.
     """
     if not HELPER_BOT_TOKEN:
-        logger.info(
+        print("ℹ️ HELPER_BOT_TOKEN تنظیم نشده — ربات راهنما اجرا نشد "
               "(بقیه‌ی سیستم عادی کار می‌کند).")
         return
     backoff = 10
@@ -10515,7 +14343,7 @@ async def run_helper_bot_forever():
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(
+            print(f"⚠️ [helper] قطع شد ({type(e).__name__}) — "
                   f"تلاش مجدد در {backoff} ثانیه")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 300)
@@ -10541,14 +14369,14 @@ async def run_saas_bot_forever(selfbot_module):
         except Exception as e:
             consecutive_failures += 1
             wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-            logger.warning(f"⚠️ [saas_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
+            print(f"⚠️ [saas_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
             # محل دقیق خطا را همیشه چاپ کن (حتی بدون DEBUG).
             import traceback as _tb
             _stack = _tb.format_exc().strip().splitlines()
             if _stack:
                 _last = [l for l in _stack if l.strip().startswith("File ")]
                 if _last:
-                    logger.info(f"   └─ {_last[-1].strip()}")
+                    print(f"   └─ {_last[-1].strip()}")
             await asyncio.sleep(wait_time)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -10663,7 +14491,7 @@ def cleanup_stale_tracker_files() -> None:
         except Exception:
             pass
     if removed:
-        logger.info(f"🧹 {removed} فایل قدیمی ردیاب از سشن قبلی پاک‌سازی شد.")
+        print(f"🧹 {removed} فایل قدیمی ردیاب از سشن قبلی پاک‌سازی شد.")
 
 
 def cleanup_orphan_sessions() -> None:
@@ -10682,7 +14510,7 @@ def cleanup_orphan_sessions() -> None:
     # «یتیم» تشخیص داده شوند و پاک شوند.
     cfg = load_config()
     if config_state() != CONFIG_VALID:
-        logger.error(
+        print(
             f"⛔ پاک‌سازی سشن‌های یتیم اجرا نشد — config.json خراب/غیرقابل‌اعتماد است "
             f"(مسیر: {CONFIG_FILE}). هیچ سشنی حذف نشد."
         )
@@ -10714,7 +14542,7 @@ def cleanup_orphan_sessions() -> None:
             except Exception:
                 pass
     if removed:
-        logger.info(f"🧹 {removed} فایل سشن یتیم (تگ حذف‌شده/لاگین ناتمام) پاک‌سازی شد.")
+        print(f"🧹 {removed} فایل سشن یتیم (تگ حذف‌شده/لاگین ناتمام) پاک‌سازی شد.")
 
 
 def _session_file_for(tag: str) -> str:
@@ -10785,7 +14613,7 @@ def check_session_health(tag: str, require_sqlite: bool = True) -> dict:
             try:
                 _chmod_private(session_file)
                 res["file_writable"] = os.access(session_file, os.W_OK)
-                logger.error(
+                print(
                     f"🛠 [SESSION][{tag}][CHECK] mode فایل سشن به 0600 اصلاح شد "
                     f"(مالک همان user است)."
                 )
@@ -10829,7 +14657,7 @@ def check_session_health(tag: str, require_sqlite: bool = True) -> dict:
                 # Restore فقط هشدار، نه fail: permission مشکلی ندارد و این
                 # یک مشکل داده‌ی از-قبل-موجود است.
                 res["sqlite_ok"] = False
-                logger.error(
+                print(
                     f"⚠️ [SESSION][{tag}][CHECK] فایل سشن sqlite معتبر نیست "
                     f"(محتوای غیرمعتبر) — در Restore نادیده گرفته شد. مسیر: {session_file}"
                 )
@@ -11163,86 +14991,6 @@ def _active_runtime_tags() -> list:
     return tags
 
 
-# ─── Auto-update hooks (فراخوانی از cianet_updater.py) ───
-
-async def _disable_all_accounts_for_update() -> str:
-    """
-    قبل از آپدیت: همه‌ی اکانت‌ها رو graceful stop کن.
-    صدا زده می‌شه از cianet_updater.apply_update() قبل از git pull.
-    """
-    log_lines = []
-    tags = _active_runtime_tags()
-    log_lines.append(f"⏸ stopping {len(tags)} runtime(s) for update")
-    for tag in tags:
-        try:
-            ok = await ensure_stopped(tag, caller="auto_update")
-            log_lines.append(f"  {'✓' if ok else '✗'} {tag}")
-        except Exception as e:
-            log_lines.append(f"  ✗ {tag}: {e}")
-    # یک ثانیه pause برای release session files
-    await asyncio.sleep(1)
-    return "\n".join(log_lines)
-
-
-async def _reenable_all_accounts_after_update() -> str:
-    """
-    بعد از restart (و propagation_marker present): همه‌ی اکانت‌ها رو دوباره start کن.
-    صدا زده می‌شه از cianet_updater.propagate_to_accounts() بعد از restart.
-    """
-    log_lines = []
-    cfg = load_config()
-    if not cfg:
-        return "⚠️ config.json خالی، اکانتی برای re-enable نیست"
-    log_lines.append(f"▶️ re-enabling {len(cfg)} account(s) after update")
-    for tag, c in cfg.items():
-        if c.get("disabled"):
-            log_lines.append(f"  ⏭ {tag} (disabled in config)")
-            continue
-        try:
-            ready, st = await ensure_started(tag, c, caller="auto_update_propagation")
-            log_lines.append(f"  {'✓' if ready else '✗'} {tag}: {st}")
-        except Exception as e:
-            log_lines.append(f"  ✗ {tag}: {e}")
-        # فاصله بین start ها (مثل main loop)
-        await asyncio.sleep(2)
-    return "\n".join(log_lines)
-
-
-async def _send_admin_notification(text: str) -> None:
-    """به owner پیام بده بعد از آپدیت."""
-    try:
-        from telethon import TelegramClient
-        # پیدا کردن client فعال (هر bot client ای)
-        for entry in ACCOUNTS.values():
-            if entry and entry.bot and getattr(entry.bot, "client", None):
-                owner = OWNER_ID if isinstance(OWNER_ID, int) else (OWNER_ID[0] if OWNER_ID else None)
-                if owner:
-                    await entry.bot.client.send_message(owner, text)
-                    return
-    except Exception as e:
-        logger.info(f"send_admin_notification failed: {e}")
-
-
-def _update_status_text() -> str:
-    """برای نمایش در پنل ادمین."""
-    try:
-        from cianet_updater import get_version_info
-        info = get_version_info()
-        local = (info.get("local_commit") or "unknown")[:8]
-        remote = (info.get("remote_commit") or "unknown")[:8]
-        pending = info.get("pending_commits", [])
-        if pending:
-            return (
-                f"🔄 آپدیت موجود است!\n"
-                f"  local:  {local}\n"
-                f"  remote: {remote}\n"
-                f"  commits: {len(pending)}\n"
-            )
-        return f"✅ به‌روز ({local})"
-    except Exception as e:
-        return f"⚠️ {e}"
-
-
 async def wait_ready(tag: str, timeout: float = ACCOUNT_START_POLL_TIMEOUT) -> tuple:
     """همان _await_account_ready — منتظر READY واقعی."""
     return await _await_account_ready(tag, timeout)
@@ -11263,7 +15011,7 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
     تمام شده باشد — timeout به معنی آزاد کردن سشن نیست (Collision سشن /
     دو کلاینت روی یک .session ممنوع).
     """
-    logger.info(f"[{tag}][RUNTIME][STOP] caller={caller}")
+    print(f"[{tag}][RUNTIME][STOP] caller={caller}")
     _STOP_INFLIGHT[tag] = True
     try:
         entry = ACCOUNTS.get(tag)
@@ -11274,7 +15022,7 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                 raise
             except Exception as e:
                 # PATCH 6: خطای stop بلعیده نمی‌شود — tag + عملیات + خطا لاگ می‌شود.
-                logger.error(
+                print(f"❌ [{tag}][RUNTIME][STOP][stop] خطا در bot.stop: "
                       f"{type(e).__name__}: {str(e)[:100]}")
         # مالکِ Cleanup نهایی خودِ run_bot است (finally: disconnect → save →
         # close → unregister). اینجا فقط Cancel + Wait واقعی — تا وقتی تسک
@@ -11302,12 +15050,12 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                     exc = task.exception()
                     if exc is not None:
                         # PATCH 6: خطای واقعیِ تسکِ متوقف‌شده بلعیده نمی‌شود.
-                        logger.error(
+                        print(f"❌ [{tag}][RUNTIME][STOP][wait] تسک با خطا تمام "
                               f"شد: {type(exc).__name__}: {str(exc)[:100]}")
                 return True  # تسک واقعاً تمام شد → finallyِ run_bot تمیزکاری کرد
             # تسک هنوز زنده است (PATCH 1): نباید unregister شود و نباید از
             # _RUNTIME_TASKS حذف شود — runtime همچنان مالک سشن است.
-            logger.error(
+            print(f"❌ [{tag}][RUNTIME][STOP][wait] تسک بعد از cancel و "
                   f"۱۰ ثانیه هنوز زنده است — توقف کامل اعلام نمی‌شود؛ "
                   f"runtime همچنان مالک سشن است و استارتِ جدید رد می‌شود.")
             return False
@@ -11323,11 +15071,11 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                 raise
             except Exception as e:
                 # PATCH 6: خطای stop در تمیزکاریِ تکمیلی بلعیده نمی‌شود.
-                logger.error(
+                print(f"❌ [{tag}][RUNTIME][STOP][cleanup] خطا در stop تکمیلی "
                       f"(بدون تسک زنده): {type(e).__name__}: {str(e)[:100]}")
             unregister_account(tag)
             _RUNTIME_TASKS.pop(tag, None)
-            logger.warning(f"⚠️ [{tag}][RUNTIME][STOP] تمیزکاری تکمیلی انجام شد (unregister)")
+            print(f"⚠️ [{tag}][RUNTIME][STOP] تمیزکاری تکمیلی انجام شد (unregister)")
         return True
     finally:
         _STOP_INFLIGHT.pop(tag, None)
@@ -11351,17 +15099,17 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
 
     برگشت: (ready: bool, status: str) — مثل _await_account_ready.
     """
-    logger.info(f"[{tag}][RUNTIME][REQUEST] caller={caller}")
+    print(f"[{tag}][RUNTIME][REQUEST] caller={caller}")
     if _MAINTENANCE_MODE or SHUTTING_DOWN:
         reason = "maintenance" if _MAINTENANCE_MODE else "shutting_down"
-        logger.info(f"[{tag}][RUNTIME][REJECT] {reason} فعال است — استارت رد شد (caller={caller})")
+        print(f"[{tag}][RUNTIME][REJECT] {reason} فعال است — استارت رد شد (caller={caller})")
         return False, reason
     # قفلِ واقعیِ per-tag: کلِ check → mark → create زیرِ همین قفل اجرا می‌شود
     # تا دو Coroutine هم‌زمان نتوانند هر دو از چک‌ها رد شوند. منتظرهای بعدی
     # بعد از آزادشدنِ قفل دوباره وضعیت را چک می‌کنند (REUSE/WAIT).
     async with _START_LOCKS.setdefault(tag, asyncio.Lock()):
         if is_running(tag):
-            logger.info(f"[{tag}][RUNTIME][REUSE] runtime آماده است (caller={caller})")
+            print(f"[{tag}][RUNTIME][REUSE] runtime آماده است (caller={caller})")
             return True, "ready"
         # اگر تسکِ run_bot هنوز زنده است (حتی در حالت error/backoff یا شروعِ
         # ناقص) — یعنی یک Runtime واقعاً در جریان است — تسک دوم ساخته نمی‌شود
@@ -11371,13 +15119,13 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
         # اگر شکستِ دائمی بخورد، با auth_failed برمی‌گردد.
         lock = _TAG_LOCKS.get(tag)
         if lock is not None and lock.locked():
-            logger.info(f"[{tag}][RUNTIME][WAIT] runtime هنوز زنده است (start/backoff) — همان تلاش await می‌شود (caller={caller})")
+            print(f"[{tag}][RUNTIME][WAIT] runtime هنوز زنده است (start/backoff) — همان تلاش await می‌شود (caller={caller})")
             return await _await_account_ready(tag, timeout=wait_seconds)
         if is_starting(tag):
-            logger.info(f"[{tag}][RUNTIME][WAIT] runtime در حال شروع است — همان await می‌شود (caller={caller})")
+            print(f"[{tag}][RUNTIME][WAIT] runtime در حال شروع است — همان await می‌شود (caller={caller})")
             return await _await_account_ready(tag, timeout=wait_seconds)
         if is_stopping(tag):
-            logger.info(f"[{tag}][RUNTIME][WAIT] runtime در حال توقف است — منتظر پایان کامل (caller={caller})")
+            print(f"[{tag}][RUNTIME][WAIT] runtime در حال توقف است — منتظر پایان کامل (caller={caller})")
             for _ in range(int(wait_seconds / 0.4) + 1):
                 if not _STOP_INFLIGHT.get(tag):
                     break
@@ -11386,9 +15134,9 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
                 # توقف هنوز کامل نشده (disconnect/save/close در جریان است) —
                 # استارتِ جدید همان Session را باز می‌کند و Collision/readonly
                 # می‌سازد؛ پس رد می‌شود (PATCH 6).
-                logger.info(f"[{tag}][RUNTIME][WAIT] توقف هنوز کامل نشده — استارت رد شد (caller={caller})")
+                print(f"[{tag}][RUNTIME][WAIT] توقف هنوز کامل نشده — استارت رد شد (caller={caller})")
                 return False, "stopping"
-        logger.info(f"[{tag}][RUNTIME][START] caller={caller}")
+        print(f"[{tag}][RUNTIME][START] caller={caller}")
         _mark_pending_start(tag)
 
         run_bot_fn = runner or run_bot
@@ -11400,9 +15148,9 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
         )
         ready, st = await _await_account_ready(tag, timeout=wait_seconds)
         if ready:
-            logger.info(f"[{tag}][RUNTIME][READY] (caller={caller})")
+            print(f"[{tag}][RUNTIME][READY] (caller={caller})")
         else:
-            logger.info(f"[{tag}][RUNTIME][FAILED] status={st} (caller={caller})")
+            print(f"[{tag}][RUNTIME][FAILED] status={st} (caller={caller})")
         return ready, st
 
 
@@ -11411,7 +15159,7 @@ async def restart(tag: str, config: dict, caller: str = "?",
     """توقف کامل → استارت جدید (مثلاً تغییر پروکسی). runner مثل
     ensure_started — وقتی از داخل AdminBot/SaaSBot صدا زده می‌شود باید
     self.sb.run_bot داده شود."""
-    logger.info(f"[{tag}][RUNTIME][RESTART] caller={caller}")
+    print(f"[{tag}][RUNTIME][RESTART] caller={caller}")
     await ensure_stopped(tag, caller)
     return await ensure_started(tag, config, caller, runner=runner)
 
@@ -11436,7 +15184,7 @@ async def _graceful_shutdown_all() -> None:
     tags = list(ACCOUNTS.keys())
     if not tags:
         return
-    logger.error(f"🛑 دریافت سیگنال توقف — بستن تمیز {len(tags)} اکانت...")
+    print(f"🛑 دریافت سیگنال توقف — بستن تمیز {len(tags)} اکانت...")
 
     async def _stop_one(tag: str) -> None:
         entry = ACCOUNTS.get(tag)
@@ -11445,9 +15193,9 @@ async def _graceful_shutdown_all() -> None:
         try:
             await asyncio.wait_for(entry.bot.stop(), timeout=15)
         except asyncio.TimeoutError:
-            logger.warning(f"⚠️ [{tag}] بستن بیش از ۱۵ ثانیه طول کشید — عبور اجباری")
+            print(f"⚠️ [{tag}] بستن بیش از ۱۵ ثانیه طول کشید — عبور اجباری")
         except Exception as e:
-            logger.warning(f"⚠️ [{tag}] خطا هنگام بستن تمیز: {e}")
+            print(f"⚠️ [{tag}] خطا هنگام بستن تمیز: {e}")
 
     await asyncio.gather(*(_stop_one(t) for t in tags), return_exceptions=True)
 
@@ -11465,7 +15213,7 @@ async def _graceful_shutdown_all() -> None:
     if leftover:
         await asyncio.gather(*leftover, return_exceptions=True)
 
-    logger.info("✅ همه‌ی اکانت‌ها به‌طور تمیز بسته شدند.")
+    print("✅ همه‌ی اکانت‌ها به‌طور تمیز بسته شدند.")
 
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
@@ -11476,7 +15224,7 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     _shutdown_event = asyncio.Event()
 
     def _on_signal(sig_name: str):
-        logger.info(f"\n📡 سیگنال {sig_name} دریافت شد.")
+        print(f"\n📡 سیگنال {sig_name} دریافت شد.")
         if _shutdown_event and not _shutdown_event.is_set():
             _shutdown_event.set()
 
@@ -11529,7 +15277,7 @@ def load_config() -> dict:
         return cfg
     except Exception as e:
         _config_state = CONFIG_INVALID
-        logger.error(
+        print(
             f"⛔ config.json خراب/ناخوانا است — مسیر: {CONFIG_FILE}. "
             f"عملیات‌های مخرب (پاک‌سازی سشن/بازنویسی/حذف) متوقف شدند؛ "
             f"فایل دست‌نخورده ماند. (مشکل: {type(e).__name__}: {e})"
@@ -11696,7 +15444,7 @@ def save_config(cfg: dict) -> bool:
     """
     global _config_state
     if _config_state == CONFIG_INVALID:
-        logger.error(
+        print(
             f"⛔ config.json خراب است و از بازنویسی جلوگیری شد (مسیر: {CONFIG_FILE}) — "
             f"ابتدا با Restore یا تعمیرِ صریح آن را درست کنید."
         )
@@ -11745,7 +15493,7 @@ def _load_account_delete_journal() -> dict:
     except Exception as e:
         # journal خراب → ignore (بدترین حالت: یک ردیفِ stale که دوباره
         # recovery نمی‌شود؛ داده‌ای حذف نمی‌شود)
-        logger.warning(
+        print(f"⚠️ [delete_account] journal خراب/ناخوانا بود — نادیده گرفته شد: "
               f"{type(e).__name__}: {str(e)[:80]}")
         return {}
 
@@ -11775,7 +15523,7 @@ def _remove_session_files(tag: str) -> bool:
             try:
                 os.remove(f)
             except OSError as e:
-                logger.warning(f"⚠️ [delete_account] حذف فایل سشن {f} ناموفق: {e}")
+                print(f"⚠️ [delete_account] حذف فایل سشن {f} ناموفق: {e}")
                 ok = False
     return ok
 
@@ -11791,7 +15539,7 @@ def _recover_account_delete_journal() -> None:
     journal = _load_account_delete_journal()
     if not journal:
         return
-    logger.info(
+    print(f"🔧 [recovery] عملیات حذف اکانتِ ناتمام پیدا شد: "
           f"{', '.join(sorted(journal))}")
     cfg_valid = config_state() == CONFIG_VALID
     cfg = load_config() if cfg_valid else None
@@ -11805,7 +15553,7 @@ def _recover_account_delete_journal() -> None:
         # ۱) حذف سشن — اگر ناقص بماند، هیچ تغییری اعمال نمی‌شود (config هم
         # دست‌نخورده می‌ماند) و ردیف حذف نمی‌شود (Recovery قابل تکرار است).
         if not _remove_session_files(tag):
-            logger.warning(
+            print(f"⚠️ [recovery] حذف سشن تگ {tag} ناقص ماند — journal حفظ شد "
                   f"(استارتاپ بعدی دوباره تلاش می‌کند).")
             ok_entry = False
         try:
@@ -11817,7 +15565,7 @@ def _recover_account_delete_journal() -> None:
                 finally:
                     bd.close()
         except Exception as e:
-            logger.warning(
+            print(f"⚠️ [recovery] پاک‌سازی bot_states تگ {tag} ناموفق: "
                   f"{type(e).__name__}: {str(e)[:80]} — journal حفظ شد.")
             ok_entry = False
         if not ok_entry:
@@ -11832,7 +15580,7 @@ def _recover_account_delete_journal() -> None:
         try:
             save_config(cfg)
         except Exception as e:
-            logger.warning(
+            print(f"⚠️ [recovery] ذخیره‌ی config در recovery حذف اکانت ناموفق: "
                   f"{type(e).__name__}: {str(e)[:80]} — journal حفظ شد.")
             # configِ حذف‌شده در حافظه ذخیره نشد → هیچ ردیفی «تمام‌شده» نیست
             for tag in completed:
@@ -11858,12 +15606,12 @@ def _migrate_provision_sources() -> None:
     try:
         init_db()
     except Exception as e:
-        logger.warning(f"⚠️ [saas_db] مهاجرت provision_source: دیتابیس در دسترس نبود — رد شد: {e}")
+        print(f"⚠️ [saas_db] مهاجرت provision_source: دیتابیس در دسترس نبود — رد شد: {e}")
         return
     cfg = load_config()
     # config خراب → هیچ overwrite/یتم‌سازی‌ای انجام نمی‌شود (فقط خواندن مجاز است)
     if config_state() != CONFIG_VALID:
-        logger.error(
+        print(
             f"⛔ [saas_db] مهاجرت provision_source رد شد — config.json خراب است "
             f"(مسیر: {CONFIG_FILE})؛ هیچ تغییری در config اعمال نشد."
         )
@@ -11881,11 +15629,11 @@ def _migrate_provision_sources() -> None:
         try:
             save_config(cfg)
         except Exception as e:
-            logger.warning(f"⚠️ [saas_db] مهاجرت provision_source: ذخیره‌ی config ناموفق: {e}")
+            print(f"⚠️ [saas_db] مهاجرت provision_source: ذخیره‌ی config ناموفق: {e}")
             return
         after = load_config()
         if set(after.keys()) != before_keys or len(after) != before_count:
-            logger.error(
+            print("⛔ [saas_db] مهاجرت provision_source: تعداد/کلیدهای config تغییر کرد — "
                   "(نباید رخ دهد)؛ رول‌بک دستی لازم است.")
 
 
@@ -11902,7 +15650,7 @@ def _recover_delete_journal() -> None:
         with _conn() as c:
             rows = c.execute("SELECT user_id FROM delete_journal").fetchall()
     except Exception as e:
-        logger.warning(f"⚠️ [recovery] خواندن delete_journal ناموفق بود: {type(e).__name__}: {e}")
+        print(f"⚠️ [recovery] خواندن delete_journal ناموفق بود: {type(e).__name__}: {e}")
         return
     for row in rows:
         uid = row["user_id"]
@@ -11922,20 +15670,20 @@ def _recover_delete_journal() -> None:
                     bd.close()
         except Exception as e:
             ok = False
-            logger.warning(f"⚠️ [recovery] bot_data برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
+            print(f"⚠️ [recovery] bot_data برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
         # ۲) config.json: یتیم‌سازی (idempotent)
         try:
             _orphan_user_selfbots(uid)
         except Exception as e:
             ok = False
-            logger.warning(f"⚠️ [recovery] یتیم‌سازی config برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
+            print(f"⚠️ [recovery] یتیم‌سازی config برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
         if ok:
             try:
                 with _conn() as c:
                     c.execute("DELETE FROM delete_journal WHERE user_id = ?", (uid,))
-                logger.info(f"✅ [recovery] عملیات حذف کاربر {uid} کامل شد (مراحل باقی‌مانده اجرا شد).")
+                print(f"✅ [recovery] عملیات حذف کاربر {uid} کامل شد (مراحل باقی‌مانده اجرا شد).")
             except Exception as e:
-                logger.warning(f"⚠️ [recovery] پاک‌سازی ردیف journal کاربر {uid} ناموفق بود: {type(e).__name__}: {e}")
+                print(f"⚠️ [recovery] پاک‌سازی ردیف journal کاربر {uid} ناموفق بود: {type(e).__name__}: {e}")
 
 
 def safe_input(prompt=""):
@@ -12810,12 +16558,12 @@ class SelfBot:
         # secret) داده می‌شود و READY اعلام نمی‌شود.
         health = check_session_health(self.tag)
         if not health["ok"]:
-            logger.error(f"❌ [SESSION][{self.tag}][CHECK] {health['error']}")
+            print(f"❌ [SESSION][{self.tag}][CHECK] {health['error']}")
             raise Exception(
                 f"اکانت {self.tag}: سشن قابل نوشتن نیست — {health['error']} "
                 f"[SESSION][CHECK]"
             )
-        logger.info(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم است (path: {health['path']})")
+        print(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم است (path: {health['path']})")
 
         # ─── مدیریت sidecar های واقعی سشن ────────────────────────────────
         # فایلِ سشنِ واقعی تلتلون {tag}.session است و sidecar هایش
@@ -12839,7 +16587,7 @@ class SelfBot:
                 # حذفی کورکورانه انجام نشده است؛ اگر علت استفاده‌ی هم‌زمان توسط
                 # پروسه‌ی دیگری باشد، بررسی‌های مالکیتِ Runtimeِ موجود تعیین
                 # می‌کنند که استارت ادامه یابد یا نه.
-                logger.error(
+                print(
                     f"⚠️ [{self.tag}] تمیزکاری sidecar های کهنه‌ی سشن ناموفق "
                     f"بود — آن‌ها دست‌نخورده باقی ماندند (checkpoint ناقص یا "
                     f"حذف ناموفق)."
@@ -12885,10 +16633,10 @@ class SelfBot:
         try:
             await asyncio.wait_for(self.client.connect(), timeout=30)
         except asyncio.TimeoutError:
-            logger.error(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در اتصال — احتمالاً فایروال/NAT هاست کانکشن را بی‌سروصدا drop کرده")
+            print(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در اتصال — احتمالاً فایروال/NAT هاست کانکشن را بی‌سروصدا drop کرده")
             raise
         except Exception as e:
-            logger.error(f"❌ [{self.tag}] خطا در اتصال به سرورهای تلگرام: {e}")
+            print(f"❌ [{self.tag}] خطا در اتصال به سرورهای تلگرام: {e}")
             raise
 
         if not self.client.is_connected():
@@ -12900,7 +16648,7 @@ class SelfBot:
 
         try:
             if interactive and not await self.client.is_user_authorized():
-                logger.info(f"🔐 اکانت {self.tag} نیاز به لاگین دارد.")
+                print(f"🔐 اکانت {self.tag} نیاز به لاگین دارد.")
                 if is_bot_acc:
                     await self.client.start(bot_token=self.cfg.get("token"))
                 else:
@@ -12913,16 +16661,16 @@ class SelfBot:
             else:
                 await asyncio.wait_for(self.client.start(), timeout=45)
         except asyncio.TimeoutError:
-            logger.error(f"❌ [{self.tag}] تایم‌اوت ۴۵ثانیه‌ای در client.start() غیرتعاملی")
+            print(f"❌ [{self.tag}] تایم‌اوت ۴۵ثانیه‌ای در client.start() غیرتعاملی")
             raise
         except Exception as e:
-            logger.error(f"❌ [{self.tag}] خطا در لاگین: {e}")
+            print(f"❌ [{self.tag}] خطا در لاگین: {e}")
             raise
 
         try:
             me = await asyncio.wait_for(self.client.get_me(), timeout=30)
         except asyncio.TimeoutError:
-            logger.error(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در get_me() — کانکشن احتمالاً نیمه‌مرده بود")
+            print(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در get_me() — کانکشن احتمالاً نیمه‌مرده بود")
             raise
         self.my_id = me.id
         self.base_name = self._clean_name(
@@ -12942,14 +16690,14 @@ class SelfBot:
         try:
             self._persist_identity(me)
         except Exception as e:
-            logger.warning(f"⚠️ [{self.tag}] ثبت هویت اکانت ناموفق: {type(e).__name__}")
+            print(f"⚠️ [{self.tag}] ثبت هویت اکانت ناموفق: {type(e).__name__}")
 
-        logger.info(f"✅ {self.base_name} ({self.tag}) متصل شد. [نوع: {'bot' if is_bot_acc else 'user'}] [build: {BUILD_VERSION}]")
-        logger.info(f"✅ [SESSION][{self.tag}][CONNECT] اتصال برقرار شد")
+        print(f"✅ {self.base_name} ({self.tag}) متصل شد. [نوع: {'bot' if is_bot_acc else 'user'}] [build: {BUILD_VERSION}]")
+        print(f"✅ [SESSION][{self.tag}][CONNECT] اتصال برقرار شد")
 
         restored = await self._load_persisted_state()
         if restored:
-            logger.info(f"♻️ [{self.tag}] {restored} تنظیم بازیابی شد.")
+            print(f"♻️ [{self.tag}] {restored} تنظیم بازیابی شد.")
 
         # حلقه‌ی حضور (presence) باید همیشه، صرف‌نظر از مقدار online_enabled،
         # اجرا شود — چون هم مسئول نگه‌داشتن اکانت «آنلاین» است، هم مسئول
@@ -12957,7 +16705,7 @@ class SelfBot:
         await self._start_presence_loop()
 
         if is_bot_acc:
-            logger.warning(f"⚠️ [{self.tag}] اکانت بات است، برخی دستورات کار نمی‌کنند.")
+            print(f"⚠️ [{self.tag}] اکانت بات است، برخی دستورات کار نمی‌کنند.")
 
         if not self._handlers_registered:
             @self.client.on(events.NewMessage(outgoing=True))
@@ -13029,7 +16777,7 @@ class SelfBot:
 
         self.started = time.time()
         self._set_status("ready")
-        logger.info(f"✅ [SESSION][{self.tag}][READY] اکانت آماده است")
+        print(f"✅ [SESSION][{self.tag}][READY] اکانت آماده است")
         return self.client
 
     def _try_enable_tcp_keepalive(self) -> None:
@@ -13055,9 +16803,9 @@ class SelfBot:
                 sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10)
             if hasattr(_socket, "TCP_KEEPCNT"):
                 sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3)
-            logger.info(f"🔌 [{self.tag}] TCP keepalive روی سوکت فعال شد")
+            print(f"🔌 [{self.tag}] TCP keepalive روی سوکت فعال شد")
         except Exception as e:
-            logger.info(f"ℹ️ [{self.tag}] فعال‌سازی TCP keepalive ممکن نشد (بی‌اهمیت): {e}")
+            print(f"ℹ️ [{self.tag}] فعال‌سازی TCP keepalive ممکن نشد (بی‌اهمیت): {e}")
 
     async def _watchdog_loop(self):
         """
@@ -13076,7 +16824,7 @@ class SelfBot:
                         self.client(GetStateRequest()), timeout=20
                     )
                 except asyncio.TimeoutError:
-                    logger.info(f"🩺 [{self.tag}] Watchdog: کانکشن پاسخ نداد (تایم‌اوت) — قطع اجباری برای reconnect")
+                    print(f"🩺 [{self.tag}] Watchdog: کانکشن پاسخ نداد (تایم‌اوت) — قطع اجباری برای reconnect")
                     try:
                         await self.client.disconnect()
                     except Exception:
@@ -13084,7 +16832,7 @@ class SelfBot:
                 except errors.FloodWaitError:
                     pass
                 except Exception as e:
-                    logger.info(f"🩺 [{self.tag}] Watchdog: خطا در چک سلامت کانکشن ({e}) — قطع اجباری برای reconnect")
+                    print(f"🩺 [{self.tag}] Watchdog: خطا در چک سلامت کانکشن ({e}) — قطع اجباری برای reconnect")
                     try:
                         await self.client.disconnect()
                     except Exception:
@@ -13092,7 +16840,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا در watchdog_loop (ادامه می‌دهد): {e}")
+                print(f"⚠️ [{self.tag}] خطا در watchdog_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(10)
 
     async def _stop_watchdog(self):
@@ -13108,13 +16856,13 @@ class SelfBot:
                 if resource is not None:
                     try:
                         maxrss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                        logger.info(f"📊 [{self.tag}] مصرف اوج حافظه‌ی کل پروسه تا این لحظه: {maxrss_mb:.1f}MB")
+                        print(f"📊 [{self.tag}] مصرف اوج حافظه‌ی کل پروسه تا این لحظه: {maxrss_mb:.1f}MB")
                     except Exception:
                         pass
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا در memory_log_loop (ادامه می‌دهد): {e}")
+                print(f"⚠️ [{self.tag}] خطا در memory_log_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(10)
 
     async def _load_persisted_state(self) -> int:
@@ -13177,7 +16925,7 @@ class SelfBot:
             self.tabchi_enabled = True
             await self._start_tabchi()
         elif tabchi_running:
-            logger.warning(f"⚠️ [{self.tag}] تبچی: قابل بازیابی نبود (چت/متن/رسانه‌ی معتبر موجود نیست) — در DB غیرفعال شد")
+            print(f"⚠️ [{self.tag}] تبچی: قابل بازیابی نبود (چت/متن/رسانه‌ی معتبر موجود نیست) — در DB غیرفعال شد")
             set_state(self.tag, "tabchi_running", False)
             try:
                 await asyncio.wait_for(
@@ -13231,7 +16979,7 @@ class SelfBot:
         try:
             return await asyncio.wait_for(self.client(request), timeout=timeout)
         except errors.FloodWaitError as e:
-            logger.info(f"⏳ [{self.tag}] FloodWait روی {label}: {e.seconds} ثانیه")
+            print(f"⏳ [{self.tag}] FloodWait روی {label}: {e.seconds} ثانیه")
             await asyncio.sleep(e.seconds + 2)
             return None
         except asyncio.CancelledError:
@@ -13252,7 +17000,7 @@ class SelfBot:
             msg = str(e).lower()
             if "disconnected" in msg or "not connected" in msg:
                 return None
-            logger.warning(f"⚠️ [{self.tag}] خطا در {label}: {e}")
+            print(f"⚠️ [{self.tag}] خطا در {label}: {e}")
             return None
 
     @staticmethod
@@ -13541,7 +17289,7 @@ class SelfBot:
             # می‌شوند تا زیر سقف برگردیم. چتِ فعلی هرگز قربانی نمی‌شود.
             self._enforce_media_budget(protect_chat_id=chat_id)
         except Exception as e:
-            logger.warning(f"⚠️ [{self.tag}] خطا در کش پیام برای ردیاب: {e}")
+            print(f"⚠️ [{self.tag}] خطا در کش پیام برای ردیاب: {e}")
 
     def _forget_msg_bytes(self, key) -> None:
         """سهمِ مدیای یک پیامِ کش‌شده را از شمارنده کم می‌کند."""
@@ -13620,17 +17368,17 @@ class SelfBot:
         try:
             await asyncio.wait_for(func(*args), timeout=90)
         except asyncio.TimeoutError:
-            logger.info(f"⏱ [{self.tag}] هندلر {name} بیش از ۹۰ ثانیه طول کشید — لغو شد (بقیه‌ی اکانت سالم می‌ماند)")
+            print(f"⏱ [{self.tag}] هندلر {name} بیش از ۹۰ ثانیه طول کشید — لغو شد (بقیه‌ی اکانت سالم می‌ماند)")
         except asyncio.CancelledError:
             raise
         except errors.FloodWaitError as e:
-            logger.info(f"⏳ [{self.tag}] FloodWait در {name}: {e.seconds}s")
+            print(f"⏳ [{self.tag}] FloodWait در {name}: {e.seconds}s")
         except Exception as e:
             if _is_fatal_auth_error(e):
-                logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
+                print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
                 self._fatal_auth_error = True
                 return
-            logger.warning(f"⚠️ [{self.tag}] خطای کنترل‌نشده در هندلر {name}: {e}")
+            print(f"⚠️ [{self.tag}] خطای کنترل‌نشده در هندلر {name}: {e}")
             if DEBUG:
                 import traceback
                 traceback.print_exc()
@@ -14108,7 +17856,7 @@ class SelfBot:
             if allowed:
                 valid_targets.append(t)
             else:
-                logger.info(
+                print(f"🛡️ [{self.tag}] تحویلِ کد به {t} رد شد "
                       f"(مجوز در زمانِ تحویل معتبر نیست)")
         targets = valid_targets
 
@@ -14139,19 +17887,19 @@ class SelfBot:
             except Exception as e:
                 # این مقصد جواب نداد (بلاک/ناشناخته) — سراغ بعدی. لاگ می‌شود
                 # تا اگر هیچ مقصدی جواب نداد، دلیلش در لاگ پیدا باشد.
-                logger.warning(f"⚠️ [{self.tag}] ارسال کد به {t} ناموفق: {type(e).__name__}")
+                print(f"⚠️ [{self.tag}] ارسال کد به {t} ناموفق: {type(e).__name__}")
                 continue
         if not delivered:
             # اگر همه‌ی مقاصد به‌خاطرِ نبودِ مجوز رد شدند، کد نباید در
             # Saved Messages هم رها شود — در غیر این صورت کاربرِ سلب‌شده
             # هنوز می‌توانست آن را پیدا کند.
             if not targets:
-                logger.info(f"🛍️ [{self.tag}] کد لاگین تحویل داده نشد — هیچ مقصدِ مجازی نیست.")
+                print(f"🛍️ [{self.tag}] کد لاگین تحویل داده نشد — هیچ مقصدِ مجازی نیست.")
                 return
             try:
                 await self.client.send_message("me", text)
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] ارسالِ کد لاگین ناموفق: {type(e).__name__}")
+                print(f"⚠️ [{self.tag}] ارسالِ کد لاگین ناموفق: {type(e).__name__}")
 
     # یوزرنیمِ رباتِ راهنما — از متغیر محیطی، با پیش‌فرضِ فعلی.
     HELPER_USERNAME = os.environ.get("HELPER_BOT_USERNAME", "CiaNetHelpBot").lstrip("@")
@@ -14186,7 +17934,7 @@ class SelfBot:
         except Exception as e:
             reason = f"{type(e).__name__}"
 
-        logger.warning(f"⚠️ [{self.tag}] پنل راهنما نیامد: {reason}")
+        print(f"⚠️ [{self.tag}] پنل راهنما نیامد: {reason}")
         # نسخه‌ی پشتیبان: بدون دکمه، ولی دست‌کم کاربر چیزی می‌بیند
         try:
             await self.client.send_message(
@@ -14445,7 +18193,7 @@ class SelfBot:
                     if cache_entry is not None:
                         cache_entry["media_bytes"] = None
         except Exception as e:
-            logger.warning(f"⚠️ [{self.tag}] خطا در ساخت HTML ردیاب: {e}")
+            print(f"⚠️ [{self.tag}] خطا در ساخت HTML ردیاب: {e}")
 
     async def _build_chat_html(self, chat_id: int, peer_name: str, deleted_ids: set) -> Optional[str]:
         """
@@ -14641,7 +18389,7 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"⚠️ [{self.tag}] خطای اولیه در name_loop: {e}")
+            print(f"⚠️ [{self.tag}] خطای اولیه در name_loop: {e}")
 
         while self.time_enabled:
             try:
@@ -14658,7 +18406,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا در name_loop (نادیده گرفته شد، ادامه‌ می‌دهد): {e}")
+                print(f"⚠️ [{self.tag}] خطا در name_loop (نادیده گرفته شد، ادامه‌ می‌دهد): {e}")
                 await asyncio.sleep(5)
 
     async def _set_bio(self, about: str):
@@ -14680,7 +18428,7 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"⚠️ [{self.tag}] خطای اولیه در bio_loop: {e}")
+            print(f"⚠️ [{self.tag}] خطای اولیه در bio_loop: {e}")
 
         while self.bio_enabled:
             try:
@@ -14698,7 +18446,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا در bio_loop (نادیده گرفته شد، ادامه می‌دهد): {e}")
+                print(f"⚠️ [{self.tag}] خطا در bio_loop (نادیده گرفته شد، ادامه می‌دهد): {e}")
                 await asyncio.sleep(5)
 
     async def _start_bio_loop(self):
@@ -14749,7 +18497,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا در presence_loop (ادامه می‌دهد): {e}")
+                print(f"⚠️ [{self.tag}] خطا در presence_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(10)
 
     async def _preserve_offline(self) -> None:
@@ -14861,7 +18609,7 @@ class SelfBot:
                         timeout=20,
                     )
                 else:
-                    logger.warning(f"⚠️ [{self.tag}] تبچی: نه متن و نه رسانه‌ی معتبر موجود است — این دور رد شد")
+                    print(f"⚠️ [{self.tag}] تبچی: نه متن و نه رسانه‌ی معتبر موجود است — این دور رد شد")
 
                 self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
@@ -14872,7 +18620,7 @@ class SelfBot:
                 self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا در tabchi_loop (ادامه می‌دهد): {e}")
+                print(f"⚠️ [{self.tag}] خطا در tabchi_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(5)
 
     async def _start_tabchi(self):
@@ -15731,7 +19479,7 @@ class SelfBot:
                 return
 
         except Exception as e:
-            logger.error(f"❌ [{self.tag}/{cmd}]: {e}")
+            print(f"❌ [{self.tag}/{cmd}]: {e}")
             try:
                 await event.edit(f"❌ {str(e)[:100]}")
             except Exception:
@@ -15806,7 +19554,7 @@ class SelfBot:
                     # این خط عملاً هرگز اجرا نمی‌شود (نگاه کن به توضیح
                     # _DICE_SAFETY_CEILING) — صرفاً یک محافظت نهایی در
                     # برابر یک سناریوی کاملاً غیرمنتظره است.
-                    logger.error(
+                    print(
                         f"⚠️ [{self.tag}] دایس {emoji}: به سقف ایمنی "
                         f"{_DICE_SAFETY_CEILING}s رسید بدون پیدا کردن max_val"
                     )
@@ -15825,7 +19573,7 @@ class SelfBot:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.warning(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی: {e}")
+                    print(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی: {e}")
                     await asyncio.sleep(2)
                     continue
 
@@ -15889,7 +19637,7 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"⚠️ [{self.tag}] دایس {emoji}: خطای غیرمنتظره: {e}")
+            print(f"⚠️ [{self.tag}] دایس {emoji}: خطای غیرمنتظره: {e}")
         finally:
             # گاردِ همزمانی: پرچم را در همه‌ی مسیرهای خروج (موفقیت، خطا،
             # لغو، «سلف خاموش»، سقف ایمنی) پاک کن تا فرمان بعدی بتواند
@@ -15945,9 +19693,9 @@ class SelfBot:
                 if self.client:
                     await asyncio.wait_for(self.client.disconnect(), timeout=15)
             except asyncio.TimeoutError:
-                logger.warning(f"⚠️ [{self.tag}] تایم‌اوت در disconnect حین reconnect — ادامه می‌دهیم")
+                print(f"⚠️ [{self.tag}] تایم‌اوت در disconnect حین reconnect — ادامه می‌دهیم")
             except Exception as e:
-                logger.warning(f"⚠️ [{self.tag}] خطا هنگام disconnect: {e}")
+                print(f"⚠️ [{self.tag}] خطا هنگام disconnect: {e}")
 
             self.client = None
             self._handlers_registered = False
@@ -15982,9 +19730,9 @@ class SelfBot:
                     ):
                         self.tabchi_enabled = True
                         await self._start_tabchi()
-                        logger.info(f"♻️ [{self.tag}] تبچی از طریق لایه‌ی محافظتی اضافه resume شد")
+                        print(f"♻️ [{self.tag}] تبچی از طریق لایه‌ی محافظتی اضافه resume شد")
             except Exception as e:
-                logger.error(f"❌ [{self.tag}] reconnect ناموفق: {e}")
+                print(f"❌ [{self.tag}] reconnect ناموفق: {e}")
                 # اگر start() وسطِ راه (بعد از ساخت تسک‌های پس‌زمینه‌ی همین
                 # نمونه) شکست خورده باشد، تسک‌های ناقص همین‌جا متوقف می‌شوند —
                 # وگرنه تا تلاشِ بعدیِ reconnect (که آن‌ها را از نو می‌سازد)
@@ -16014,7 +19762,7 @@ class SelfBot:
         while True:
             if self._fatal_auth_error:
                 self._set_status("auth_failed")
-                logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی — دیگر تلاشی برای reconnect انجام نمی‌شود.")
+                print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی — دیگر تلاشی برای reconnect انجام نمی‌شود.")
                 try:
                     set_state(self.tag, "fatal_auth_error", True)
                 except Exception:
@@ -16029,7 +19777,7 @@ class SelfBot:
                 raise
             except Exception as e:
                 if _is_fatal_auth_error(e):
-                    logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در run_until_disconnected: {e}")
+                    print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در run_until_disconnected: {e}")
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
                     continue
@@ -16042,12 +19790,12 @@ class SelfBot:
                     # (نه «فعال»ِ دروغین) و با backoff عادی تلاش ادامه می‌یابد.
                     _health = check_session_health(self.tag)
                     if not _health["ok"]:
-                        logger.error(
+                        print(f"❌ [SESSION][{self.tag}][ERROR] {_health['error']} "
                               f"(pid={os.getpid()}, runtime_state={self.runtime_status}, "
                               f"session_path={_session_file_for(self.tag)})")
                     else:
-                        logger.info(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم شد — reconnect ادامه می‌یابد")
-                logger.warning(f"⚠️ [{self.tag}] قطع شد: {e}")
+                        print(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم شد — reconnect ادامه می‌یابد")
+                print(f"⚠️ [{self.tag}] قطع شد: {e}")
                 if DEBUG:
                     import traceback
                     traceback.print_exc()
@@ -16076,12 +19824,12 @@ class SelfBot:
                 raise
             except Exception as e:
                 if _is_fatal_auth_error(e):
-                    logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی هنگام reconnect: {e}")
+                    print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی هنگام reconnect: {e}")
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
                     continue
                 consecutive_failures += 1
-                logger.error(
+                print(
                     f"❌ reconnect [{self.tag}] شکست خورد (تلاش ناموفق پیاپی: "
                     f"{consecutive_failures}) — دوباره در {wait_time}s: {e}"
                 )
@@ -16175,22 +19923,20 @@ class SelfBot:
         # بعد save/close صریح. هرگز سشن را قبل از قطع‌کردن نمی‌بندیم تا
         # تلتون بعد از close دوباره به آن write نکند. خطاهای سشن swallow
         # نمی‌شوند — با tag و stage لاگ می‌شوند.
-        if not self.client:
-            return
         try:
             await asyncio.wait_for(self.client.disconnect(), timeout=15)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"❌ [SESSION][{self.tag}][DISCONNECT] خطا هنگام قطع: {type(e).__name__}: {str(e)[:120]}")
+            print(f"❌ [SESSION][{self.tag}][DISCONNECT] خطا هنگام قطع: {type(e).__name__}: {str(e)[:120]}")
         try:
             self.client.session.save()
         except Exception as e:
-            logger.error(f"❌ [SESSION][{self.tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
+            print(f"❌ [SESSION][{self.tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
         try:
             self.client.session.close()
         except Exception as e:
-            logger.error(f"❌ [SESSION][{self.tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
+            print(f"❌ [SESSION][{self.tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
         self._set_status("stopped")
 
 # ══════════════════════════════════════════════════════════
@@ -16201,16 +19947,16 @@ def _code_callback():
     raw = safe_input("Please enter the code you received: ")
     digits = re.sub(r'\D', '', raw)
     if digits and digits != raw.strip():
-        logger.info(f"ℹ️ کد پاک‌سازی شد: «{raw}» → «{digits}»")
+        print(f"ℹ️ کد پاک‌سازی شد: «{raw}» → «{digits}»")
     return digits or raw.strip()
 
 async def add_account():
-    logger.info("\n=== Add Account ===")
+    print("\n=== Add Account ===")
     typ = safe_input("Type (1: user, 2: bot): ")
     try:
         api_id = int(safe_input("API ID: "))
     except ValueError:
-        logger.error("❌ API ID must be a number")
+        print("❌ API ID must be a number")
         return None
     api_hash = safe_input("API Hash: ")
     if typ == "2":
@@ -16220,7 +19966,7 @@ async def add_account():
         try:
             await cl.start(bot_token=token)
         except Exception as e:
-            logger.error(f"❌ لاگین بات ناموفق بود: {e}")
+            print(f"❌ لاگین بات ناموفق بود: {e}")
             try:
                 await cl.disconnect()
             except Exception:
@@ -16231,7 +19977,7 @@ async def add_account():
             cfg = load_config()
             cfg[tag] = {"type": "bot", "api_id": api_id, "api_hash": api_hash, "token": token, "user_id": me.id}
             save_config(cfg)
-            logger.info(f"✅ {me.first_name} → {tag}")
+            print(f"✅ {me.first_name} → {tag}")
             return tag
         finally:
             # BUG #5 — اگر هر عملیاتِ بعد از لاگین (get_me/load_config/save_config)
@@ -16248,8 +19994,8 @@ async def add_account():
         try:
             await cl.start(phone=phone, code_callback=_code_callback, max_attempts=5)
         except RuntimeError as e:
-            logger.error(f"❌ کد چندبار اشتباه وارد شد: {e}")
-            logger.info("📌 کد قبلی دیگر معتبر نیست. دوباره تلاش کنید.")
+            print(f"❌ کد چندبار اشتباه وارد شد: {e}")
+            print("📌 کد قبلی دیگر معتبر نیست. دوباره تلاش کنید.")
             try:
                 await cl.disconnect()
             except Exception:
@@ -16264,7 +20010,7 @@ async def add_account():
                         pass
             return None
         except Exception as e:
-            logger.error(f"❌ لاگین ناموفق بود: {e}")
+            print(f"❌ لاگین ناموفق بود: {e}")
             try:
                 await cl.disconnect()
             except Exception:
@@ -16275,7 +20021,7 @@ async def add_account():
             cfg = load_config()
             cfg[tag] = {"type": "user", "api_id": api_id, "api_hash": api_hash, "phone": phone, "user_id": me.id}
             save_config(cfg)
-            logger.info(f"✅ {me.first_name} → {tag}")
+            print(f"✅ {me.first_name} → {tag}")
             return tag
         finally:
             # BUG #5 — مثل مسیر بات: disconnect تضمینی بعد از لاگین.
@@ -16287,18 +20033,18 @@ async def add_account():
 async def delete_account():
     cfg = load_config()
     if not cfg:
-        logger.info("📭 No accounts to delete.")
+        print("📭 No accounts to delete.")
         return
-    logger.info("\n📋 Existing accounts:")
+    print("\n📋 Existing accounts:")
     for t in cfg:
-        logger.info(f"  • {t}  [{cfg[t]['type']}]")
+        print(f"  • {t}  [{cfg[t]['type']}]")
     tag = safe_input("✏️  Enter the account tag you want to delete: ").strip()
     if tag not in cfg:
-        logger.error(f"❌ Account '{tag}' not found.")
+        print(f"❌ Account '{tag}' not found.")
         return
     confirm = safe_input(f"⚠️  Are you sure you want to delete account '{tag}'? (y/n): ").strip().lower()
     if confirm != 'y':
-        logger.error("❌ Aborted.")
+        print("❌ Aborted.")
         return
     del cfg[tag]
     save_config(cfg)
@@ -16309,10 +20055,10 @@ async def delete_account():
         if os.path.exists(f):
             try:
                 os.remove(f)
-                logger.info(f"🗑️  Deleted: {f}")
+                print(f"🗑️  Deleted: {f}")
             except Exception as e:
-                logger.warning(f"⚠️  Could not delete {f}: {e}")
-    logger.info(f"✅ Account '{tag}' successfully deleted.")
+                print(f"⚠️  Could not delete {f}: {e}")
+    print(f"✅ Account '{tag}' successfully deleted.")
 
 async def run_bot(tag, config, interactive=False):
     """
@@ -16340,7 +20086,7 @@ async def run_bot(tag, config, interactive=False):
     # — نه اینکه تا ابد در صف بماند.
     lock = _TAG_LOCKS.setdefault(tag, asyncio.Lock())
     if lock.locked():
-        logger.error(
+        print(
             f"⚠️ [{tag}] نمونه‌ی دیگری از run_bot برای همین تگ در حال اجراست — "
             f"درخواست جدید رد شد (جلوگیری از دو کلاینت هم‌زمان روی یک سشن)."
         )
@@ -16375,12 +20121,12 @@ async def run_bot(tag, config, interactive=False):
                     _set_bot_status(tag, "auth_failed")
                     if not pending.done():
                         pending.set_result(False)
-                    logger.error(
+                    print(
                         f"🛑 [{tag}] این اکانت به‌طور کامل متوقف شد (خطای احراز هویت). "
                         f"برای فعال‌سازی مجدد: python main.py {tag}"
                     )
                     break
-                logger.error(
+                print(
                     f"⚠️ [{tag}] bot.run() به‌طور غیرمنتظره و بدون خطای احراز هویت "
                     f"برگشت — این طبق طراحی نباید رخ دهد؛ برای اطمینان دوباره تلاش می‌شود."
                 )
@@ -16398,7 +20144,7 @@ async def run_bot(tag, config, interactive=False):
                 else:
                     _set_bot_status(tag, "error")
                 wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-                logger.error(
+                print(
                     f"❌ [{tag}] خطا در start/run (تلاش ناموفق پیاپی: "
                     f"{consecutive_failures}): {e} — تلاش مجدد در {wait_time}s"
                 )
@@ -16409,7 +20155,7 @@ async def run_bot(tag, config, interactive=False):
                 if _stack:
                     _last = [l for l in _stack if l.strip().startswith("File ")]
                     if _last:
-                        logger.info(f"   └─ {_last[-1].strip()}")
+                        print(f"   └─ {_last[-1].strip()}")
             finally:
                 # BUG #5: اول تسک‌های پس‌زمینه‌ی همین نمونه متوقف و واقعاً
                 # await می‌شوند — تا هیچ حلقه‌ی متعلق به نمونه در حالی که
@@ -16430,7 +20176,7 @@ async def run_bot(tag, config, interactive=False):
                 try:
                     await bot._cleanup_after_failed_start()
                 except Exception as e:
-                    logger.error(
+                    print(f"❌ [{tag}][RUNTIME][FAILED-START-CLEANUP] خطا در "
                           f"متوقف‌کردن تسک‌های نمونه‌ی ناتمام: "
                           f"{type(e).__name__}: {str(e)[:100]}")
                 # shutdown: اول disconnect، بعد save/close — و خطاهای سشن
@@ -16441,15 +20187,15 @@ async def run_bot(tag, config, interactive=False):
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        logger.error(f"❌ [SESSION][{tag}][DISCONNECT] خطا هنگام disconnect: {type(e).__name__}: {str(e)[:120]}")
+                        print(f"❌ [SESSION][{tag}][DISCONNECT] خطا هنگام disconnect: {type(e).__name__}: {str(e)[:120]}")
                     try:
                         bot.client.session.save()
                     except Exception as e:
-                        logger.error(f"❌ [SESSION][{tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
+                        print(f"❌ [SESSION][{tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
                     try:
                         bot.client.session.close()
                     except Exception as e:
-                        logger.error(f"❌ [SESSION][{tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
+                        print(f"❌ [SESSION][{tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
                 # unregister_account خیلی آخر اجرا می‌شود — بعد از پایانِ کاملِ
                 # disconnect/save/close (PATCH 5). تا وقتی Session هنوز در حال
                 # بسته‌شدن است، Runtime جدید نباید همان Session را «آزاد»
@@ -16476,9 +20222,9 @@ async def _run_all_accounts(cfg: dict) -> None:
     """
     problems = _validate_saas_env()
     if problems:
-        logger.error("❌ راه‌اندازی SelfBotها متوقف شد — متغیرهای محیطی ربات مدیریت ناقص‌اند:")
+        print("❌ راه‌اندازی SelfBotها متوقف شد — متغیرهای محیطی ربات مدیریت ناقص‌اند:")
         for p in problems:
-            logger.info(f"   - {p}")
+            print(f"   - {p}")
         return
     loop = asyncio.get_event_loop()
     _install_signal_handlers(loop)
@@ -16497,7 +20243,7 @@ async def _run_all_accounts(cfg: dict) -> None:
     start_tasks = []
     for t, c in cfg.items():
         if c.get("disabled"):
-            logger.info(f"⏸ [{t}] این اکانت غیرفعال‌شده (disabled) است — لانچ نمی‌شود")
+            print(f"⏸ [{t}] این اکانت غیرفعال‌شده (disabled) است — لانچ نمی‌شود")
             continue
         start_tasks.append(asyncio.create_task(ensure_started(t, c, caller="_run_all_accounts")))
         await asyncio.sleep(2)
@@ -16518,9 +20264,9 @@ async def _run_all_accounts(cfg: dict) -> None:
             except ImportError:
                 pass
             except Exception as e:
-                logger.warning(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+                print(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
         except Exception as e:
-            logger.warning(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+            print(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
 
     # ربات کمکی (helper) از فایلِ جداگانه‌ی helper.py بالا می‌آید — اسپاون
     # در همان ابتدای main() انجام می‌شود (نه اینجا)، تا همه‌ی مسیرهای اجرا
@@ -16554,7 +20300,7 @@ async def _run_all_accounts(cfg: dict) -> None:
             timeout=20,
         )
     except asyncio.TimeoutError:
-        logger.warning("⚠️ برخی تسک‌ها بیش از ۲۰ ثانیه برای بسته شدن طول کشیدند.")
+        print("⚠️ برخی تسک‌ها بیش از ۲۰ ثانیه برای بسته شدن طول کشیدند.")
 
 
 async def _run_single_account_cli(tag: str, cfg_entry: dict, caller: str) -> None:
@@ -16569,11 +20315,11 @@ async def _run_single_account_cli(tag: str, cfg_entry: dict, caller: str) -> Non
     برمی‌گردد و منتظر یک Runtimeِ شکست‌خورده نمی‌ماند."""
     ready, st = await ensure_started(tag, cfg_entry, caller=caller, interactive=True)
     if not ready:
-        logger.info(f"⏹ اکانت «{tag}» آماده نشد (status={st}) — برنامه خارج می‌شود.")
+        print(f"⏹ اکانت «{tag}» آماده نشد (status={st}) — برنامه خارج می‌شود.")
         return
     loop = asyncio.get_event_loop()
     _install_signal_handlers(loop)
-    logger.info(f"🟢 اکانت «{tag}» روشن است — Ctrl+C برای توقف.")
+    print(f"🟢 اکانت «{tag}» روشن است — Ctrl+C برای توقف.")
     await _shutdown_event.wait()
     await _graceful_shutdown_all()
 
@@ -16588,7 +20334,7 @@ async def main():
     try:
         ensure_referral_schema()
     except Exception as e:
-        logger.warning(f"⚠️ مهاجرت ستون‌های رفرال ناموفق: {type(e).__name__}: {e}")
+        print(f"⚠️ مهاجرت ستون‌های رفرال ناموفق: {type(e).__name__}: {e}")
     _migrate_provision_sources()
     # Recovery عملیاتِ حذفِ ناتمام (Operation Journal دو-دیتابیس): اگر ردیفی
     # مانده باشد، مراحلِ باقی‌مانده (bot_data/config) کامل می‌شود.
@@ -16604,7 +20350,7 @@ async def main():
         # config خراب هرگز به‌عنوان «هیچ اکانتی نیست» تفسیر نمی‌شود — نه
         # add_account صدا زده می‌شود (که overwrite می‌کند) و نه سرویسی
         # با {} بالا می‌آید.
-        logger.error(
+        print(
             f"⛔ config.json خراب/ناخوانا است (مسیر: {CONFIG_FILE}) و برنامه متوقف شد — "
             f"هیچ تغییری در فایل‌ها اعمال نشد. فایل را با Restore/Repair صریح درست کنید "
             f"و دوباره اجرا کنید."
@@ -16620,21 +20366,21 @@ async def main():
             await _run_all_accounts(cfg)
             return
         elif arg in cfg:
-            logger.info(f"🚀 Direct run account: {arg}")
+            print(f"🚀 Direct run account: {arg}")
             await _run_single_account_cli(arg, cfg[arg], caller="main:direct")
         else:
-            logger.error(f"❌ Account '{arg}' not found. Available accounts:")
+            print(f"❌ Account '{arg}' not found. Available accounts:")
             for t in cfg:
-                logger.info(f"  - {t}")
+                print(f"  - {t}")
         return
 
     tags = list(cfg.keys())
-    logger.info("\nExisting accounts:")
+    print("\nExisting accounts:")
     for i, t in enumerate(tags):
-        logger.info(f"  {i+1}. {t}  [{cfg[t]['type']}]")
-    logger.info("  new      - Add a new account")
-    logger.info("  all      - Run all accounts")
-    logger.info("  delete   - Delete an account")
+        print(f"  {i+1}. {t}  [{cfg[t]['type']}]")
+    print("  new      - Add a new account")
+    print("  all      - Run all accounts")
+    print("  delete   - Delete an account")
     choice = safe_input("Choice: ").strip().lower()
     if choice == "new":
         await add_account()
@@ -16651,9 +20397,9 @@ async def main():
             if 0 <= idx < len(tags):
                 await _run_single_account_cli(tags[idx], cfg[tags[idx]], caller="main:interactive")
             else:
-                logger.error("❌ Invalid selection")
+                print("❌ Invalid selection")
         except ValueError:
-            logger.error("❌ Invalid selection")
+            print("❌ Invalid selection")
 
 # ========== اجرا ==========
 def _run_forever():
@@ -16669,14 +20415,14 @@ def _run_forever():
             asyncio.run(main())
             break
         except KeyboardInterrupt:
-            logger.info("\n🚪 exit code ")
+            print("\n🚪 exit code ")
             break
         except SystemExit:
             raise
         except Exception as e:
             consecutive_crashes += 1
             wait_time = min(10 * (2 ** min(consecutive_crashes, 5)), MAX_BACKOFF)
-            logger.error(
+            print(
                 f"💥 main() کرش کرد (کرش پیاپی #{consecutive_crashes}): {e}\n"
                 f"🔁 تلاش مجدد کامل در {wait_time} ثانیه..."
             )
