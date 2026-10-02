@@ -38,7 +38,7 @@ import threading
 import time
 import zipfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -14699,13 +14699,14 @@ class RunningAccount:
     tag: str
     bot: "SelfBot"
     task: "asyncio.Task"
+    acc: dict = field(default_factory=dict)
 
 
 ACCOUNTS: dict = {}
 
 
-def register_account(tag: str, bot: "SelfBot", task: "asyncio.Task") -> None:
-    ACCOUNTS[tag] = RunningAccount(tag=tag, bot=bot, task=task)
+def register_account(tag: str, bot: "SelfBot", task: "asyncio.Task", acc: dict = None) -> None:
+    ACCOUNTS[tag] = RunningAccount(tag=tag, bot=bot, task=task, acc=acc or {})
 
 
 def unregister_account(tag: str) -> None:
@@ -20115,7 +20116,7 @@ async def run_bot(tag, config, interactive=False):
                 consecutive_failures = 0
                 # فقط بعد از موفقیت کامل start: ثبت در ACCOUNTS + سیگنال
                 # آماده‌شدن به منتظران.
-                register_account(tag, bot, asyncio.current_task())
+                register_account(tag, bot, asyncio.current_task(), cfg.get(tag, {}))
                 if not pending.done():
                     pending.set_result(True)
                 await bot.run()
