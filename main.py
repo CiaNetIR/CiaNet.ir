@@ -122,7 +122,7 @@ def _chmod_private(path: str, mode: int = 0o600) -> bool:
     except OSError as e:
         if not getattr(_chmod_private, "_warned", False):
             _chmod_private._warned = True
-            print(f"⚠️ محدودکردنِ دسترسیِ «{path}» ممکن نشد ({e.__class__.__name__}) — "
+            logger.warning(
                   f"اگر چند کاربر روی این سرور هستند، دسترسی را دستی با "
                   f"chmod 600/700 محدود کن.")
         return False
@@ -1464,7 +1464,7 @@ def init_db() -> None:
             )
         except sqlite3.IntegrityError:
             c.execute("CREATE INDEX IF NOT EXISTS idx_orders_txid ON orders(txid)")
-            print("⚠️ [saas_db] داده‌ی قدیمیِ orders دارای txid تکراری است — "
+            logger.warning(
                   "ایندکس یکتای txid ساخته نشد (چک پایتونیِ replay فعال است).")
         # v2.0: درخواست‌های نمایندگی (جدول جدا از admins تا تاریخچه‌ی
         # درخواست‌ها، تأیید/رد و توضیحات نگه داشته شود).
@@ -1651,7 +1651,7 @@ def get_role(user_id: int, owner_id: int) -> str:
     global _owner_id_warning_shown
     if not owner_id and not _owner_id_warning_shown:
         _owner_id_warning_shown = True
-        print(
+        logger.error(
             "🛑 [saas_db] هشدار حیاتی: owner_id نامعتبر (0 یا خالی) است — "
             "یعنی متغیر محیطی ADMIN_ID تنظیم نشده. تا وقتی این مقدار درست "
             "نشود، هیچ‌کس (حتی صاحب اصلی ربات) OWNER تشخیص داده نمی‌شود."
@@ -2030,7 +2030,7 @@ async def delete_user_completely(user_id: int) -> bool:
             break
         except Exception as e:
             if attempt == 2:
-                print(f"⛔ [delete_user] CRITICAL: پاک‌سازی bot_data (self_accounts) بعد از ۳ تلاش "
+                logger.error(
                       f"شکست خورد — کاربر از DB اصلی حذف شده ولی ردیف legacy باقی است "
                       f"(نه silent): {type(e).__name__}: {e}")
                 return False
@@ -2085,7 +2085,7 @@ async def delete_user_completely(user_id: int) -> bool:
                 if still_alive:
                     # وضعیت DB درست است (revoked) ولی فرآیند هنوز زنده است —
                     # بدون silent گزارش می‌شود تا اپراتور/هلت‌چک بعدی پیگیری کند.
-                    print(f"⛔ [delete_user] CRITICAL: فرآیند ربات اختصاصی #{bid} (pid={pid}) "
+                    logger.error(
                           f"بعد از SIGTERM/SIGKILL هنوز زنده است — بررسی دستی لازم است.")
         except Exception as e:
             logger.warning(f"⚠️ [delete_user] توقف فرآیند ربات اختصاصی #{bid} ناموفق بود: {type(e).__name__}: {e}")
@@ -3256,12 +3256,12 @@ def _checkpoint_and_clean(path: str) -> bool:
         finally:
             con.close()
     except Exception as e:
-        print(f"⚠️ [sqlite] WAL checkpoint شکست خورد ({path}): {type(e).__name__}: "
+        logger.warning(
               f"{str(e)[:100]} — WAL/SHM حذف نشدند.")
         return False
     if not row or len(row) < 1 or row[0] != 0:
         busy = row[0] if row else "?"
-        print(f"⚠️ [sqlite] WAL checkpoint ناقص است ({path}): busy={busy} — "
+        logger.warning(
               f"WAL/SHM حذف نشدند.")
         return False
     for suffix in ("-wal", "-shm"):
@@ -3273,7 +3273,7 @@ def _checkpoint_and_clean(path: str) -> bool:
             # sidecar هست ولی حذف نشد — نباید «موفق» گزارش شود؛ در Restore/
             # Rollback این یعنی sidecar کهنه ممکن است روی فایلِ جدید attach
             # شود (فساد / readonly).
-            print(f"⚠️ [sqlite] حذف sidecar {path + suffix} ناموفق: "
+            logger.warning(
                   f"{type(e).__name__}: {str(e)[:100]} — cleanup ناقص اعلام "
                   f"می‌شود.")
             return False
@@ -3379,7 +3379,7 @@ def _checkpoint_and_clean_session(path: str) -> bool:
             try:
                 os.remove(stale)
             except OSError as e:
-                print(f"⚠️ [restore] حذف sidecar کهنه‌ی سشن {stale} ناموفق: "
+                logger.warning(
                       f"{type(e).__name__}: {str(e)[:100]} — تمیزکاری ناقص اعلام "
                       f"می‌شود.")
                 return False
@@ -3411,7 +3411,7 @@ def _snapshot_session_to_temp(path: str):
     برمی‌گرداند: مسیر snapshot موقت (یا None برای فایلِ غیر-SQLite).
     """
     if not _file_is_sqlite(path):
-        print(f"⚠️ [backup] سشن {path} فایل SQLite معتبر نیست — بایگانی خام "
+        logger.warning(
               f"(بدون snapshot، محتوای غیر-SQLite).")
         return None
     try:
@@ -3841,7 +3841,7 @@ def _remove_stale_restore_files(manifest_files: list,
                 try:
                     _preserve_file(arc, real)
                 except OSError as e:
-                    print(f"⚠️ [restore] حفظ فایل stale قبل از حذف ناموفق بود: "
+                    logger.warning(
                           f"{real}: {e}")
                     errors.append((real, e))
                     return
@@ -3881,7 +3881,7 @@ def _remove_stale_restore_files(manifest_files: list,
                     try:
                         _preserve_file(arc, full)
                     except OSError as e:
-                        print(f"⚠️ [restore] حفظ سشن stale قبل از حذف ناموفق "
+                        logger.warning(
                               f"بود: {full}: {e}")
                         errors.append((full, e))
                         continue
@@ -4310,13 +4310,13 @@ async def restore_backup_from_zip_async(zip_path: str) -> tuple:
                     )
                     if not r_ok:
                         resume_failed.append(f"{t}({r_st})")
-                        print(f"⚠️ [restore] resume اکانت «{t}» ناموفق بود "
+                        logger.warning(
                               f"(status={r_st}) — بقیه‌ی اکانت‌ها ادامه دادند.")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     resume_failed.append(f"{t}({type(e).__name__})")
-                    print(f"⚠️ [restore] resume اکانت «{t}» با خطا مواجه شد: "
+                    logger.warning(
                           f"{type(e).__name__}: {str(e)[:80]} — بقیه‌ی اکانت‌ها "
                           f"ادامه دادند.")
         if resume_failed:
@@ -6394,7 +6394,7 @@ class AdminBot:
             try:
                 n = await entry.bot.terminate_other_sessions()
             except Exception as e:
-                print(f"⚠️ [sessterm:{tag}] terminate_other_sessions ناموفق: "
+                logger.warning(
                       f"{type(e).__name__}: {e}")
                 await self._show_sessions(event, tag, flash="بستنِ دستگاه‌ها ناموفق بود.")
                 return
@@ -6491,7 +6491,7 @@ class AdminBot:
             }.get(err_code, "خواندن وضعیت امنیتی ناموفق بود. دوباره تلاش کن.")
             body.append(f"{UI.RED} {msg}")
             # فقط در لاگِ سرور — هرگز به کاربر نمی‌رود.
-            print(f"⚠️ [tfa:{tag}] خواندن 2FA شکست خورد: {err_code} "
+            logger.warning(
                   f"({st.get('error_ident', '?')}) actor={event.sender_id}")
             await event.edit(
                 UI.screen("🔐 رمز دو مرحله‌ای", body=body,
@@ -6671,7 +6671,7 @@ class AdminBot:
 
             # خطای واقعی. پیامِ کوتاه و عمومی به کاربر؛ جزئیات در لاگ.
             err_ident = res.get("error") or res.get("raw") or "unknown"
-            print(f"⚠️ [tfa:{tag}] بازنشانی ناموفق: state=error "
+            logger.warning(
                   f"ident={err_ident} raw={str(res.get('raw'))[:100]} "
                   f"actor={event.sender_id}")
             hintline = ""
@@ -6974,7 +6974,7 @@ class AdminBot:
             # توقف ناقص (تسکِ Runtime هنوز زنده است و سشن هنوز مالِ اوست):
             # هرگز «غیرفعال‌شده» ثبت نمی‌شود — نه disabled، نه disabled_reason،
             # نه save_config؛ فقط پیام خطای واضح به ادمین و برگشت.
-            print(f"❌ [_disable_account] توقف کامل اکانت «{tag}» ممکن نشد — "
+            logger.error(
                   f"Runtime هنوز مالک سشن است؛ غیرفعال‌سازی انجام نشد.")
             await event.edit(
                 f"⚠️ توقف کامل اکانت «{tag}» ممکن نشد (Runtime هنوز در حال بستن/"
@@ -7036,7 +7036,7 @@ class AdminBot:
                 # PATCH 5: تسک هنوز زنده است → سشن را نباید حذف کرد (کلاینتِ
                 # زنده به آن write می‌کند). هیچ تغییری اعمال نشده؛ Intent را
                 # برمی‌داریم و حذف را لغو می‌کنیم.
-                print(f"❌ [delete_account] توقف کامل اکانت «{tag}» ممکن نشد — "
+                logger.error(
                       f"سشن هنوز باز است؛ حذف لغو شد.")
                 journal = _load_account_delete_journal()
                 journal.pop(tag, None)
@@ -7052,7 +7052,7 @@ class AdminBot:
             # دست‌نخورده می‌ماند تا Recovery استارتاپی ادامه دهد و اکانت
             # قابل بازیابی باشد.
             if not _remove_session_files(tag):
-                print(f"❌ [delete_account] حذف فایل سشن «{tag}» ناقص ماند — "
+                logger.error(
                       f"config حذف نشد؛ journal حفظ شد و Recovery استارتاپی "
                       f"ادامه می‌دهد.")
                 await event.edit(
@@ -7067,12 +7067,12 @@ class AdminBot:
             try:
                 self.sb.clear_state(tag)
             except Exception as e:
-                print(f"⚠️ [delete_account] پاک‌سازی state اکانت {tag} ناموفق: "
+                logger.warning(
                       f"{type(e).__name__}: {str(e)[:80]}")
         except Exception as e:
             # نیمه‌حذف — journal عمداً باقی می‌ماند تا Recovery استارتاپی ادامه
             # دهد (حذفِ دائمی بدونِ ثبت Intent هرگز اتفاق نمی‌افتد).
-            print(f"❌ [delete_account] حذف اکانت «{tag}» نیمه‌تمام ماند — "
+            logger.error(
                   f"Recovery استارتاپی ادامه می‌دهد: {type(e).__name__}: "
                   f"{str(e)[:120]}")
             await event.edit(
@@ -10787,7 +10787,7 @@ def time_ago(ts: float) -> str:
                 _spawn_bg(self._start_resumed_bot(tag, acc), f"resume:{tag}")
             except Exception as e:
                 self._resume_inflight.discard(tag)
-                print(f"⚠️ [resume] ساخت task برای اکانت {tag} ناموفق: "
+                logger.warning(
                       f"{type(e).__name__}: {e}")
 
     async def _start_resumed_bot(self, tag: str, acc: dict):
@@ -10804,7 +10804,7 @@ def time_ago(ts: float) -> str:
         except Exception as e:
             # دیگر هرگز silent swallow — فقط تگ + نوع خطا + پیامِ امن (بدون
             # token/session در لاگ).
-            print(f"⚠️ [resume] استارت اکانت {tag} ناموفق بود: "
+            logger.warning(
                   f"{type(e).__name__}: {str(e)[:120]}")
         finally:
             self._resume_inflight.discard(tag)
@@ -10826,7 +10826,7 @@ def time_ago(ts: float) -> str:
         """
         cfg = self.sb.load_config()
         if config_state() != CONFIG_VALID:
-            print(
+            logger.error(
                 f"⛔ [expiry] توقف سلف‌بات‌های کاربر {user_id} رد شد — "
                 f"config.json خراب است و نباید overwrite شود."
             )
@@ -13222,7 +13222,7 @@ def time_ago(ts: float) -> str:
                 # حالا دست‌کم دیده می‌شود تا OWNER بتواند دستی رسیدگی کند.
                 # عمداً خودکار revoke نمی‌کنیم: حذفِ دسترسیِ یک ربات به‌خاطر
                 # یک فیلدِ خرابِ تاریخ، از خودِ مشکل بدتر است.
-                print(f"⚠️ [dedicated] تاریخ انقضای ربات #{dbot.get('id')} "
+                logger.warning(
                       f"قابل خواندن نیست ({dbot.get('expire_date')!r}: "
                       f"{type(e).__name__}) — از انقضای خودکار جا می‌ماند؛ "
                       f"دستی بررسی کن.")
@@ -14530,7 +14530,7 @@ async def run_helper_bot_forever():
     خارج می‌شود — نبودِ راهنما هرگز نباید بقیه‌ی سیستم را متوقف کند.
     """
     if not HELPER_BOT_TOKEN:
-        print("ℹ️ HELPER_BOT_TOKEN تنظیم نشده — ربات راهنما اجرا نشد "
+        logger.info(
               "(بقیه‌ی سیستم عادی کار می‌کند).")
         return
     backoff = 10
@@ -14543,7 +14543,7 @@ async def run_helper_bot_forever():
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"⚠️ [helper] قطع شد ({type(e).__name__}) — "
+            logger.warning(
                   f"تلاش مجدد در {backoff} ثانیه")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 300)
@@ -14710,7 +14710,7 @@ def cleanup_orphan_sessions() -> None:
     # «یتیم» تشخیص داده شوند و پاک شوند.
     cfg = load_config()
     if config_state() != CONFIG_VALID:
-        print(
+        logger.error(
             f"⛔ پاک‌سازی سشن‌های یتیم اجرا نشد — config.json خراب/غیرقابل‌اعتماد است "
             f"(مسیر: {CONFIG_FILE}). هیچ سشنی حذف نشد."
         )
@@ -14813,7 +14813,7 @@ def check_session_health(tag: str, require_sqlite: bool = True) -> dict:
             try:
                 _chmod_private(session_file)
                 res["file_writable"] = os.access(session_file, os.W_OK)
-                print(
+                logger.error(
                     f"🛠 [SESSION][{tag}][CHECK] mode فایل سشن به 0600 اصلاح شد "
                     f"(مالک همان user است)."
                 )
@@ -14857,7 +14857,7 @@ def check_session_health(tag: str, require_sqlite: bool = True) -> dict:
                 # Restore فقط هشدار، نه fail: permission مشکلی ندارد و این
                 # یک مشکل داده‌ی از-قبل-موجود است.
                 res["sqlite_ok"] = False
-                print(
+                logger.error(
                     f"⚠️ [SESSION][{tag}][CHECK] فایل سشن sqlite معتبر نیست "
                     f"(محتوای غیرمعتبر) — در Restore نادیده گرفته شد. مسیر: {session_file}"
                 )
@@ -15302,7 +15302,7 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                 raise
             except Exception as e:
                 # PATCH 6: خطای stop بلعیده نمی‌شود — tag + عملیات + خطا لاگ می‌شود.
-                print(f"❌ [{tag}][RUNTIME][STOP][stop] خطا در bot.stop: "
+                logger.error(
                       f"{type(e).__name__}: {str(e)[:100]}")
         # مالکِ Cleanup نهایی خودِ run_bot است (finally: disconnect → save →
         # close → unregister). اینجا فقط Cancel + Wait واقعی — تا وقتی تسک
@@ -15330,12 +15330,12 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                     exc = task.exception()
                     if exc is not None:
                         # PATCH 6: خطای واقعیِ تسکِ متوقف‌شده بلعیده نمی‌شود.
-                        print(f"❌ [{tag}][RUNTIME][STOP][wait] تسک با خطا تمام "
+                        logger.error(
                               f"شد: {type(exc).__name__}: {str(exc)[:100]}")
                 return True  # تسک واقعاً تمام شد → finallyِ run_bot تمیزکاری کرد
             # تسک هنوز زنده است (PATCH 1): نباید unregister شود و نباید از
             # _RUNTIME_TASKS حذف شود — runtime همچنان مالک سشن است.
-            print(f"❌ [{tag}][RUNTIME][STOP][wait] تسک بعد از cancel و "
+            logger.error(
                   f"۱۰ ثانیه هنوز زنده است — توقف کامل اعلام نمی‌شود؛ "
                   f"runtime همچنان مالک سشن است و استارتِ جدید رد می‌شود.")
             return False
@@ -15351,7 +15351,7 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                 raise
             except Exception as e:
                 # PATCH 6: خطای stop در تمیزکاریِ تکمیلی بلعیده نمی‌شود.
-                print(f"❌ [{tag}][RUNTIME][STOP][cleanup] خطا در stop تکمیلی "
+                logger.error(
                       f"(بدون تسک زنده): {type(e).__name__}: {str(e)[:100]}")
             unregister_account(tag)
             _RUNTIME_TASKS.pop(tag, None)
@@ -15557,7 +15557,7 @@ def load_config() -> dict:
         return cfg
     except Exception as e:
         _config_state = CONFIG_INVALID
-        print(
+        logger.error(
             f"⛔ config.json خراب/ناخوانا است — مسیر: {CONFIG_FILE}. "
             f"عملیات‌های مخرب (پاک‌سازی سشن/بازنویسی/حذف) متوقف شدند؛ "
             f"فایل دست‌نخورده ماند. (مشکل: {type(e).__name__}: {e})"
@@ -15724,7 +15724,7 @@ def save_config(cfg: dict) -> bool:
     """
     global _config_state
     if _config_state == CONFIG_INVALID:
-        print(
+        logger.error(
             f"⛔ config.json خراب است و از بازنویسی جلوگیری شد (مسیر: {CONFIG_FILE}) — "
             f"ابتدا با Restore یا تعمیرِ صریح آن را درست کنید."
         )
@@ -15773,7 +15773,7 @@ def _load_account_delete_journal() -> dict:
     except Exception as e:
         # journal خراب → ignore (بدترین حالت: یک ردیفِ stale که دوباره
         # recovery نمی‌شود؛ داده‌ای حذف نمی‌شود)
-        print(f"⚠️ [delete_account] journal خراب/ناخوانا بود — نادیده گرفته شد: "
+        logger.warning(
               f"{type(e).__name__}: {str(e)[:80]}")
         return {}
 
@@ -15819,7 +15819,7 @@ def _recover_account_delete_journal() -> None:
     journal = _load_account_delete_journal()
     if not journal:
         return
-    print(f"🔧 [recovery] عملیات حذف اکانتِ ناتمام پیدا شد: "
+    logger.info(
           f"{', '.join(sorted(journal))}")
     cfg_valid = config_state() == CONFIG_VALID
     cfg = load_config() if cfg_valid else None
@@ -15833,7 +15833,7 @@ def _recover_account_delete_journal() -> None:
         # ۱) حذف سشن — اگر ناقص بماند، هیچ تغییری اعمال نمی‌شود (config هم
         # دست‌نخورده می‌ماند) و ردیف حذف نمی‌شود (Recovery قابل تکرار است).
         if not _remove_session_files(tag):
-            print(f"⚠️ [recovery] حذف سشن تگ {tag} ناقص ماند — journal حفظ شد "
+            logger.warning(
                   f"(استارتاپ بعدی دوباره تلاش می‌کند).")
             ok_entry = False
         try:
@@ -15845,7 +15845,7 @@ def _recover_account_delete_journal() -> None:
                 finally:
                     bd.close()
         except Exception as e:
-            print(f"⚠️ [recovery] پاک‌سازی bot_states تگ {tag} ناموفق: "
+            logger.warning(
                   f"{type(e).__name__}: {str(e)[:80]} — journal حفظ شد.")
             ok_entry = False
         if not ok_entry:
@@ -15860,7 +15860,7 @@ def _recover_account_delete_journal() -> None:
         try:
             save_config(cfg)
         except Exception as e:
-            print(f"⚠️ [recovery] ذخیره‌ی config در recovery حذف اکانت ناموفق: "
+            logger.warning(
                   f"{type(e).__name__}: {str(e)[:80]} — journal حفظ شد.")
             # configِ حذف‌شده در حافظه ذخیره نشد → هیچ ردیفی «تمام‌شده» نیست
             for tag in completed:
@@ -15891,7 +15891,7 @@ def _migrate_provision_sources() -> None:
     cfg = load_config()
     # config خراب → هیچ overwrite/یتم‌سازی‌ای انجام نمی‌شود (فقط خواندن مجاز است)
     if config_state() != CONFIG_VALID:
-        print(
+        logger.error(
             f"⛔ [saas_db] مهاجرت provision_source رد شد — config.json خراب است "
             f"(مسیر: {CONFIG_FILE})؛ هیچ تغییری در config اعمال نشد."
         )
@@ -15913,7 +15913,7 @@ def _migrate_provision_sources() -> None:
             return
         after = load_config()
         if set(after.keys()) != before_keys or len(after) != before_count:
-            print("⛔ [saas_db] مهاجرت provision_source: تعداد/کلیدهای config تغییر کرد — "
+            logger.error(
                   "(نباید رخ دهد)؛ رول‌بک دستی لازم است.")
 
 
@@ -16867,7 +16867,7 @@ class SelfBot:
                 # حذفی کورکورانه انجام نشده است؛ اگر علت استفاده‌ی هم‌زمان توسط
                 # پروسه‌ی دیگری باشد، بررسی‌های مالکیتِ Runtimeِ موجود تعیین
                 # می‌کنند که استارت ادامه یابد یا نه.
-                print(
+                logger.error(
                     f"⚠️ [{self.tag}] تمیزکاری sidecar های کهنه‌ی سشن ناموفق "
                     f"بود — آن‌ها دست‌نخورده باقی ماندند (checkpoint ناقص یا "
                     f"حذف ناموفق)."
@@ -18136,7 +18136,7 @@ class SelfBot:
             if allowed:
                 valid_targets.append(t)
             else:
-                print(f"🛡️ [{self.tag}] تحویلِ کد به {t} رد شد "
+                logger.info(
                       f"(مجوز در زمانِ تحویل معتبر نیست)")
         targets = valid_targets
 
@@ -19834,7 +19834,7 @@ class SelfBot:
                     # این خط عملاً هرگز اجرا نمی‌شود (نگاه کن به توضیح
                     # _DICE_SAFETY_CEILING) — صرفاً یک محافظت نهایی در
                     # برابر یک سناریوی کاملاً غیرمنتظره است.
-                    print(
+                    logger.error(
                         f"⚠️ [{self.tag}] دایس {emoji}: به سقف ایمنی "
                         f"{_DICE_SAFETY_CEILING}s رسید بدون پیدا کردن max_val"
                     )
@@ -20070,7 +20070,7 @@ class SelfBot:
                     # (نه «فعال»ِ دروغین) و با backoff عادی تلاش ادامه می‌یابد.
                     _health = check_session_health(self.tag)
                     if not _health["ok"]:
-                        print(f"❌ [SESSION][{self.tag}][ERROR] {_health['error']} "
+                        logger.error(
                               f"(pid={os.getpid()}, runtime_state={self.runtime_status}, "
                               f"session_path={_session_file_for(self.tag)})")
                     else:
@@ -20109,7 +20109,7 @@ class SelfBot:
                     self._set_status("auth_failed")
                     continue
                 consecutive_failures += 1
-                print(
+                logger.error(
                     f"❌ reconnect [{self.tag}] شکست خورد (تلاش ناموفق پیاپی: "
                     f"{consecutive_failures}) — دوباره در {wait_time}s: {e}"
                 )
@@ -20368,7 +20368,7 @@ async def run_bot(tag, config, interactive=False):
     # — نه اینکه تا ابد در صف بماند.
     lock = _TAG_LOCKS.setdefault(tag, asyncio.Lock())
     if lock.locked():
-        print(
+        logger.error(
             f"⚠️ [{tag}] نمونه‌ی دیگری از run_bot برای همین تگ در حال اجراست — "
             f"درخواست جدید رد شد (جلوگیری از دو کلاینت هم‌زمان روی یک سشن)."
         )
@@ -20403,12 +20403,12 @@ async def run_bot(tag, config, interactive=False):
                     _set_bot_status(tag, "auth_failed")
                     if not pending.done():
                         pending.set_result(False)
-                    print(
+                    logger.error(
                         f"🛑 [{tag}] این اکانت به‌طور کامل متوقف شد (خطای احراز هویت). "
                         f"برای فعال‌سازی مجدد: python main.py {tag}"
                     )
                     break
-                print(
+                logger.error(
                     f"⚠️ [{tag}] bot.run() به‌طور غیرمنتظره و بدون خطای احراز هویت "
                     f"برگشت — این طبق طراحی نباید رخ دهد؛ برای اطمینان دوباره تلاش می‌شود."
                 )
@@ -20426,7 +20426,7 @@ async def run_bot(tag, config, interactive=False):
                 else:
                     _set_bot_status(tag, "error")
                 wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-                print(
+                logger.error(
                     f"❌ [{tag}] خطا در start/run (تلاش ناموفق پیاپی: "
                     f"{consecutive_failures}): {e} — تلاش مجدد در {wait_time}s"
                 )
@@ -20458,7 +20458,7 @@ async def run_bot(tag, config, interactive=False):
                 try:
                     await bot._cleanup_after_failed_start()
                 except Exception as e:
-                    print(f"❌ [{tag}][RUNTIME][FAILED-START-CLEANUP] خطا در "
+                    logger.error(
                           f"متوقف‌کردن تسک‌های نمونه‌ی ناتمام: "
                           f"{type(e).__name__}: {str(e)[:100]}")
                 # shutdown: اول disconnect، بعد save/close — و خطاهای سشن
@@ -20632,7 +20632,7 @@ async def main():
         # config خراب هرگز به‌عنوان «هیچ اکانتی نیست» تفسیر نمی‌شود — نه
         # add_account صدا زده می‌شود (که overwrite می‌کند) و نه سرویسی
         # با {} بالا می‌آید.
-        print(
+        logger.error(
             f"⛔ config.json خراب/ناخوانا است (مسیر: {CONFIG_FILE}) و برنامه متوقف شد — "
             f"هیچ تغییری در فایل‌ها اعمال نشد. فایل را با Restore/Repair صریح درست کنید "
             f"و دوباره اجرا کنید."
@@ -20704,7 +20704,7 @@ def _run_forever():
         except Exception as e:
             consecutive_crashes += 1
             wait_time = min(10 * (2 ** min(consecutive_crashes, 5)), MAX_BACKOFF)
-            print(
+            logger.error(
                 f"💥 main() کرش کرد (کرش پیاپی #{consecutive_crashes}): {e}\n"
                 f"🔁 تلاش مجدد کامل در {wait_time} ثانیه..."
             )
