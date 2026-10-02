@@ -5,6 +5,7 @@
 # ══════════════════════════════════════════════════════════
 
 set -e
+set -o pipefail
 
 # ─── رنگ‌ها ───
 RED='\033[0;31m'
@@ -33,6 +34,19 @@ if [ ! -f "$SCRIPT_DIR/main.py" ]; then
     echo -e "${RED}❌ main.py پیدا نشد!${NC}"
     echo "   اسکریپت رو داخل پوشه‌ی پروژه اجرا کن."
     exit 1
+fi
+
+# ─── ساخت کاربر سرویس (non-root) ───
+SERVICE_USER="cianet"
+SERVICE_GROUP="cianet"
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+    echo -e "${YELLOW}👤 ساخت کاربر سرویس: ${SERVICE_USER}${NC}"
+    useradd --system --shell /usr/sbin/nologin --home "$SCRIPT_DIR" "$SERVICE_USER" || {
+        echo -e "${RED}❌ ساخت کاربر ${SERVICE_USER} شکست خورد!${NC}"
+        exit 1
+    }
+else
+    echo -e "${GREEN}👤 کاربر ${SERVICE_USER} از قبل وجود داره${NC}"
 fi
 
 # ─── پیدا کردن python3 ───
@@ -75,7 +89,12 @@ EOF
         echo "HELPER_BOT_TOKEN=$HELPER_BOT_TOKEN" >> "$ENV_FILE"
     fi
     chmod 600 "$ENV_FILE"
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$ENV_FILE" 2>/dev/null || true
     echo -e "${GREEN}✅ env file ساخته شد${NC}"
+fi
+if [ -f "$ENV_FILE" ]; then
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$ENV_FILE" 2>/dev/null || true
+    chmod 600 "$ENV_FILE"
 fi
 
 # ─── ساخت systemd service ───
@@ -90,7 +109,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=cianet
+Group=cianet
 WorkingDirectory=$SCRIPT_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$PYTHON_BIN main.py all
@@ -109,6 +129,16 @@ OOMScoreAdjust=-100
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# محدودسازی دسترسی فایل‌های حساس به کاربر سرویس (سشن‌ها/کانفیگ/بکاپ‌ها)
+chown -R cianet:cianet "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
+chmod 700 "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" 2>/dev/null || true
+chmod 600 "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
+
+# محدودسازی دسترسی فایل‌های سشن موجود به 600
+if [ -d "$SCRIPT_DIR/sessions" ]; then
+    find "$SCRIPT_DIR/sessions" -type f -name "*.session*" -exec chmod 600 {} \; 2>/dev/null || true
+fi
 
 echo -e "${GREEN}✅ service file ساخته شد${NC}"
 
@@ -131,6 +161,13 @@ if ! pgrep -f "python3 main.py all" > /dev/null; then
 fi
 EOF
 chmod +x "$WATCHDOG"
+
+# ─── مالکیت دایرکتوری پروژه برای کاربر سرویس ───
+echo -e "${YELLOW}🔧 تنظیم مالکیت فایل‌ها برای ${SERVICE_USER}...${NC}"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$SCRIPT_DIR" 2>/dev/null || {
+    echo -e "${YELLOW}⚠️  chown کامل شکست خورد؛ حداقل فایل‌های حساس را محدود می‌کنم${NC}"
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$SCRIPT_DIR/main.py" "$SCRIPT_DIR/requirements.txt" 2>/dev/null || true
+}
 
 # ─── فعال‌سازی ───
 echo -e "${YELLOW}🔄 فعال‌سازی service...${NC}"
