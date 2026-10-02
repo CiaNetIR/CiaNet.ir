@@ -6053,7 +6053,15 @@ class AdminBot:
             return
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
-            await event.answer("این اکانت الان روشن نیست؛ برای مدیریت نشست‌ها باید فعال باشد.", alert=True)
+            # اکانت ممکن است هنوز در حال start باشد یا fail شده باشد
+            cfg = self.sb.load_config()
+            if tag in cfg:
+                status = _RUNTIME_STATUS.get(tag, "unknown")
+                await event.answer(
+                    f"اکانت «{tag}» هنوز آماده نیست (وضعیت: {status}). "
+                    f"چند ثانیه صبر کن و دوباره تلاش کن.", alert=True)
+            else:
+                await event.answer("این اکانت وجود ندارد.", alert=True)
             return
         try:
             await event.answer("در حال گرفتن فهرست دستگاه‌ها...")
@@ -17455,7 +17463,7 @@ class SelfBot:
         فهرستِ نشست‌های فعالِ این اکانت. هر مورد شامل hash، نامِ دستگاه،
         اپ، آخرین فعالیت و اینکه آیا همین نشستِ سلف است (current).
         """
-        res = await asyncio.wait_for(self.client(GetAuthorizationsRequest()), timeout=20)
+        res = await asyncio.wait_for(self.client(GetAuthorizationsRequest()), timeout=30)
         out = []
         for a in res.authorizations:
             out.append({
@@ -17512,7 +17520,7 @@ class SelfBot:
           pending_reset_date_local: str|None → همان، به‌صورتِ تاریخِ شمسی خوانا.
         """
         try:
-            pw = await asyncio.wait_for(self.client(GetPasswordRequest()), timeout=20)
+            pw = await asyncio.wait_for(self.client(GetPasswordRequest()), timeout=25)
         except asyncio.TimeoutError:
             # قطعیِ شبکه/کندیِ سرور — این «بدون رمز» نیست.
             return self._2fa_err("timeout")
