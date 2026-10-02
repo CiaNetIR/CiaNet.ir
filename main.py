@@ -42,6 +42,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("cianet")
+
 from telethon import TelegramClient, events, Button, errors
 from telethon.tl.functions.account import (
     UpdateProfileRequest, UpdateStatusRequest,
@@ -144,7 +150,7 @@ async def _deliver_via_bot(owner_id: int, text: str) -> bool:
         await bot.client.send_message(owner_id, text)
         return True
     except Exception as e:
-        print(f"⚠️ [code-delivery] ارسال از طریق ربات ناموفق: {type(e).__name__}")
+        logger.warning(f"⚠️ [code-delivery] ارسال از طریق ربات ناموفق: {type(e).__name__}")
         return False
 
 
@@ -175,7 +181,7 @@ def _spawn_bg(coro, label: str = ""):
             return
         exc = t.exception()
         if exc is not None:
-            print(f"⚠️ [bg:{label or 'task'}] {type(exc).__name__}: {str(exc)[:120]}")
+            logger.warning(f"⚠️ [bg:{label or 'task'}] {type(exc).__name__}: {str(exc)[:120]}")
 
     task.add_done_callback(_done)
     return task
@@ -356,7 +362,7 @@ def add_or_update_user(user):
                     last_seen = excluded.last_seen
             ''', (user.id, user.username or "", user.first_name or "", user.last_name or "", now, now))
     except Exception as e:
-        print(f"Error adding user {user.id}: {e}")
+        logger.info(f"Error adding user {user.id}: {e}")
 
 def increment_messages_count(user_id: int):
     with _bot_db(commit=True) as conn:
@@ -1174,7 +1180,7 @@ def _migrate_schema(c) -> None:
     if "subscriptions" in tables:
         check_sql = _table_check_constraint_text(c, "subscriptions")
         if "superseded" not in check_sql:
-            print("🔧 [saas_db] مهاجرت schema: افزودن وضعیت 'superseded' به جدول subscriptions...")
+            logger.info("🔧 [saas_db] مهاجرت schema: افزودن وضعیت 'superseded' به جدول subscriptions...")
             before = c.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]
             c.execute("ALTER TABLE subscriptions RENAME TO subscriptions_old")
             c.execute("""
@@ -1205,13 +1211,13 @@ def _migrate_schema(c) -> None:
                     f"تراکنش برگشت داده شد و جدول قدیمی حفظ شد."
                 )
             c.execute("DROP TABLE subscriptions_old")
-            print("✅ [saas_db] مهاجرت subscriptions با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            logger.info("✅ [saas_db] مهاجرت subscriptions با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
     # ── مهاجرت licenses: افزودن نوع 'admin' به CHECK(license_type IN ...) ──
     if "licenses" in tables:
         check_sql = _table_check_constraint_text(c, "licenses")
         if "'admin'" not in check_sql:
-            print("🔧 [saas_db] مهاجرت schema: افزودن نوع 'admin' به جدول licenses...")
+            logger.info("🔧 [saas_db] مهاجرت schema: افزودن نوع 'admin' به جدول licenses...")
             before = c.execute("SELECT COUNT(*) FROM licenses").fetchone()[0]
             c.execute("ALTER TABLE licenses RENAME TO licenses_old")
             c.execute("""
@@ -1242,13 +1248,13 @@ def _migrate_schema(c) -> None:
                     f"تراکنش برگشت داده شد و جدول قدیمی حفظ شد."
                 )
             c.execute("DROP TABLE licenses_old")
-            print("✅ [saas_db] مهاجرت licenses با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            logger.info("✅ [saas_db] مهاجرت licenses با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
     # ── مهاجرت payments: تغییر نام receipt_file_id → receipt_ref ──
     if "payments" in tables:
         cols = _table_columns(c, "payments")
         if "receipt_ref" not in cols:
-            print("🔧 [saas_db] مهاجرت schema: افزودن ستون receipt_ref به جدول payments...")
+            logger.info("🔧 [saas_db] مهاجرت schema: افزودن ستون receipt_ref به جدول payments...")
             if "receipt_file_id" in cols:
                 # ستون قدیمی وجود دارد — عوض تغییر نام (که در نسخه‌های قدیم
                 # SQLite همیشه پشتیبانی نمی‌شود)، یک ستون جدید اضافه و
@@ -1258,17 +1264,17 @@ def _migrate_schema(c) -> None:
                 c.execute("UPDATE payments SET receipt_ref = receipt_file_id")
             else:
                 c.execute("ALTER TABLE payments ADD COLUMN receipt_ref TEXT")
-            print("✅ [saas_db] مهاجرت payments با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            logger.info("✅ [saas_db] مهاجرت payments با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
     # ── مهاجرت delete_journal: افزودن ستون status (ردیف‌های قدیمی → DELETE_PENDING) ──
     if "delete_journal" in tables:
         cols = _table_columns(c, "delete_journal")
         if "status" not in cols:
-            print("🔧 [saas_db] مهاجرت schema: افزودن ستون status به جدول delete_journal...")
+            logger.info("🔧 [saas_db] مهاجرت schema: افزودن ستون status به جدول delete_journal...")
             c.execute(
                 "ALTER TABLE delete_journal ADD COLUMN status TEXT NOT NULL DEFAULT 'DELETE_PENDING'"
             )
-            print("✅ [saas_db] مهاجرت delete_journal با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            logger.info("✅ [saas_db] مهاجرت delete_journal با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
 
 def init_db() -> None:
@@ -1487,7 +1493,7 @@ def init_db() -> None:
         if "pid" not in _dbot_cols:
             # بازسازیِ حفظ-داده (هرگز DROP مستقیم — دراپِ ساده رکوردهای واقعی
             # ربات‌های اختصاصی را می‌سوزاند): rename → create → copy → verify → drop
-            print("🔧 [saas_db] مهاجرت dedicated_bots: بازسازیِ حفظ-داده برای افزودن pid/expire_date...")
+            logger.info("🔧 [saas_db] مهاجرت dedicated_bots: بازسازیِ حفظ-داده برای افزودن pid/expire_date...")
             c.execute("ALTER TABLE dedicated_bots RENAME TO dedicated_bots_old")
             c.execute(
                 """CREATE TABLE dedicated_bots (
@@ -1519,7 +1525,7 @@ def init_db() -> None:
                 required_not_null=("reseller_id", "owner_id", "token", "created_at", "status"),
             )
             c.execute("DROP TABLE dedicated_bots_old")
-            print("✅ [saas_db] مهاجرت dedicated_bots حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            logger.info("✅ [saas_db] مهاجرت dedicated_bots حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
         # مهاجرت ۲: افزودن وضعیت 'deleted' به CHECK — بازسازیِ حفظ-داده
         # (rename → create → copy → drop) چون SQLite نمی‌تواند CHECK را درجا
@@ -1528,7 +1534,7 @@ def init_db() -> None:
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='dedicated_bots'"
         ).fetchone()
         if _dbot_sql and "'deleted'" not in _dbot_sql[0]:
-            print("🔧 [saas_db] مهاجرت dedicated_bots: افزودن وضعیت 'deleted' (بازسازی حفظ-داده)...")
+            logger.info("🔧 [saas_db] مهاجرت dedicated_bots: افزودن وضعیت 'deleted' (بازسازی حفظ-داده)...")
             c.execute("ALTER TABLE dedicated_bots RENAME TO dedicated_bots_old")
             c.execute(
                 """CREATE TABLE dedicated_bots (
@@ -1556,7 +1562,7 @@ def init_db() -> None:
                 required_not_null=("reseller_id", "owner_id", "token", "created_at", "status"),
             )
             c.execute("DROP TABLE dedicated_bots_old")
-            print("✅ [saas_db] مهاجرت dedicated_bots ('deleted') حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
+            logger.info("✅ [saas_db] مهاجرت dedicated_bots ('deleted') حفظ-داده با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
         # v1.8.0: migration — اضافه کردن ستون unit به tickets اگه نبود
         try:
@@ -1836,7 +1842,7 @@ def claim_referral_rewards(user_id: int) -> int:
             create_subscription(user_id, "هدیه دعوت", REFERRAL_REWARD_DAYS)
             granted += 1
         except Exception as e:
-            print(f"⚠️ [referral] ساخت اشتراک هدیه ناموفق: {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [referral] ساخت اشتراک هدیه ناموفق: {type(e).__name__}: {e}")
             break
     if granted:
         with _conn() as c:
@@ -1929,7 +1935,7 @@ async def delete_user_completely(user_id: int) -> bool:
             if c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone() is None:
                 return False
     except Exception as e:
-        print(f"⛔ [delete_user] PRECHECK (DB اصلی) شکست خورد: {type(e).__name__}: {e}")
+        logger.error(f"⛔ [delete_user] PRECHECK (DB اصلی) شکست خورد: {type(e).__name__}: {e}")
         return False
     try:
         with _db_lock:
@@ -1939,7 +1945,7 @@ async def delete_user_completely(user_id: int) -> bool:
             finally:
                 bd.close()
     except Exception as e:
-        print(f"⛔ [delete_user] PRECHECK (bot_data) شکست خورد — حذف لغو شد: {type(e).__name__}: {e}")
+        logger.error(f"⛔ [delete_user] PRECHECK (bot_data) شکست خورد — حذف لغو شد: {type(e).__name__}: {e}")
         return False
 
     # ── ۲) تراکنشِ واحدِ DB اصلی — همه با هم COMMIT یا همه ROLLBACK ──
@@ -2020,7 +2026,7 @@ async def delete_user_completely(user_id: int) -> bool:
                             (user_id,),
                         )
                 except Exception as e:
-                    print(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
+                    logger.warning(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
             break
         except Exception as e:
             if attempt == 2:
@@ -2028,7 +2034,7 @@ async def delete_user_completely(user_id: int) -> bool:
                       f"شکست خورد — کاربر از DB اصلی حذف شده ولی ردیف legacy باقی است "
                       f"(نه silent): {type(e).__name__}: {e}")
                 return False
-            print(f"⚠️ [delete_user] bot_data قفل بود — تلاش مجدد ({attempt + 1}/3): {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [delete_user] bot_data قفل بود — تلاش مجدد ({attempt + 1}/3): {type(e).__name__}: {e}")
             await asyncio.sleep(0.3)
 
     # ── ۴) اکانت‌های سلفِ او در config.json: مالکیت گرفته می‌شود (یتیم) ──
@@ -2039,7 +2045,7 @@ async def delete_user_completely(user_id: int) -> bool:
         _orphan_user_selfbots(user_id)
         _config_orphaned = True
     except Exception as e:
-        print(f"⚠️ [delete_user] یتیم‌سازی اکانت‌های سلف در config با خطا مواجه شد: {type(e).__name__}: {e}")
+        logger.warning(f"⚠️ [delete_user] یتیم‌سازی اکانت‌های سلف در config با خطا مواجه شد: {type(e).__name__}: {e}")
     # مرحله‌ی ۴ تمام شد → Journal را جلو ببر (FILES_DELETED)
     if _config_orphaned:
         try:
@@ -2049,7 +2055,7 @@ async def delete_user_completely(user_id: int) -> bool:
                     (user_id,),
                 )
         except Exception as e:
-            print(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
+            logger.warning(f"⚠️ [delete_user] به‌روزرسانی status در Journal ناموفق بود (بی‌ضرر): {type(e).__name__}")
 
     # ── ۵) توقف فرآیندهای ربات‌های اختصاصیِ revoke‌شده — با تأییدِ مرگ ──
     for bid in owned_dedicated:
@@ -2082,7 +2088,7 @@ async def delete_user_completely(user_id: int) -> bool:
                     print(f"⛔ [delete_user] CRITICAL: فرآیند ربات اختصاصی #{bid} (pid={pid}) "
                           f"بعد از SIGTERM/SIGKILL هنوز زنده است — بررسی دستی لازم است.")
         except Exception as e:
-            print(f"⚠️ [delete_user] توقف فرآیند ربات اختصاصی #{bid} ناموفق بود: {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [delete_user] توقف فرآیند ربات اختصاصی #{bid} ناموفق بود: {type(e).__name__}: {e}")
 
     # ── ۶) پایانِ موفق: ردیف journal پاک می‌شود — فقط وقتی همه‌ی مراحل حیاتی
     # (bot_data + config) کامل شده‌اند؛ وگرنه ردیف می‌ماند و Recovery ادامه می‌دهد.
@@ -2091,7 +2097,7 @@ async def delete_user_completely(user_id: int) -> bool:
             with _conn() as c:
                 c.execute("DELETE FROM delete_journal WHERE user_id = ?", (user_id,))
         except Exception as e:
-            print(f"⚠️ [delete_user] پاک‌سازی ردیف journal ناموفق بود (بی‌ضرر — Recovery دوباره تلاش می‌کند): {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [delete_user] پاک‌سازی ردیف journal ناموفق بود (بی‌ضرر — Recovery دوباره تلاش می‌کند): {type(e).__name__}: {e}")
 
     log_action(None, "delete_user_completely", f"user_id={user_id}, dedicated_revoked={len(owned_dedicated)}")
     return True
@@ -2970,7 +2976,7 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
     except Exception as e:
         # هر خطای دیگری (قفل DB و…) — تراکنش rollback می‌شود و state نیمه‌کاره
         # باقی نمی‌ماند. جزئیات فنی فقط در لاگ سرور.
-        print(f"⚠️ [saas_db] pay_order_trc20_atomic خطا: {type(e).__name__}: {e}")
+        logger.warning(f"⚠️ [saas_db] pay_order_trc20_atomic خطا: {type(e).__name__}: {e}")
         return {"ok": False, "error": "unknown_error"}
     log_action(user_id, "order_paid_trc20", f"order={order_id}, plan={order['plan']}")
     return {"ok": True, "plan": order["plan"], "duration": duration}
@@ -3385,7 +3391,7 @@ def _checkpoint_and_clean_session(path: str) -> bool:
         try:
             os.remove(journal)
         except OSError as e:
-            print(f"⚠️ [restore] حذف journal کهنه‌ی سشن {journal} ناموفق: {e}")
+            logger.warning(f"⚠️ [restore] حذف journal کهنه‌ی سشن {journal} ناموفق: {e}")
             return False
     return True
 
@@ -3479,7 +3485,7 @@ def build_backup_zip(zip_path: str) -> bool:
                 try:
                     db_snaps[arc] = _snapshot_db_to_temp(real)
                 except Exception as e:
-                    print(f"⚠️ [backup] snapshot دیتابیس {real} ناموفق: {e}")
+                    logger.warning(f"⚠️ [backup] snapshot دیتابیس {real} ناموفق: {e}")
                     return False
             elif real.endswith(".session"):
                 snaps = _snapshot_session_to_temp(real)
@@ -3517,7 +3523,7 @@ def build_backup_zip(zip_path: str) -> bool:
             return False
         return True
     except Exception as e:
-        print(f"⚠️ [backup] ساخت بکاپ ناموفق: {e}")
+        logger.warning(f"⚠️ [backup] ساخت بکاپ ناموفق: {e}")
         try:
             os.remove(zip_path)
         except Exception:
@@ -3615,7 +3621,7 @@ def validate_backup_zip(zip_path: str) -> tuple:
                     if not _file_is_sqlite(tmp_db):
                         if db_name.endswith(".session"):
                             # سشن غیر-SQLite: فقط هشدار (بایگانی خام) — بکاپ را رد نمی‌کند
-                            print(f"⚠️ [backup] سشن {db_name} فایل SQLite معتبر نیست — بایگانی خام.")
+                            logger.warning(f"⚠️ [backup] سشن {db_name} فایل SQLite معتبر نیست — بایگانی خام.")
                             continue
                         return False, f"دیتابیس {db_name} فایل SQLite معتبر نیست."
                     if not _db_integrity_ok(tmp_db):
@@ -3846,7 +3852,7 @@ def _remove_stale_restore_files(manifest_files: list,
                 # BUG B: حذفِ ناموفقِ stale swallow نمی‌شود — خطا ثبت می‌شود و
                 # در پایانِ تابع کلِ عملیات Restore fail اعلام می‌شود (فایلِ
                 # موجودی که حذف نشده یعنی Snapshot واقعیِ مدنظر ساخته نشده).
-                print(f"⚠️ [restore] حذف فایل stale ناموفق بود: {real}: {e}")
+                logger.warning(f"⚠️ [restore] حذف فایل stale ناموفق بود: {real}: {e}")
                 errors.append((real, e))
 
     # فایل‌های سطح‌بالای ردیابی‌شده
@@ -3885,7 +3891,7 @@ def _remove_stale_restore_files(manifest_files: list,
                 except OSError as e:
                     # BUG B: مثل _safe_remove — حذفِ ناموفقِ سشنِ stale Restore
                     # را fail می‌کند (نه اینکه فقط لاگ شود و ادامه یابد).
-                    print(f"⚠️ [restore] حذف سشن stale ناموفق بود: {full}: {e}")
+                    logger.warning(f"⚠️ [restore] حذف سشن stale ناموفق بود: {full}: {e}")
                     errors.append((full, e))
     if errors:
         # BUG B: حذفِ ناقصِ stale — مسیرهای حذف‌شده‌ی موفق (removed) همراهِ
@@ -3942,7 +3948,7 @@ def _post_restore_validate(restored_files: list = None) -> tuple:
             if not health["ok"]:
                 return False, f"سشن بازیابی‌شده «{tag}» سالم نیست: {health['error']}"
             if health["sqlite_ok"]:
-                print(f"✅ [SESSION][{tag}][CHECK] سشن بازیابی‌شده سالم است")
+                logger.info(f"✅ [SESSION][{tag}][CHECK] سشن بازیابی‌شده سالم است")
     return True, ""
 
 
@@ -4001,7 +4007,7 @@ def restore_backup_from_zip(zip_path: str, stale_cleanup: bool = True) -> tuple:
             _rollback_from_emergency(emergency_zip, [], [])
         except Exception as re_:
             rollback_err = re_
-            print(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
+            logger.warning(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
         shutil.rmtree(workdir, ignore_errors=True)
         if rollback_err is not None:
             # BUG #4: rollbackِ ناقص هرگز «موفقیتِ بازگشت» اعلام نمی‌شود.
@@ -4220,7 +4226,7 @@ def _do_restore_locked(zip_path: str, workdir: str, emergency_zip: str,
                                      removed_stale, stale_preserve_dir)
         except Exception as re_:
             rollback_err = re_
-            print(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
+            logger.warning(f"⚠️ [backup] برگشت اضطراری ناموفق: {re_}")
         shutil.rmtree(workdir, ignore_errors=True)
         if rollback_err is not None:
             # BUG #4: اگر rollback خودش ناقص ماند، هرگز «وضعیت قبلی
@@ -4852,12 +4858,12 @@ def _validate_saas_env_or_exit() -> None:
     problems = _validate_saas_env()
     if not problems:
         return
-    print("❌ راه‌اندازی متوقف شد — متغیرهای محیطی ربات مدیریت (SaaS) ناقص‌اند:")
+    logger.error("❌ راه‌اندازی متوقف شد — متغیرهای محیطی ربات مدیریت (SaaS) ناقص‌اند:")
     for p in problems:
-        print(f"   - {p}")
-    print("   قبل از اجرا آن‌ها را تنظیم کن، مثلاً:")
-    print('   export ADMIN_BOT_TOKEN="<token>" ADMIN_ID="<owner-id>"')
-    print("   یا از systemd Environment=... / فایل .env استفاده کن.")
+        logger.info(f"   - {p}")
+    logger.info("   قبل از اجرا آن‌ها را تنظیم کن، مثلاً:")
+    logger.info('   export ADMIN_BOT_TOKEN="<token>" ADMIN_ID="<owner-id>"')
+    logger.info("   یا از systemd Environment=... / فایل .env استفاده کن.")
     raise SystemExit(1)
 
 
@@ -5598,7 +5604,7 @@ class AdminBot:
         if self._backup_task is None or self._backup_task.done():
             self._backup_task = asyncio.create_task(self._daily_backup_loop())
 
-        print("🤖 ربات مدیریت (پنل ادمین) با موفقیت روشن شد.")
+        logger.info("🤖 ربات مدیریت (پنل ادمین) با موفقیت روشن شد.")
         return self.client
 
     def _is_admin(self, uid: int) -> bool:
@@ -5629,7 +5635,7 @@ class AdminBot:
             with open(ADMIN_LIST_FILE, "w", encoding="utf-8") as f:
                 json.dump(sorted(ids), f)
         except Exception as e:
-            print(f"⚠️ [admin_bot] ذخیره‌ی لیست ادمین‌ها ناموفق بود: {e}")
+            logger.warning(f"⚠️ [admin_bot] ذخیره‌ی لیست ادمین‌ها ناموفق بود: {e}")
 
     # ─────────────────────────────────────────────────────
     #  منوی اصلی
@@ -6063,7 +6069,7 @@ class AdminBot:
             sessions = await entry.bot.list_sessions()
         except Exception as e:
             # پیامِ عمومی به کاربر؛ جزئیات فقط در لاگ سرور.
-            print(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}: {e}")
             await event.edit(
                 UI.screen("🔒 دستگاه‌های لاگین‌شده",
                           body=[f"{UI.RED} گرفتن فهرست دستگاه‌ها ناموفق بود. دوباره تلاش کن."]),
@@ -6159,7 +6165,7 @@ class AdminBot:
         try:
             others = [s for s in await entry.bot.list_sessions() if not s["current"]]
         except Exception as e:
-            print(f"⚠️ [sesstog:{tag}] list_sessions ناموفق: {type(e).__name__}")
+            logger.warning(f"⚠️ [sesstog:{tag}] list_sessions ناموفق: {type(e).__name__}")
             await event.answer("گرفتن فهرست دستگاه‌ها ناموفق بود.", alert=True)
             return
         if 0 <= idx < len(others):
@@ -6333,7 +6339,7 @@ class AdminBot:
         try:
             others = [s for s in await entry.bot.list_sessions() if not s["current"]]
         except Exception as e:
-            print(f"⚠️ [sesswipe:{tag}] list_sessions ناموفق: {type(e).__name__}")
+            logger.warning(f"⚠️ [sesswipe:{tag}] list_sessions ناموفق: {type(e).__name__}")
             others = []
         if not others:
             await self._show_sessions(event, tag, flash="دستگاهِ دیگری برای بستن نبود.")
@@ -6466,7 +6472,7 @@ class AdminBot:
         except Exception as e:
             # هیچ‌وقت پیش نمی‌آید (get_2fa_status خودش exception را مدیریت
             # می‌کند)، ولی fail-safe: هرگز crash نکنیم.
-            print(f"⚠️ [tfa:{tag}] get_2fa_status استثنا داد: {type(e).__name__}")
+            logger.warning(f"⚠️ [tfa:{tag}] get_2fa_status استثنا داد: {type(e).__name__}")
             st = {"ok": False, "error": "api_error"}
 
         body = []
@@ -7267,7 +7273,7 @@ class AdminBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [admin_bot] خطا در پشتیبان‌گیری روزانه: {e}")
+                logger.warning(f"⚠️ [admin_bot] خطا در پشتیبان‌گیری روزانه: {e}")
                 await asyncio.sleep(3600)
 
     @staticmethod
@@ -7320,7 +7326,7 @@ class AdminBot:
                 timeout=60.0,
             )
             if not ok:
-                print("⚠️ [admin_bot] ساخت بکاپ روزانه ناموفق بود — ارسال نشد.")
+                logger.warning("⚠️ [admin_bot] ساخت بکاپ روزانه ناموفق بود — ارسال نشد.")
                 return
             file_size = os.path.getsize(backup_path)
             now = self.sb.iran_now()
@@ -7330,7 +7336,7 @@ class AdminBot:
                 f"🕐 نوبت: {slot} (ایران) — برنامه: {', '.join(f'{int(h):02d}:00' for h in BACKUP_HOURS_IRAN)}"
             )
             recipients = self._backup_recipient_ids()
-            print(f"📤 [admin_bot] ارسال بکاپ {file_size:,} bytes به {len(recipients)} نفر: {recipients}")
+            logger.info(f"📤 [admin_bot] ارسال بکاپ {file_size:,} bytes به {len(recipients)} نفر: {recipients}")
             for admin_id in recipients:
                 try:
                     await asyncio.wait_for(
@@ -7338,17 +7344,17 @@ class AdminBot:
                                               force_document=True),
                         timeout=300,  # ۵ دقیقه
                     )
-                    print(f"✅ [admin_bot] بکاپ به {admin_id} ارسال شد")
+                    logger.info(f"✅ [admin_bot] بکاپ به {admin_id} ارسال شد")
                 except asyncio.TimeoutError:
                     err_msg = f"⏰ ارسال بکاپ خودکار به شما بیش از ۵ دقیقه طول کشید."
-                    print(f"⚠️ [admin_bot] Timeout ارسال به {admin_id}")
+                    logger.warning(f"⚠️ [admin_bot] Timeout ارسال به {admin_id}")
                     try:
                         await self.client.send_message(admin_id, err_msg)
                     except Exception:
                         pass
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
-                    print(f"⚠️ [admin_bot] ارسال بکاپ به {admin_id} ناموفق: {err}")
+                    logger.warning(f"⚠️ [admin_bot] ارسال بکاپ به {admin_id} ناموفق: {err}")
                     # پیام خطا به خود admin بفرست
                     try:
                         await self.client.send_message(
@@ -7358,7 +7364,7 @@ class AdminBot:
                     except Exception:
                         pass
         except Exception as e:
-            print(f"⚠️ [admin_bot] خطای کلی در بکاپ: {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [admin_bot] خطای کلی در بکاپ: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
         finally:
@@ -7793,7 +7799,7 @@ class AdminBot:
                     entry.bot.enabled = True
                     entry.bot._persist(enabled=True)
                 except Exception as e:
-                    print(f"⚠️ [{tag}] ثبت enabled=True پس از لاگین ناموفق بود: {type(e).__name__}")
+                    logger.warning(f"⚠️ [{tag}] ثبت enabled=True پس از لاگین ناموفق بود: {type(e).__name__}")
 
         # اگر این ویزارد از مسیر «لاگین مستقیم کاربر عادی» شروع شده بود
         # (یعنی data["owner_user_id"] صراحتاً ست شده بود، نه از
@@ -7901,7 +7907,7 @@ class AdminBot:
             try:
                 await self._handle_wizard_input(event, wiz)
             except Exception as e:
-                print(f"⚠️ [admin_bot] خطا در پردازش ویزارد: {e}")
+                logger.warning(f"⚠️ [admin_bot] خطا در پردازش ویزارد: {e}")
                 await event.respond(f"❌ خطای غیرمنتظره: {str(e)[:150]}\nویزارد لغو شد.")
                 await self._cancel_wizard(event.sender_id)
 
@@ -8180,7 +8186,7 @@ class AdminBot:
         except Exception as e:
             # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
             # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
-            print(f"⚠️ [admin_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [admin_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
             try:
                 await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
             except Exception:
@@ -8225,7 +8231,7 @@ async def run_admin_bot_forever(selfbot_module):
         except Exception as e:
             consecutive_failures += 1
             wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-            print(f"⚠️ [admin_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
+            logger.warning(f"⚠️ [admin_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
             await asyncio.sleep(wait_time)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -8553,9 +8559,9 @@ class SaaSBot:
                     await propagate_to_accounts(admin_bot=self)
                 self._propagate_task = asyncio.create_task(_post_update_propagate())
         except Exception as e:
-            print(f"⚠️ auto-update init failed (continuing): {e}")
+            logger.warning(f"⚠️ auto-update init failed (continuing): {e}")
 
-        print("🤖 ربات CiaNetSelf (نقش‌محور) با موفقیت روشن شد.")
+        logger.info("🤖 ربات CiaNetSelf (نقش‌محور) با موفقیت روشن شد.")
         return self.client
 
     async def _notify_admin_update(self, text: str) -> None:
@@ -8565,7 +8571,7 @@ class SaaSBot:
             if owner and self.client:
                 await self.client.send_message(owner, text)
         except Exception as e:
-            print(f"notify update failed: {e}")
+            logger.info(f"notify update failed: {e}")
 
     def _role(self, user_id: int) -> str:
         return get_role(user_id, OWNER_ID)
@@ -9544,10 +9550,10 @@ class SaaSBot:
                     except Exception:
                         pass
             except Exception as e:
-                print(f"⚠️ [reseller] اطلاع به OWNER: {e}")
+                logger.warning(f"⚠️ [reseller] اطلاع به OWNER: {e}")
 
         except Exception as e:
-            print(f"⚠️ [reseller] ثبت درخواست ناموفق: {e}")
+            logger.warning(f"⚠️ [reseller] ثبت درخواست ناموفق: {e}")
             await event.answer("خطا در ثبت درخواست. دوباره امتحان کن.", alert=True)
             return
 
@@ -11418,7 +11424,7 @@ def time_ago(ts: float) -> str:
         try:
             await asyncio.to_thread(init_db)
         except Exception as e:
-            print(f"⚠️ [backup] init_db در حین بکاپ خطا داد: {e}")
+            logger.warning(f"⚠️ [backup] init_db در حین بکاپ خطا داد: {e}")
 
         backup_path = os.path.join(tempfile.gettempdir(), _backup_file_name())
         try:
@@ -11430,10 +11436,10 @@ def time_ago(ts: float) -> str:
                 timeout=60.0,
             )
         except asyncio.TimeoutError:
-            print(f"⚠️ [backup] build_backup_zip بیش از ۶۰ ثانیه طول کشید — احتمالاً Session قفل است")
+            logger.warning(f"⚠️ [backup] build_backup_zip بیش از ۶۰ ثانیه طول کشید — احتمالاً Session قفل است")
             ok = False
         except Exception as e:
-            print(f"⚠️ [backup] build_backup_zip exception: {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [backup] build_backup_zip exception: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
             ok = False
@@ -11464,11 +11470,11 @@ def time_ago(ts: float) -> str:
                 )
             try:
                 await self.client.send_message(event.chat_id, msg)
-                print(f"✅ [backup] پیام خطای مفصل به کاربر ارسال شد")
+                logger.info(f"✅ [backup] پیام خطای مفصل به کاربر ارسال شد")
             except Exception as ee:
-                print(f"⚠️ [backup] حتی پیام خطا هم ارسال نشد: {ee}")
+                logger.warning(f"⚠️ [backup] حتی پیام خطا هم ارسال نشد: {ee}")
             return
-        print(f"✅ [backup] ساخته شد: {backup_path} ({os.path.getsize(backup_path):,} bytes)")
+        logger.info(f"✅ [backup] ساخته شد: {backup_path} ({os.path.getsize(backup_path):,} bytes)")
         # v1.9.2: کل فرآیند send_file و send_message زیر یه try/except مستقل
         # و با لاگ کامل. قبلاً اگه send_file فیل می‌شد، حتی پیام خطا هم
         # به کاربر نمی‌رسید (silent fail). حالا هر خطا با traceback کامل
@@ -11476,7 +11482,7 @@ def time_ago(ts: float) -> str:
         send_error = None
         file_sent = False
         file_size = os.path.getsize(backup_path)
-        print(f"📤 [backup] در حال ارسال فایل {file_size:,} bytes به {event.chat_id}...")
+        logger.info(f"📤 [backup] در حال ارسال فایل {file_size:,} bytes به {event.chat_id}...")
         try:
             # v1.9.2: timeout ۵ دقیقه برای فایل‌های بزرگ. اگه network کند باشه
             # یا session فایل‌ها چند ده MB باشن، upload زمان می‌بره.
@@ -11489,13 +11495,13 @@ def time_ago(ts: float) -> str:
                 timeout=300,  # ۵ دقیقه
             )
             file_sent = True
-            print(f"✅ [backup] فایل به {event.chat_id} ارسال شد")
+            logger.info(f"✅ [backup] فایل به {event.chat_id} ارسال شد")
         except asyncio.TimeoutError:
             send_error = "ارسال فایل بیش از ۵ دقیقه طول کشید (Timeout)"
-            print(f"⚠️ [backup] send_file Timeout: {send_error}")
+            logger.warning(f"⚠️ [backup] send_file Timeout: {send_error}")
         except Exception as e:
             send_error = f"{type(e).__name__}: {e}"
-            print(f"⚠️ [backup] send_file فیل شد: {send_error}")
+            logger.warning(f"⚠️ [backup] send_file فیل شد: {send_error}")
             import traceback
             traceback.print_exc()
         if file_sent:
@@ -11507,7 +11513,7 @@ def time_ago(ts: float) -> str:
                     "برای بازیابی: «♻️ Restore» را بزن و همین فایل را بفرست."
                 )
             except Exception as e:
-                print(f"⚠️ [backup] پیام تأیید فیل شد (اما فایل ارسال شده): {e}")
+                logger.warning(f"⚠️ [backup] پیام تأیید فیل شد (اما فایل ارسال شده): {e}")
         elif send_error:
             # send_file فیل شده - حتماً پیام خطا بفرست
             try:
@@ -11515,14 +11521,14 @@ def time_ago(ts: float) -> str:
                     event.chat_id,
                     f"❌ ارسال Backup ناموفق:\n{send_error[:300]}"
                 )
-                print(f"✅ [backup] پیام خطا به کاربر ارسال شد")
+                logger.info(f"✅ [backup] پیام خطا به کاربر ارسال شد")
             except Exception as ee:
-                print(f"⚠️ [backup] حتی پیام خطا هم به کاربر نرسید: {ee}")
+                logger.warning(f"⚠️ [backup] حتی پیام خطا هم به کاربر نرسید: {ee}")
         # پاک کردن فایل موقت - حتی اگه ارسال نشد
         try:
             os.remove(backup_path)
         except Exception as e:
-            print(f"⚠️ [backup] حذف فایل موقت فیل شد: {e}")
+            logger.warning(f"⚠️ [backup] حذف فایل موقت فیل شد: {e}")
 
     async def _owner_manage_roles_menu(self, event):
         """callbak قدیمی — برای سازگاری، به هاب «لایسنس و دسترسی‌ها» می‌رود."""
@@ -12950,7 +12956,7 @@ def time_ago(ts: float) -> str:
             try:
                 create_subscription(target_user_id, "تمدید دستی", days)
             except Exception as e:
-                print(f"⚠️ [saas_bot] تمدید دستی ناموفق: {type(e).__name__}: {e}")
+                logger.warning(f"⚠️ [saas_bot] تمدید دستی ناموفق: {type(e).__name__}: {e}")
                 await event.respond(
                     "❌ تمدید انجام نشد — اشتراک این کاربر هم‌زمان تغییر کرد. "
                     "یک لحظه صبر کن و دوباره امتحان کن."
@@ -13102,7 +13108,7 @@ def time_ago(ts: float) -> str:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [saas_bot] خطا در expiry_loop: {e}")
+                logger.warning(f"⚠️ [saas_bot] خطا در expiry_loop: {e}")
                 await asyncio.sleep(60)
 
     async def _cleanup_long_expired_users(self, grace_days: int = 3):
@@ -13184,7 +13190,7 @@ def time_ago(ts: float) -> str:
                         c.execute("DELETE FROM admins WHERE user_id = ?", (uid,))
                         c.execute("DELETE FROM users WHERE user_id = ?", (uid,))
                 except Exception as e:
-                    print(f"⚠️ [cleanup] DB error for uid={uid}: {e}")
+                    logger.warning(f"⚠️ [cleanup] DB error for uid={uid}: {e}")
 
                 # 5. پیام آخر (اگر بتونه)
                 try:
@@ -13198,9 +13204,9 @@ def time_ago(ts: float) -> str:
                 except Exception:
                     pass
 
-                print(f"✅ [cleanup] کاربر {uid} بعد از {grace_days} روز انقضا حذف شد.")
+                logger.info(f"✅ [cleanup] کاربر {uid} بعد از {grace_days} روز انقضا حذف شد.")
             except Exception as e:
-                print(f"⚠️ [cleanup] خطا در حذف کاربر {uid}: {e}")
+                logger.warning(f"⚠️ [cleanup] خطا در حذف کاربر {uid}: {e}")
 
     async def _sweep_expired_dedicated_bots(self):
         """ربات‌های اختصاصی منقضی‌شده: فرآیند متوقف و وضعیت revoke."""
@@ -13255,7 +13261,7 @@ def time_ago(ts: float) -> str:
                         if attach_referrer(event.sender_id, ref):
                             _spawn_bg(self._notify_referrer(ref), "referral")
                     except Exception as e:
-                        print(f"⚠️ [referral] ثبت دعوت ناموفق: {type(e).__name__}")
+                        logger.warning(f"⚠️ [referral] ثبت دعوت ناموفق: {type(e).__name__}")
             # گیت عضویت کانال: همه به‌جز ادمین اصلی باید عضو کانالِ تنظیم‌شده
             # توسط مالک باشند تا بتوانند از ربات استفاده کنند. اگر عضو نباشد،
             # پیام /start او حذف و پیام گیت (کادر شیشه‌ای کانال + بررسی عضویت)
@@ -13304,7 +13310,7 @@ def time_ago(ts: float) -> str:
                     if handled:
                         return
                 except Exception as e:
-                    print(f"⚠️ [saas_bot] خطا در ویزارد: {e}")
+                    logger.warning(f"⚠️ [saas_bot] خطا در ویزارد: {e}")
                     self.wizards.pop(event.sender_id, None)
                     await event.respond(f"❌ خطای غیرمنتظره: {str(e)[:150]}")
                     return
@@ -14199,7 +14205,7 @@ def time_ago(ts: float) -> str:
             except Exception as e:
                 # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
                 # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
-                print(f"⚠️ [saas_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
+                logger.warning(f"⚠️ [saas_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
                 try:
                     await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
                 except Exception:
@@ -14449,7 +14455,7 @@ class HelperBot:
             self.client.start(bot_token=HELPER_BOT_TOKEN), timeout=30)
         self._register()
         me = await self.client.get_me()
-        print(f"🤖 ربات راهنما بالا آمد: @{getattr(me, 'username', '?')}")
+        logger.info(f"🤖 ربات راهنما بالا آمد: @{getattr(me, 'username', '?')}")
         return self.client
 
     def _register(self):
@@ -14493,7 +14499,7 @@ class HelperBot:
                         await event.edit(entry[1], buttons=self.back_buttons(lang))
             except Exception as e:
                 # MessageNotModified و امثالش نباید ربات را بشکنند
-                print(f"⚠️ [helper] دکمه: {type(e).__name__}")
+                logger.warning(f"⚠️ [helper] دکمه: {type(e).__name__}")
             finally:
                 try:
                     await event.answer()
@@ -14515,7 +14521,7 @@ class HelperBot:
                     )
                 ], cache_time=0)
             except Exception as e:
-                print(f"⚠️ [helper] inline: {type(e).__name__}")
+                logger.warning(f"⚠️ [helper] inline: {type(e).__name__}")
 
 
 async def run_helper_bot_forever():
@@ -14563,14 +14569,14 @@ async def run_saas_bot_forever(selfbot_module):
         except Exception as e:
             consecutive_failures += 1
             wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-            print(f"⚠️ [saas_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
+            logger.warning(f"⚠️ [saas_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
             # محل دقیق خطا را همیشه چاپ کن (حتی بدون DEBUG).
             import traceback as _tb
             _stack = _tb.format_exc().strip().splitlines()
             if _stack:
                 _last = [l for l in _stack if l.strip().startswith("File ")]
                 if _last:
-                    print(f"   └─ {_last[-1].strip()}")
+                    logger.info(f"   └─ {_last[-1].strip()}")
             await asyncio.sleep(wait_time)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -14685,7 +14691,7 @@ def cleanup_stale_tracker_files() -> None:
         except Exception:
             pass
     if removed:
-        print(f"🧹 {removed} فایل قدیمی ردیاب از سشن قبلی پاک‌سازی شد.")
+        logger.info(f"🧹 {removed} فایل قدیمی ردیاب از سشن قبلی پاک‌سازی شد.")
 
 
 def cleanup_orphan_sessions() -> None:
@@ -14736,7 +14742,7 @@ def cleanup_orphan_sessions() -> None:
             except Exception:
                 pass
     if removed:
-        print(f"🧹 {removed} فایل سشن یتیم (تگ حذف‌شده/لاگین ناتمام) پاک‌سازی شد.")
+        logger.info(f"🧹 {removed} فایل سشن یتیم (تگ حذف‌شده/لاگین ناتمام) پاک‌سازی شد.")
 
 
 def _session_file_for(tag: str) -> str:
@@ -15242,7 +15248,7 @@ async def _send_admin_notification(text: str) -> None:
                     await entry.bot.client.send_message(owner, text)
                     return
     except Exception as e:
-        print(f"send_admin_notification failed: {e}")
+        logger.info(f"send_admin_notification failed: {e}")
 
 
 def _update_status_text() -> str:
@@ -15285,7 +15291,7 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
     تمام شده باشد — timeout به معنی آزاد کردن سشن نیست (Collision سشن /
     دو کلاینت روی یک .session ممنوع).
     """
-    print(f"[{tag}][RUNTIME][STOP] caller={caller}")
+    logger.info(f"[{tag}][RUNTIME][STOP] caller={caller}")
     _STOP_INFLIGHT[tag] = True
     try:
         entry = ACCOUNTS.get(tag)
@@ -15349,7 +15355,7 @@ async def ensure_stopped(tag: str, caller: str = "?") -> bool:
                       f"(بدون تسک زنده): {type(e).__name__}: {str(e)[:100]}")
             unregister_account(tag)
             _RUNTIME_TASKS.pop(tag, None)
-            print(f"⚠️ [{tag}][RUNTIME][STOP] تمیزکاری تکمیلی انجام شد (unregister)")
+            logger.warning(f"⚠️ [{tag}][RUNTIME][STOP] تمیزکاری تکمیلی انجام شد (unregister)")
         return True
     finally:
         _STOP_INFLIGHT.pop(tag, None)
@@ -15373,17 +15379,17 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
 
     برگشت: (ready: bool, status: str) — مثل _await_account_ready.
     """
-    print(f"[{tag}][RUNTIME][REQUEST] caller={caller}")
+    logger.info(f"[{tag}][RUNTIME][REQUEST] caller={caller}")
     if _MAINTENANCE_MODE or SHUTTING_DOWN:
         reason = "maintenance" if _MAINTENANCE_MODE else "shutting_down"
-        print(f"[{tag}][RUNTIME][REJECT] {reason} فعال است — استارت رد شد (caller={caller})")
+        logger.info(f"[{tag}][RUNTIME][REJECT] {reason} فعال است — استارت رد شد (caller={caller})")
         return False, reason
     # قفلِ واقعیِ per-tag: کلِ check → mark → create زیرِ همین قفل اجرا می‌شود
     # تا دو Coroutine هم‌زمان نتوانند هر دو از چک‌ها رد شوند. منتظرهای بعدی
     # بعد از آزادشدنِ قفل دوباره وضعیت را چک می‌کنند (REUSE/WAIT).
     async with _START_LOCKS.setdefault(tag, asyncio.Lock()):
         if is_running(tag):
-            print(f"[{tag}][RUNTIME][REUSE] runtime آماده است (caller={caller})")
+            logger.info(f"[{tag}][RUNTIME][REUSE] runtime آماده است (caller={caller})")
             return True, "ready"
         # اگر تسکِ run_bot هنوز زنده است (حتی در حالت error/backoff یا شروعِ
         # ناقص) — یعنی یک Runtime واقعاً در جریان است — تسک دوم ساخته نمی‌شود
@@ -15393,13 +15399,13 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
         # اگر شکستِ دائمی بخورد، با auth_failed برمی‌گردد.
         lock = _TAG_LOCKS.get(tag)
         if lock is not None and lock.locked():
-            print(f"[{tag}][RUNTIME][WAIT] runtime هنوز زنده است (start/backoff) — همان تلاش await می‌شود (caller={caller})")
+            logger.info(f"[{tag}][RUNTIME][WAIT] runtime هنوز زنده است (start/backoff) — همان تلاش await می‌شود (caller={caller})")
             return await _await_account_ready(tag, timeout=wait_seconds)
         if is_starting(tag):
-            print(f"[{tag}][RUNTIME][WAIT] runtime در حال شروع است — همان await می‌شود (caller={caller})")
+            logger.info(f"[{tag}][RUNTIME][WAIT] runtime در حال شروع است — همان await می‌شود (caller={caller})")
             return await _await_account_ready(tag, timeout=wait_seconds)
         if is_stopping(tag):
-            print(f"[{tag}][RUNTIME][WAIT] runtime در حال توقف است — منتظر پایان کامل (caller={caller})")
+            logger.info(f"[{tag}][RUNTIME][WAIT] runtime در حال توقف است — منتظر پایان کامل (caller={caller})")
             for _ in range(int(wait_seconds / 0.4) + 1):
                 if not _STOP_INFLIGHT.get(tag):
                     break
@@ -15408,9 +15414,9 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
                 # توقف هنوز کامل نشده (disconnect/save/close در جریان است) —
                 # استارتِ جدید همان Session را باز می‌کند و Collision/readonly
                 # می‌سازد؛ پس رد می‌شود (PATCH 6).
-                print(f"[{tag}][RUNTIME][WAIT] توقف هنوز کامل نشده — استارت رد شد (caller={caller})")
+                logger.info(f"[{tag}][RUNTIME][WAIT] توقف هنوز کامل نشده — استارت رد شد (caller={caller})")
                 return False, "stopping"
-        print(f"[{tag}][RUNTIME][START] caller={caller}")
+        logger.info(f"[{tag}][RUNTIME][START] caller={caller}")
         _mark_pending_start(tag)
 
         run_bot_fn = runner or run_bot
@@ -15422,9 +15428,9 @@ async def ensure_started(tag: str, config: dict, caller: str = "?",
         )
         ready, st = await _await_account_ready(tag, timeout=wait_seconds)
         if ready:
-            print(f"[{tag}][RUNTIME][READY] (caller={caller})")
+            logger.info(f"[{tag}][RUNTIME][READY] (caller={caller})")
         else:
-            print(f"[{tag}][RUNTIME][FAILED] status={st} (caller={caller})")
+            logger.info(f"[{tag}][RUNTIME][FAILED] status={st} (caller={caller})")
         return ready, st
 
 
@@ -15433,7 +15439,7 @@ async def restart(tag: str, config: dict, caller: str = "?",
     """توقف کامل → استارت جدید (مثلاً تغییر پروکسی). runner مثل
     ensure_started — وقتی از داخل AdminBot/SaaSBot صدا زده می‌شود باید
     self.sb.run_bot داده شود."""
-    print(f"[{tag}][RUNTIME][RESTART] caller={caller}")
+    logger.info(f"[{tag}][RUNTIME][RESTART] caller={caller}")
     await ensure_stopped(tag, caller)
     return await ensure_started(tag, config, caller, runner=runner)
 
@@ -15458,7 +15464,7 @@ async def _graceful_shutdown_all() -> None:
     tags = list(ACCOUNTS.keys())
     if not tags:
         return
-    print(f"🛑 دریافت سیگنال توقف — بستن تمیز {len(tags)} اکانت...")
+    logger.error(f"🛑 دریافت سیگنال توقف — بستن تمیز {len(tags)} اکانت...")
 
     async def _stop_one(tag: str) -> None:
         entry = ACCOUNTS.get(tag)
@@ -15467,9 +15473,9 @@ async def _graceful_shutdown_all() -> None:
         try:
             await asyncio.wait_for(entry.bot.stop(), timeout=15)
         except asyncio.TimeoutError:
-            print(f"⚠️ [{tag}] بستن بیش از ۱۵ ثانیه طول کشید — عبور اجباری")
+            logger.warning(f"⚠️ [{tag}] بستن بیش از ۱۵ ثانیه طول کشید — عبور اجباری")
         except Exception as e:
-            print(f"⚠️ [{tag}] خطا هنگام بستن تمیز: {e}")
+            logger.warning(f"⚠️ [{tag}] خطا هنگام بستن تمیز: {e}")
 
     await asyncio.gather(*(_stop_one(t) for t in tags), return_exceptions=True)
 
@@ -15487,7 +15493,7 @@ async def _graceful_shutdown_all() -> None:
     if leftover:
         await asyncio.gather(*leftover, return_exceptions=True)
 
-    print("✅ همه‌ی اکانت‌ها به‌طور تمیز بسته شدند.")
+    logger.info("✅ همه‌ی اکانت‌ها به‌طور تمیز بسته شدند.")
 
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
@@ -15498,7 +15504,7 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     _shutdown_event = asyncio.Event()
 
     def _on_signal(sig_name: str):
-        print(f"\n📡 سیگنال {sig_name} دریافت شد.")
+        logger.info(f"\n📡 سیگنال {sig_name} دریافت شد.")
         if _shutdown_event and not _shutdown_event.is_set():
             _shutdown_event.set()
 
@@ -15797,7 +15803,7 @@ def _remove_session_files(tag: str) -> bool:
             try:
                 os.remove(f)
             except OSError as e:
-                print(f"⚠️ [delete_account] حذف فایل سشن {f} ناموفق: {e}")
+                logger.warning(f"⚠️ [delete_account] حذف فایل سشن {f} ناموفق: {e}")
                 ok = False
     return ok
 
@@ -15880,7 +15886,7 @@ def _migrate_provision_sources() -> None:
     try:
         init_db()
     except Exception as e:
-        print(f"⚠️ [saas_db] مهاجرت provision_source: دیتابیس در دسترس نبود — رد شد: {e}")
+        logger.warning(f"⚠️ [saas_db] مهاجرت provision_source: دیتابیس در دسترس نبود — رد شد: {e}")
         return
     cfg = load_config()
     # config خراب → هیچ overwrite/یتم‌سازی‌ای انجام نمی‌شود (فقط خواندن مجاز است)
@@ -15903,7 +15909,7 @@ def _migrate_provision_sources() -> None:
         try:
             save_config(cfg)
         except Exception as e:
-            print(f"⚠️ [saas_db] مهاجرت provision_source: ذخیره‌ی config ناموفق: {e}")
+            logger.warning(f"⚠️ [saas_db] مهاجرت provision_source: ذخیره‌ی config ناموفق: {e}")
             return
         after = load_config()
         if set(after.keys()) != before_keys or len(after) != before_count:
@@ -15924,7 +15930,7 @@ def _recover_delete_journal() -> None:
         with _conn() as c:
             rows = c.execute("SELECT user_id FROM delete_journal").fetchall()
     except Exception as e:
-        print(f"⚠️ [recovery] خواندن delete_journal ناموفق بود: {type(e).__name__}: {e}")
+        logger.warning(f"⚠️ [recovery] خواندن delete_journal ناموفق بود: {type(e).__name__}: {e}")
         return
     for row in rows:
         uid = row["user_id"]
@@ -15944,20 +15950,20 @@ def _recover_delete_journal() -> None:
                     bd.close()
         except Exception as e:
             ok = False
-            print(f"⚠️ [recovery] bot_data برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [recovery] bot_data برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
         # ۲) config.json: یتیم‌سازی (idempotent)
         try:
             _orphan_user_selfbots(uid)
         except Exception as e:
             ok = False
-            print(f"⚠️ [recovery] یتیم‌سازی config برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
+            logger.warning(f"⚠️ [recovery] یتیم‌سازی config برای کاربر {uid} کامل نشد (ردیف journal باقی می‌ماند): {type(e).__name__}: {e}")
         if ok:
             try:
                 with _conn() as c:
                     c.execute("DELETE FROM delete_journal WHERE user_id = ?", (uid,))
-                print(f"✅ [recovery] عملیات حذف کاربر {uid} کامل شد (مراحل باقی‌مانده اجرا شد).")
+                logger.info(f"✅ [recovery] عملیات حذف کاربر {uid} کامل شد (مراحل باقی‌مانده اجرا شد).")
             except Exception as e:
-                print(f"⚠️ [recovery] پاک‌سازی ردیف journal کاربر {uid} ناموفق بود: {type(e).__name__}: {e}")
+                logger.warning(f"⚠️ [recovery] پاک‌سازی ردیف journal کاربر {uid} ناموفق بود: {type(e).__name__}: {e}")
 
 
 def safe_input(prompt=""):
@@ -16832,12 +16838,12 @@ class SelfBot:
         # secret) داده می‌شود و READY اعلام نمی‌شود.
         health = check_session_health(self.tag)
         if not health["ok"]:
-            print(f"❌ [SESSION][{self.tag}][CHECK] {health['error']}")
+            logger.error(f"❌ [SESSION][{self.tag}][CHECK] {health['error']}")
             raise Exception(
                 f"اکانت {self.tag}: سشن قابل نوشتن نیست — {health['error']} "
                 f"[SESSION][CHECK]"
             )
-        print(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم است (path: {health['path']})")
+        logger.info(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم است (path: {health['path']})")
 
         # ─── مدیریت sidecar های واقعی سشن ────────────────────────────────
         # فایلِ سشنِ واقعی تلتلون {tag}.session است و sidecar هایش
@@ -16907,10 +16913,10 @@ class SelfBot:
         try:
             await asyncio.wait_for(self.client.connect(), timeout=30)
         except asyncio.TimeoutError:
-            print(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در اتصال — احتمالاً فایروال/NAT هاست کانکشن را بی‌سروصدا drop کرده")
+            logger.error(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در اتصال — احتمالاً فایروال/NAT هاست کانکشن را بی‌سروصدا drop کرده")
             raise
         except Exception as e:
-            print(f"❌ [{self.tag}] خطا در اتصال به سرورهای تلگرام: {e}")
+            logger.error(f"❌ [{self.tag}] خطا در اتصال به سرورهای تلگرام: {e}")
             raise
 
         if not self.client.is_connected():
@@ -16922,7 +16928,7 @@ class SelfBot:
 
         try:
             if interactive and not await self.client.is_user_authorized():
-                print(f"🔐 اکانت {self.tag} نیاز به لاگین دارد.")
+                logger.info(f"🔐 اکانت {self.tag} نیاز به لاگین دارد.")
                 if is_bot_acc:
                     await self.client.start(bot_token=self.cfg.get("token"))
                 else:
@@ -16935,16 +16941,16 @@ class SelfBot:
             else:
                 await asyncio.wait_for(self.client.start(), timeout=45)
         except asyncio.TimeoutError:
-            print(f"❌ [{self.tag}] تایم‌اوت ۴۵ثانیه‌ای در client.start() غیرتعاملی")
+            logger.error(f"❌ [{self.tag}] تایم‌اوت ۴۵ثانیه‌ای در client.start() غیرتعاملی")
             raise
         except Exception as e:
-            print(f"❌ [{self.tag}] خطا در لاگین: {e}")
+            logger.error(f"❌ [{self.tag}] خطا در لاگین: {e}")
             raise
 
         try:
             me = await asyncio.wait_for(self.client.get_me(), timeout=30)
         except asyncio.TimeoutError:
-            print(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در get_me() — کانکشن احتمالاً نیمه‌مرده بود")
+            logger.error(f"❌ [{self.tag}] تایم‌اوت ۳۰ثانیه‌ای در get_me() — کانکشن احتمالاً نیمه‌مرده بود")
             raise
         self.my_id = me.id
         self.base_name = self._clean_name(
@@ -16964,14 +16970,14 @@ class SelfBot:
         try:
             self._persist_identity(me)
         except Exception as e:
-            print(f"⚠️ [{self.tag}] ثبت هویت اکانت ناموفق: {type(e).__name__}")
+            logger.warning(f"⚠️ [{self.tag}] ثبت هویت اکانت ناموفق: {type(e).__name__}")
 
-        print(f"✅ {self.base_name} ({self.tag}) متصل شد. [نوع: {'bot' if is_bot_acc else 'user'}] [build: {BUILD_VERSION}]")
-        print(f"✅ [SESSION][{self.tag}][CONNECT] اتصال برقرار شد")
+        logger.info(f"✅ {self.base_name} ({self.tag}) متصل شد. [نوع: {'bot' if is_bot_acc else 'user'}] [build: {BUILD_VERSION}]")
+        logger.info(f"✅ [SESSION][{self.tag}][CONNECT] اتصال برقرار شد")
 
         restored = await self._load_persisted_state()
         if restored:
-            print(f"♻️ [{self.tag}] {restored} تنظیم بازیابی شد.")
+            logger.info(f"♻️ [{self.tag}] {restored} تنظیم بازیابی شد.")
 
         # حلقه‌ی حضور (presence) باید همیشه، صرف‌نظر از مقدار online_enabled،
         # اجرا شود — چون هم مسئول نگه‌داشتن اکانت «آنلاین» است، هم مسئول
@@ -16979,7 +16985,7 @@ class SelfBot:
         await self._start_presence_loop()
 
         if is_bot_acc:
-            print(f"⚠️ [{self.tag}] اکانت بات است، برخی دستورات کار نمی‌کنند.")
+            logger.warning(f"⚠️ [{self.tag}] اکانت بات است، برخی دستورات کار نمی‌کنند.")
 
         if not self._handlers_registered:
             @self.client.on(events.NewMessage(outgoing=True))
@@ -17051,7 +17057,7 @@ class SelfBot:
 
         self.started = time.time()
         self._set_status("ready")
-        print(f"✅ [SESSION][{self.tag}][READY] اکانت آماده است")
+        logger.info(f"✅ [SESSION][{self.tag}][READY] اکانت آماده است")
         return self.client
 
     def _try_enable_tcp_keepalive(self) -> None:
@@ -17077,9 +17083,9 @@ class SelfBot:
                 sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10)
             if hasattr(_socket, "TCP_KEEPCNT"):
                 sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3)
-            print(f"🔌 [{self.tag}] TCP keepalive روی سوکت فعال شد")
+            logger.info(f"🔌 [{self.tag}] TCP keepalive روی سوکت فعال شد")
         except Exception as e:
-            print(f"ℹ️ [{self.tag}] فعال‌سازی TCP keepalive ممکن نشد (بی‌اهمیت): {e}")
+            logger.info(f"ℹ️ [{self.tag}] فعال‌سازی TCP keepalive ممکن نشد (بی‌اهمیت): {e}")
 
     async def _watchdog_loop(self):
         """
@@ -17098,7 +17104,7 @@ class SelfBot:
                         self.client(GetStateRequest()), timeout=20
                     )
                 except asyncio.TimeoutError:
-                    print(f"🩺 [{self.tag}] Watchdog: کانکشن پاسخ نداد (تایم‌اوت) — قطع اجباری برای reconnect")
+                    logger.info(f"🩺 [{self.tag}] Watchdog: کانکشن پاسخ نداد (تایم‌اوت) — قطع اجباری برای reconnect")
                     try:
                         await self.client.disconnect()
                     except Exception:
@@ -17106,7 +17112,7 @@ class SelfBot:
                 except errors.FloodWaitError:
                     pass
                 except Exception as e:
-                    print(f"🩺 [{self.tag}] Watchdog: خطا در چک سلامت کانکشن ({e}) — قطع اجباری برای reconnect")
+                    logger.info(f"🩺 [{self.tag}] Watchdog: خطا در چک سلامت کانکشن ({e}) — قطع اجباری برای reconnect")
                     try:
                         await self.client.disconnect()
                     except Exception:
@@ -17114,7 +17120,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در watchdog_loop (ادامه می‌دهد): {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا در watchdog_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(10)
 
     async def _stop_watchdog(self):
@@ -17130,13 +17136,13 @@ class SelfBot:
                 if resource is not None:
                     try:
                         maxrss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                        print(f"📊 [{self.tag}] مصرف اوج حافظه‌ی کل پروسه تا این لحظه: {maxrss_mb:.1f}MB")
+                        logger.info(f"📊 [{self.tag}] مصرف اوج حافظه‌ی کل پروسه تا این لحظه: {maxrss_mb:.1f}MB")
                     except Exception:
                         pass
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در memory_log_loop (ادامه می‌دهد): {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا در memory_log_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(10)
 
     async def _load_persisted_state(self) -> int:
@@ -17199,7 +17205,7 @@ class SelfBot:
             self.tabchi_enabled = True
             await self._start_tabchi()
         elif tabchi_running:
-            print(f"⚠️ [{self.tag}] تبچی: قابل بازیابی نبود (چت/متن/رسانه‌ی معتبر موجود نیست) — در DB غیرفعال شد")
+            logger.warning(f"⚠️ [{self.tag}] تبچی: قابل بازیابی نبود (چت/متن/رسانه‌ی معتبر موجود نیست) — در DB غیرفعال شد")
             set_state(self.tag, "tabchi_running", False)
             try:
                 await asyncio.wait_for(
@@ -17253,7 +17259,7 @@ class SelfBot:
         try:
             return await asyncio.wait_for(self.client(request), timeout=timeout)
         except errors.FloodWaitError as e:
-            print(f"⏳ [{self.tag}] FloodWait روی {label}: {e.seconds} ثانیه")
+            logger.info(f"⏳ [{self.tag}] FloodWait روی {label}: {e.seconds} ثانیه")
             await asyncio.sleep(e.seconds + 2)
             return None
         except asyncio.CancelledError:
@@ -17274,7 +17280,7 @@ class SelfBot:
             msg = str(e).lower()
             if "disconnected" in msg or "not connected" in msg:
                 return None
-            print(f"⚠️ [{self.tag}] خطا در {label}: {e}")
+            logger.warning(f"⚠️ [{self.tag}] خطا در {label}: {e}")
             return None
 
     @staticmethod
@@ -17563,7 +17569,7 @@ class SelfBot:
             # می‌شوند تا زیر سقف برگردیم. چتِ فعلی هرگز قربانی نمی‌شود.
             self._enforce_media_budget(protect_chat_id=chat_id)
         except Exception as e:
-            print(f"⚠️ [{self.tag}] خطا در کش پیام برای ردیاب: {e}")
+            logger.warning(f"⚠️ [{self.tag}] خطا در کش پیام برای ردیاب: {e}")
 
     def _forget_msg_bytes(self, key) -> None:
         """سهمِ مدیای یک پیامِ کش‌شده را از شمارنده کم می‌کند."""
@@ -17642,17 +17648,17 @@ class SelfBot:
         try:
             await asyncio.wait_for(func(*args), timeout=90)
         except asyncio.TimeoutError:
-            print(f"⏱ [{self.tag}] هندلر {name} بیش از ۹۰ ثانیه طول کشید — لغو شد (بقیه‌ی اکانت سالم می‌ماند)")
+            logger.info(f"⏱ [{self.tag}] هندلر {name} بیش از ۹۰ ثانیه طول کشید — لغو شد (بقیه‌ی اکانت سالم می‌ماند)")
         except asyncio.CancelledError:
             raise
         except errors.FloodWaitError as e:
-            print(f"⏳ [{self.tag}] FloodWait در {name}: {e.seconds}s")
+            logger.info(f"⏳ [{self.tag}] FloodWait در {name}: {e.seconds}s")
         except Exception as e:
             if _is_fatal_auth_error(e):
-                print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
+                logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
                 self._fatal_auth_error = True
                 return
-            print(f"⚠️ [{self.tag}] خطای کنترل‌نشده در هندلر {name}: {e}")
+            logger.warning(f"⚠️ [{self.tag}] خطای کنترل‌نشده در هندلر {name}: {e}")
             if DEBUG:
                 import traceback
                 traceback.print_exc()
@@ -18161,19 +18167,19 @@ class SelfBot:
             except Exception as e:
                 # این مقصد جواب نداد (بلاک/ناشناخته) — سراغ بعدی. لاگ می‌شود
                 # تا اگر هیچ مقصدی جواب نداد، دلیلش در لاگ پیدا باشد.
-                print(f"⚠️ [{self.tag}] ارسال کد به {t} ناموفق: {type(e).__name__}")
+                logger.warning(f"⚠️ [{self.tag}] ارسال کد به {t} ناموفق: {type(e).__name__}")
                 continue
         if not delivered:
             # اگر همه‌ی مقاصد به‌خاطرِ نبودِ مجوز رد شدند، کد نباید در
             # Saved Messages هم رها شود — در غیر این صورت کاربرِ سلب‌شده
             # هنوز می‌توانست آن را پیدا کند.
             if not targets:
-                print(f"🛍️ [{self.tag}] کد لاگین تحویل داده نشد — هیچ مقصدِ مجازی نیست.")
+                logger.info(f"🛍️ [{self.tag}] کد لاگین تحویل داده نشد — هیچ مقصدِ مجازی نیست.")
                 return
             try:
                 await self.client.send_message("me", text)
             except Exception as e:
-                print(f"⚠️ [{self.tag}] ارسالِ کد لاگین ناموفق: {type(e).__name__}")
+                logger.warning(f"⚠️ [{self.tag}] ارسالِ کد لاگین ناموفق: {type(e).__name__}")
 
     # یوزرنیمِ رباتِ راهنما — از متغیر محیطی، با پیش‌فرضِ فعلی.
     HELPER_USERNAME = os.environ.get("HELPER_BOT_USERNAME", "CiaNetHelpBot").lstrip("@")
@@ -18208,7 +18214,7 @@ class SelfBot:
         except Exception as e:
             reason = f"{type(e).__name__}"
 
-        print(f"⚠️ [{self.tag}] پنل راهنما نیامد: {reason}")
+        logger.warning(f"⚠️ [{self.tag}] پنل راهنما نیامد: {reason}")
         # نسخه‌ی پشتیبان: بدون دکمه، ولی دست‌کم کاربر چیزی می‌بیند
         try:
             await self.client.send_message(
@@ -18467,7 +18473,7 @@ class SelfBot:
                     if cache_entry is not None:
                         cache_entry["media_bytes"] = None
         except Exception as e:
-            print(f"⚠️ [{self.tag}] خطا در ساخت HTML ردیاب: {e}")
+            logger.warning(f"⚠️ [{self.tag}] خطا در ساخت HTML ردیاب: {e}")
 
     async def _build_chat_html(self, chat_id: int, peer_name: str, deleted_ids: set) -> Optional[str]:
         """
@@ -18663,7 +18669,7 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"⚠️ [{self.tag}] خطای اولیه در name_loop: {e}")
+            logger.warning(f"⚠️ [{self.tag}] خطای اولیه در name_loop: {e}")
 
         while self.time_enabled:
             try:
@@ -18680,7 +18686,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در name_loop (نادیده گرفته شد، ادامه‌ می‌دهد): {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا در name_loop (نادیده گرفته شد، ادامه‌ می‌دهد): {e}")
                 await asyncio.sleep(5)
 
     async def _set_bio(self, about: str):
@@ -18702,7 +18708,7 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"⚠️ [{self.tag}] خطای اولیه در bio_loop: {e}")
+            logger.warning(f"⚠️ [{self.tag}] خطای اولیه در bio_loop: {e}")
 
         while self.bio_enabled:
             try:
@@ -18720,7 +18726,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در bio_loop (نادیده گرفته شد، ادامه می‌دهد): {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا در bio_loop (نادیده گرفته شد، ادامه می‌دهد): {e}")
                 await asyncio.sleep(5)
 
     async def _start_bio_loop(self):
@@ -18771,7 +18777,7 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در presence_loop (ادامه می‌دهد): {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا در presence_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(10)
 
     async def _preserve_offline(self) -> None:
@@ -18883,7 +18889,7 @@ class SelfBot:
                         timeout=20,
                     )
                 else:
-                    print(f"⚠️ [{self.tag}] تبچی: نه متن و نه رسانه‌ی معتبر موجود است — این دور رد شد")
+                    logger.warning(f"⚠️ [{self.tag}] تبچی: نه متن و نه رسانه‌ی معتبر موجود است — این دور رد شد")
 
                 self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
@@ -18894,7 +18900,7 @@ class SelfBot:
                 self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در tabchi_loop (ادامه می‌دهد): {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا در tabchi_loop (ادامه می‌دهد): {e}")
                 await asyncio.sleep(5)
 
     async def _start_tabchi(self):
@@ -19753,7 +19759,7 @@ class SelfBot:
                 return
 
         except Exception as e:
-            print(f"❌ [{self.tag}/{cmd}]: {e}")
+            logger.error(f"❌ [{self.tag}/{cmd}]: {e}")
             try:
                 await event.edit(f"❌ {str(e)[:100]}")
             except Exception:
@@ -19847,7 +19853,7 @@ class SelfBot:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    print(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی: {e}")
+                    logger.warning(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی: {e}")
                     await asyncio.sleep(2)
                     continue
 
@@ -19911,7 +19917,7 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"⚠️ [{self.tag}] دایس {emoji}: خطای غیرمنتظره: {e}")
+            logger.warning(f"⚠️ [{self.tag}] دایس {emoji}: خطای غیرمنتظره: {e}")
         finally:
             # گاردِ همزمانی: پرچم را در همه‌ی مسیرهای خروج (موفقیت، خطا،
             # لغو، «سلف خاموش»، سقف ایمنی) پاک کن تا فرمان بعدی بتواند
@@ -19967,9 +19973,9 @@ class SelfBot:
                 if self.client:
                     await asyncio.wait_for(self.client.disconnect(), timeout=15)
             except asyncio.TimeoutError:
-                print(f"⚠️ [{self.tag}] تایم‌اوت در disconnect حین reconnect — ادامه می‌دهیم")
+                logger.warning(f"⚠️ [{self.tag}] تایم‌اوت در disconnect حین reconnect — ادامه می‌دهیم")
             except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا هنگام disconnect: {e}")
+                logger.warning(f"⚠️ [{self.tag}] خطا هنگام disconnect: {e}")
 
             self.client = None
             self._handlers_registered = False
@@ -20004,9 +20010,9 @@ class SelfBot:
                     ):
                         self.tabchi_enabled = True
                         await self._start_tabchi()
-                        print(f"♻️ [{self.tag}] تبچی از طریق لایه‌ی محافظتی اضافه resume شد")
+                        logger.info(f"♻️ [{self.tag}] تبچی از طریق لایه‌ی محافظتی اضافه resume شد")
             except Exception as e:
-                print(f"❌ [{self.tag}] reconnect ناموفق: {e}")
+                logger.error(f"❌ [{self.tag}] reconnect ناموفق: {e}")
                 # اگر start() وسطِ راه (بعد از ساخت تسک‌های پس‌زمینه‌ی همین
                 # نمونه) شکست خورده باشد، تسک‌های ناقص همین‌جا متوقف می‌شوند —
                 # وگرنه تا تلاشِ بعدیِ reconnect (که آن‌ها را از نو می‌سازد)
@@ -20036,7 +20042,7 @@ class SelfBot:
         while True:
             if self._fatal_auth_error:
                 self._set_status("auth_failed")
-                print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی — دیگر تلاشی برای reconnect انجام نمی‌شود.")
+                logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی — دیگر تلاشی برای reconnect انجام نمی‌شود.")
                 try:
                     set_state(self.tag, "fatal_auth_error", True)
                 except Exception:
@@ -20051,7 +20057,7 @@ class SelfBot:
                 raise
             except Exception as e:
                 if _is_fatal_auth_error(e):
-                    print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در run_until_disconnected: {e}")
+                    logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در run_until_disconnected: {e}")
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
                     continue
@@ -20068,8 +20074,8 @@ class SelfBot:
                               f"(pid={os.getpid()}, runtime_state={self.runtime_status}, "
                               f"session_path={_session_file_for(self.tag)})")
                     else:
-                        print(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم شد — reconnect ادامه می‌یابد")
-                print(f"⚠️ [{self.tag}] قطع شد: {e}")
+                        logger.info(f"✅ [SESSION][{self.tag}][CHECK] سشن سالم شد — reconnect ادامه می‌یابد")
+                logger.warning(f"⚠️ [{self.tag}] قطع شد: {e}")
                 if DEBUG:
                     import traceback
                     traceback.print_exc()
@@ -20098,7 +20104,7 @@ class SelfBot:
                 raise
             except Exception as e:
                 if _is_fatal_auth_error(e):
-                    print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی هنگام reconnect: {e}")
+                    logger.error(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی هنگام reconnect: {e}")
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
                     continue
@@ -20204,15 +20210,15 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"❌ [SESSION][{self.tag}][DISCONNECT] خطا هنگام قطع: {type(e).__name__}: {str(e)[:120]}")
+            logger.error(f"❌ [SESSION][{self.tag}][DISCONNECT] خطا هنگام قطع: {type(e).__name__}: {str(e)[:120]}")
         try:
             self.client.session.save()
         except Exception as e:
-            print(f"❌ [SESSION][{self.tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
+            logger.error(f"❌ [SESSION][{self.tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
         try:
             self.client.session.close()
         except Exception as e:
-            print(f"❌ [SESSION][{self.tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
+            logger.error(f"❌ [SESSION][{self.tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
         self._set_status("stopped")
 
 # ══════════════════════════════════════════════════════════
@@ -20223,16 +20229,16 @@ def _code_callback():
     raw = safe_input("Please enter the code you received: ")
     digits = re.sub(r'\D', '', raw)
     if digits and digits != raw.strip():
-        print(f"ℹ️ کد پاک‌سازی شد: «{raw}» → «{digits}»")
+        logger.info(f"ℹ️ کد پاک‌سازی شد: «{raw}» → «{digits}»")
     return digits or raw.strip()
 
 async def add_account():
-    print("\n=== Add Account ===")
+    logger.info("\n=== Add Account ===")
     typ = safe_input("Type (1: user, 2: bot): ")
     try:
         api_id = int(safe_input("API ID: "))
     except ValueError:
-        print("❌ API ID must be a number")
+        logger.error("❌ API ID must be a number")
         return None
     api_hash = safe_input("API Hash: ")
     if typ == "2":
@@ -20242,7 +20248,7 @@ async def add_account():
         try:
             await cl.start(bot_token=token)
         except Exception as e:
-            print(f"❌ لاگین بات ناموفق بود: {e}")
+            logger.error(f"❌ لاگین بات ناموفق بود: {e}")
             try:
                 await cl.disconnect()
             except Exception:
@@ -20253,7 +20259,7 @@ async def add_account():
             cfg = load_config()
             cfg[tag] = {"type": "bot", "api_id": api_id, "api_hash": api_hash, "token": token, "user_id": me.id}
             save_config(cfg)
-            print(f"✅ {me.first_name} → {tag}")
+            logger.info(f"✅ {me.first_name} → {tag}")
             return tag
         finally:
             # BUG #5 — اگر هر عملیاتِ بعد از لاگین (get_me/load_config/save_config)
@@ -20270,8 +20276,8 @@ async def add_account():
         try:
             await cl.start(phone=phone, code_callback=_code_callback, max_attempts=5)
         except RuntimeError as e:
-            print(f"❌ کد چندبار اشتباه وارد شد: {e}")
-            print("📌 کد قبلی دیگر معتبر نیست. دوباره تلاش کنید.")
+            logger.error(f"❌ کد چندبار اشتباه وارد شد: {e}")
+            logger.info("📌 کد قبلی دیگر معتبر نیست. دوباره تلاش کنید.")
             try:
                 await cl.disconnect()
             except Exception:
@@ -20286,7 +20292,7 @@ async def add_account():
                         pass
             return None
         except Exception as e:
-            print(f"❌ لاگین ناموفق بود: {e}")
+            logger.error(f"❌ لاگین ناموفق بود: {e}")
             try:
                 await cl.disconnect()
             except Exception:
@@ -20297,7 +20303,7 @@ async def add_account():
             cfg = load_config()
             cfg[tag] = {"type": "user", "api_id": api_id, "api_hash": api_hash, "phone": phone, "user_id": me.id}
             save_config(cfg)
-            print(f"✅ {me.first_name} → {tag}")
+            logger.info(f"✅ {me.first_name} → {tag}")
             return tag
         finally:
             # BUG #5 — مثل مسیر بات: disconnect تضمینی بعد از لاگین.
@@ -20309,18 +20315,18 @@ async def add_account():
 async def delete_account():
     cfg = load_config()
     if not cfg:
-        print("📭 No accounts to delete.")
+        logger.info("📭 No accounts to delete.")
         return
-    print("\n📋 Existing accounts:")
+    logger.info("\n📋 Existing accounts:")
     for t in cfg:
-        print(f"  • {t}  [{cfg[t]['type']}]")
+        logger.info(f"  • {t}  [{cfg[t]['type']}]")
     tag = safe_input("✏️  Enter the account tag you want to delete: ").strip()
     if tag not in cfg:
-        print(f"❌ Account '{tag}' not found.")
+        logger.error(f"❌ Account '{tag}' not found.")
         return
     confirm = safe_input(f"⚠️  Are you sure you want to delete account '{tag}'? (y/n): ").strip().lower()
     if confirm != 'y':
-        print("❌ Aborted.")
+        logger.error("❌ Aborted.")
         return
     del cfg[tag]
     save_config(cfg)
@@ -20331,10 +20337,10 @@ async def delete_account():
         if os.path.exists(f):
             try:
                 os.remove(f)
-                print(f"🗑️  Deleted: {f}")
+                logger.info(f"🗑️  Deleted: {f}")
             except Exception as e:
-                print(f"⚠️  Could not delete {f}: {e}")
-    print(f"✅ Account '{tag}' successfully deleted.")
+                logger.warning(f"⚠️  Could not delete {f}: {e}")
+    logger.info(f"✅ Account '{tag}' successfully deleted.")
 
 async def run_bot(tag, config, interactive=False):
     """
@@ -20431,7 +20437,7 @@ async def run_bot(tag, config, interactive=False):
                 if _stack:
                     _last = [l for l in _stack if l.strip().startswith("File ")]
                     if _last:
-                        print(f"   └─ {_last[-1].strip()}")
+                        logger.info(f"   └─ {_last[-1].strip()}")
             finally:
                 # BUG #5: اول تسک‌های پس‌زمینه‌ی همین نمونه متوقف و واقعاً
                 # await می‌شوند — تا هیچ حلقه‌ی متعلق به نمونه در حالی که
@@ -20463,15 +20469,15 @@ async def run_bot(tag, config, interactive=False):
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
-                        print(f"❌ [SESSION][{tag}][DISCONNECT] خطا هنگام disconnect: {type(e).__name__}: {str(e)[:120]}")
+                        logger.error(f"❌ [SESSION][{tag}][DISCONNECT] خطا هنگام disconnect: {type(e).__name__}: {str(e)[:120]}")
                     try:
                         bot.client.session.save()
                     except Exception as e:
-                        print(f"❌ [SESSION][{tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
+                        logger.error(f"❌ [SESSION][{tag}][SAVE] خطا هنگام ذخیره‌ی سشن: {type(e).__name__}: {str(e)[:120]}")
                     try:
                         bot.client.session.close()
                     except Exception as e:
-                        print(f"❌ [SESSION][{tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
+                        logger.error(f"❌ [SESSION][{tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
                 # unregister_account خیلی آخر اجرا می‌شود — بعد از پایانِ کاملِ
                 # disconnect/save/close (PATCH 5). تا وقتی Session هنوز در حال
                 # بسته‌شدن است، Runtime جدید نباید همان Session را «آزاد»
@@ -20498,9 +20504,9 @@ async def _run_all_accounts(cfg: dict) -> None:
     """
     problems = _validate_saas_env()
     if problems:
-        print("❌ راه‌اندازی SelfBotها متوقف شد — متغیرهای محیطی ربات مدیریت ناقص‌اند:")
+        logger.error("❌ راه‌اندازی SelfBotها متوقف شد — متغیرهای محیطی ربات مدیریت ناقص‌اند:")
         for p in problems:
-            print(f"   - {p}")
+            logger.info(f"   - {p}")
         return
     loop = asyncio.get_event_loop()
     _install_signal_handlers(loop)
@@ -20519,7 +20525,7 @@ async def _run_all_accounts(cfg: dict) -> None:
     start_tasks = []
     for t, c in cfg.items():
         if c.get("disabled"):
-            print(f"⏸ [{t}] این اکانت غیرفعال‌شده (disabled) است — لانچ نمی‌شود")
+            logger.info(f"⏸ [{t}] این اکانت غیرفعال‌شده (disabled) است — لانچ نمی‌شود")
             continue
         start_tasks.append(asyncio.create_task(ensure_started(t, c, caller="_run_all_accounts")))
         await asyncio.sleep(2)
@@ -20540,9 +20546,9 @@ async def _run_all_accounts(cfg: dict) -> None:
             except ImportError:
                 pass
             except Exception as e:
-                print(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+                logger.warning(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
         except Exception as e:
-            print(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+            logger.warning(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
 
     # ربات کمکی (helper) از فایلِ جداگانه‌ی helper.py بالا می‌آید — اسپاون
     # در همان ابتدای main() انجام می‌شود (نه اینجا)، تا همه‌ی مسیرهای اجرا
@@ -20576,7 +20582,7 @@ async def _run_all_accounts(cfg: dict) -> None:
             timeout=20,
         )
     except asyncio.TimeoutError:
-        print("⚠️ برخی تسک‌ها بیش از ۲۰ ثانیه برای بسته شدن طول کشیدند.")
+        logger.warning("⚠️ برخی تسک‌ها بیش از ۲۰ ثانیه برای بسته شدن طول کشیدند.")
 
 
 async def _run_single_account_cli(tag: str, cfg_entry: dict, caller: str) -> None:
@@ -20591,11 +20597,11 @@ async def _run_single_account_cli(tag: str, cfg_entry: dict, caller: str) -> Non
     برمی‌گردد و منتظر یک Runtimeِ شکست‌خورده نمی‌ماند."""
     ready, st = await ensure_started(tag, cfg_entry, caller=caller, interactive=True)
     if not ready:
-        print(f"⏹ اکانت «{tag}» آماده نشد (status={st}) — برنامه خارج می‌شود.")
+        logger.info(f"⏹ اکانت «{tag}» آماده نشد (status={st}) — برنامه خارج می‌شود.")
         return
     loop = asyncio.get_event_loop()
     _install_signal_handlers(loop)
-    print(f"🟢 اکانت «{tag}» روشن است — Ctrl+C برای توقف.")
+    logger.info(f"🟢 اکانت «{tag}» روشن است — Ctrl+C برای توقف.")
     await _shutdown_event.wait()
     await _graceful_shutdown_all()
 
@@ -20610,7 +20616,7 @@ async def main():
     try:
         ensure_referral_schema()
     except Exception as e:
-        print(f"⚠️ مهاجرت ستون‌های رفرال ناموفق: {type(e).__name__}: {e}")
+        logger.warning(f"⚠️ مهاجرت ستون‌های رفرال ناموفق: {type(e).__name__}: {e}")
     _migrate_provision_sources()
     # Recovery عملیاتِ حذفِ ناتمام (Operation Journal دو-دیتابیس): اگر ردیفی
     # مانده باشد، مراحلِ باقی‌مانده (bot_data/config) کامل می‌شود.
@@ -20642,21 +20648,21 @@ async def main():
             await _run_all_accounts(cfg)
             return
         elif arg in cfg:
-            print(f"🚀 Direct run account: {arg}")
+            logger.info(f"🚀 Direct run account: {arg}")
             await _run_single_account_cli(arg, cfg[arg], caller="main:direct")
         else:
-            print(f"❌ Account '{arg}' not found. Available accounts:")
+            logger.error(f"❌ Account '{arg}' not found. Available accounts:")
             for t in cfg:
-                print(f"  - {t}")
+                logger.info(f"  - {t}")
         return
 
     tags = list(cfg.keys())
-    print("\nExisting accounts:")
+    logger.info("\nExisting accounts:")
     for i, t in enumerate(tags):
-        print(f"  {i+1}. {t}  [{cfg[t]['type']}]")
-    print("  new      - Add a new account")
-    print("  all      - Run all accounts")
-    print("  delete   - Delete an account")
+        logger.info(f"  {i+1}. {t}  [{cfg[t]['type']}]")
+    logger.info("  new      - Add a new account")
+    logger.info("  all      - Run all accounts")
+    logger.info("  delete   - Delete an account")
     choice = safe_input("Choice: ").strip().lower()
     if choice == "new":
         await add_account()
@@ -20673,9 +20679,9 @@ async def main():
             if 0 <= idx < len(tags):
                 await _run_single_account_cli(tags[idx], cfg[tags[idx]], caller="main:interactive")
             else:
-                print("❌ Invalid selection")
+                logger.error("❌ Invalid selection")
         except ValueError:
-            print("❌ Invalid selection")
+            logger.error("❌ Invalid selection")
 
 # ========== اجرا ==========
 def _run_forever():
@@ -20691,7 +20697,7 @@ def _run_forever():
             asyncio.run(main())
             break
         except KeyboardInterrupt:
-            print("\n🚪 exit code ")
+            logger.info("\n🚪 exit code ")
             break
         except SystemExit:
             raise
