@@ -20197,6 +20197,8 @@ class SelfBot:
         # بعد save/close صریح. هرگز سشن را قبل از قطع‌کردن نمی‌بندیم تا
         # تلتون بعد از close دوباره به آن write نکند. خطاهای سشن swallow
         # نمی‌شوند — با tag و stage لاگ می‌شوند.
+        if not self.client:
+            return
         try:
             await asyncio.wait_for(self.client.disconnect(), timeout=15)
         except asyncio.CancelledError:
