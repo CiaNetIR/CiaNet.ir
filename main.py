@@ -8537,7 +8537,7 @@ class SaaSBot:
         # کاربران منقضی پاک نمی‌شن.
         if self._expiry_task is None or self._expiry_task.done():
             self._expiry_task = asyncio.create_task(
-                self._expiry_loop()
+                self.admin_panel._expiry_loop()
             )
         if self.admin_panel._backup_task is None or self.admin_panel._backup_task.done():
             self.admin_panel._backup_task = asyncio.create_task(self.admin_panel._daily_backup_loop())
