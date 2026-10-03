@@ -15546,7 +15546,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.6.0-stable"
+BUILD_VERSION = "2026-10-03-v2.6.1"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -20452,7 +20452,7 @@ class SelfBot:
                 self.online_enabled = False
                 self._persist(online_enabled=False)
                 await self._preserve_offline()
-                await event.edit("✅ حالت آنلاین غیرفعال شد. اکانت واقعاً آفلاین نگه داشته می‌شود.")
+                await event.edit("✅ آنلاین خودکار غیرفعال شد")
                 return
 
             # ─── بیو (ساعت زنده روی بیو) ──────────────────
@@ -20494,7 +20494,7 @@ class SelfBot:
             if text == "تیک پیوی خاموش":
                 self.auto_read_pv = False
                 self._persist(auto_read_pv=False)
-                await event.edit("✅ تیک خودکار در **پیوی** غیرفعال شد.")
+                await event.edit("✅ تیک خودکار پیوی غیرفعال شد")
                 return
 
             if text == "تیک گروه روشن":
@@ -20505,7 +20505,7 @@ class SelfBot:
             if text == "تیک گروه خاموش":
                 self.auto_read_group = False
                 self._persist(auto_read_group=False)
-                await event.edit("✅ تیک خودکار در **گروه** غیرفعال شد.")
+                await event.edit("✅ تیک خودکار گروه غیرفعال شد")
                 return
 
             if text == "تیک کانال روشن":
@@ -20516,7 +20516,7 @@ class SelfBot:
             if text == "تیک کانال خاموش":
                 self.auto_read_channel = False
                 self._persist(auto_read_channel=False)
-                await event.edit("✅ تیک خودکار در **کانال** غیرفعال شد.")
+                await event.edit("✅ تیک خودکار کانال غیرفعال شد")
                 return
 
             # ─── سکوت ────────────────────────────────────
@@ -20559,7 +20559,7 @@ class SelfBot:
                     return
                 r = await event.get_reply_message()
                 if r is None:
-                    await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                    await event.edit("❌ پیام یافت نشد")
                     return
                 target_id = r.sender_id
                 if target_id == self.my_id:
@@ -20581,7 +20581,7 @@ class SelfBot:
                     return
                 r = await event.get_reply_message()
                 if r is None:
-                    await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                    await event.edit("❌ پیام یافت نشد")
                     return
                 target_id = r.sender_id
                 chat_list = self.enemies.get(event.chat_id, [])
@@ -20668,7 +20668,7 @@ class SelfBot:
 
                 r = await event.get_reply_message()
                 if r is None:
-                    await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                    await event.edit("❌ پیام یافت نشد")
                     return
                 await self._stop_tabchi()
 
@@ -20726,7 +20726,7 @@ class SelfBot:
                 self.tabchi_interval = mins
                 self.tabchi_next_run_at = time.time() + mins * 60
                 self._persist(tabchi_interval=mins, tabchi_next_run_at=self.tabchi_next_run_at)
-                await event.edit(f"✅ فاصله تبچی: هر **{mins}** دقیقه")
+                await event.edit(f"✅ تبچی: هر {mins} دقیقه")
                 return
 
             # ─── وضعیت ────────────────────────────────────
@@ -20758,7 +20758,7 @@ class SelfBot:
                 new = self._clean_name(new_name_match.group(1).strip())
                 self.base_name = new
                 self._persist(base_name=new)
-                await event.edit(f"✅ اسم پایه: «{new}»")
+                await event.edit(f"✅ نام پایه: {new}")
                 return
 
             # دقیق: فقط «فونت X» با X یک توکن تکی
@@ -20782,14 +20782,14 @@ class SelfBot:
 
             if text == "عکس پروفایل":
                 if not event.is_reply:
-                    await event.edit("❌ روی عکس ریپلای کنید")
+                    await event.edit("ℹ️ روی عکس ریپلای کن")
                     return
                 r = await event.get_reply_message()
                 if r is None:
-                    await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                    await event.edit("❌ پیام یافت نشد")
                     return
                 if not r.photo:
-                    await event.edit("❌ پیام ریپلای عکس ندارد")
+                    await event.edit("❌ عکس ندارد")
                     return
                 path = os.path.join(DOWNLOADS_DIR, f"pfp_{random.randint(100000, 9999999)}.jpg")
                 await r.download_media(file=path)
@@ -20802,7 +20802,7 @@ class SelfBot:
                             os.remove(path)
                         except Exception:
                             pass
-                await event.edit("✅ عکس پروفایل تغییر کرد")
+                await event.edit("✅ عکس پروفایل به‌روزرسانی شد")
                 return
 
             # ─── کپی ──────────────────────────────────────
@@ -20851,7 +20851,7 @@ class SelfBot:
                 # هم‌زمانی قبل از اولین await ست می‌شود تا بین دو فرمانِ
                 # هم‌زمان race نشود؛ تسکِ بازی در finally آن را پاک می‌کند.
                 if getattr(self, "_dice_running", False):
-                    await event.edit("🎲 یک بازی دایس در حال اجراست — صبر کن تا تموم بشه.")
+                    await event.edit("⏳ بازی دایس در حال اجراست.")
                     return
                 self._dice_running = True
                 try:
@@ -20880,7 +20880,7 @@ class SelfBot:
                         _fetch_crypto_price(cg_id, bn_sym, bb_sym, coin_key), timeout=20
                     )
                 except asyncio.TimeoutError:
-                    await event.edit("❌ تایم‌اوت — سرورها پاسخ ندادند.")
+                    await event.edit("⏳ سرور پاسخ نداد")
                     return
                 except Exception as e:
                     await event.edit(_friendly_error(e, "selfbot_cmd"))
@@ -20913,14 +20913,14 @@ class SelfBot:
                 try:
                     p18, p24 = await asyncio.wait_for(_fetch_gold_iran(), timeout=20)
                 except asyncio.TimeoutError:
-                    await event.edit("❌ تایم‌اوت — سرورها پاسخ ندادند.")
+                    await event.edit("⏳ سرور پاسخ نداد")
                     return
                 except Exception as e:
                     await event.edit(_friendly_error(e, "selfbot_cmd"))
                     return
 
                 if not p18 and not p24:
-                    await event.edit("❌ دریافت قیمت طلا ناموفق بود.")
+                    await event.edit("❌ دریافت قیمت ناموفق بود")
                     return
 
                 lines = ["🥇 **قیمت طلا**\n"]
@@ -20952,25 +20952,19 @@ class SelfBot:
 
             elif text in ("پینگ", "ping"):
                 t0 = time.perf_counter()
-                await event.edit("⏱ در حال اندازه‌گیری...")
-                latency_ms = int((time.perf_counter() - t0) * 1000)
-                status = "عالی" if latency_ms < 200 else "خوب" if latency_ms < 500 else "کند"
-                await event.edit(
-                    f"⏱ **سیستم**\n\n"
-                    f"زمان پاسخ: `{latency_ms}ms`\n"
-                    f"وضعیت: {status}\n"
-                    f"آپ‌تایم: {self._uptime()}"
-                )
+                await event.edit("...")
+                ms = int((time.perf_counter() - t0) * 1000)
+                await event.edit(f"`{ms}ms`")
 
             elif text in ("تایم", "time"):
                 now = iran_now().strftime("%Y-%m-%d %H:%M:%S")
-                await event.edit(f"⏰ `{now}`\n⏱ آپ‌تایم: {self._uptime()}")
+                await event.edit(f"🕒 {now}\n⏱ {self._uptime()}")
 
             elif text == "ریستارت":
                 if self._restart_task and not self._restart_task.done():
-                    await event.edit("🔄 یک ری‌استارت قبلاً در صف است — صبر کن تا اجرا بشه.")
+                    await event.edit("⏳ ری‌استارت قبلاً در صف است.")
                     return
-                await event.edit("🔄 ریستارت در ۳ ثانیه...")
+                await event.edit("⏳ ری‌استارت در ۳ ثانیه...")
                 # BUG #7: تسکِ ری‌استارتِ معلق روی نمونه ثبت می‌شود تا در
                 # shutdownِ واقعی نمونه cancel شود — ری‌استارتی که بعد از
                 # توقفِ نمونه بیدار شود می‌تواند روی همان سشن clientِ جدیدی
@@ -20982,15 +20976,15 @@ class SelfBot:
 
             elif text == "حذف" or re.fullmatch(r"حذف\s+\d+", text):
                 if event.is_channel and not event.is_group:
-                    await event.edit("❌ دستور «حذف» در کانال غیرفعال است")
+                    await event.edit("⛔ حذف در کانال غیرفعال است")
                     return
                 if len(parts) == 1:
                     if not event.is_reply:
-                        await event.edit("❌ مثال: `حذف 5` یا روی پیامی ریپلای کن و بنویس `حذف`")
+                        await event.edit("ℹ️ مثال: حذف 5 یا روی پیام ریپلای کن")
                         return
                     r = await event.get_reply_message()
                     if r is None:
-                        await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                        await event.edit("❌ پیام یافت نشد")
                         return
                     try:
                         await event.delete()
@@ -21001,7 +20995,7 @@ class SelfBot:
                 try:
                     cnt = int(parts[1])
                 except ValueError:
-                    await event.edit("❌ مثال: `حذف 5`")
+                    await event.edit("ℹ️ مثال: حذف 5")
                     return
                 if cnt <= 0:
                     return
@@ -21044,10 +21038,10 @@ class SelfBot:
                 if event.is_reply:
                     r = await event.get_reply_message()
                     if r is None:
-                        await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                        await event.edit("❌ پیام یافت نشد")
                         return
                     name = getattr(r.sender, 'first_name', 'نامشخص')
-                    await event.edit(f"👤 آیدی: `{r.sender_id}` — {name}")
+                    await event.edit(f"🆔 `{r.sender_id}` — {name}")
                 else:
                     await event.edit("ℹ️ برای دیدن آیدی، روی یک پیام ریپلای کن و «ایدی» را بفرست")
                 return
@@ -21056,42 +21050,42 @@ class SelfBot:
                 if event.is_reply:
                     r = await event.get_reply_message()
                     if r is None:
-                        await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                        await event.edit("❌ پیام یافت نشد")
                         return
                     try:
                         uid = r.sender_id
                         ent = await self.client.get_input_entity(uid)
                         await self.client(BlockRequest(id=ent))
-                        await event.edit(f"🚫 کاربر {uid} بلاک شد")
+                        await event.edit(f"🚫 بلاک شد: {uid}")
                     except Exception as e:
                         await event.edit(_friendly_error(e, "selfbot_cmd"))
                 else:
-                    await event.edit("❌ روی پیامِ همان کاربر ریپلای کن و دوباره «بلاک» را بفرست")
+                    await event.edit("ℹ️ روی پیام کاربر ریپلای کن")
                 return
 
             elif text == "آنبلاک":
                 if event.is_reply:
                     r = await event.get_reply_message()
                     if r is None:
-                        await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                        await event.edit("❌ پیام یافت نشد")
                         return
                     try:
                         ent = await self.client.get_input_entity(r.sender_id)
                         await self.client(UnblockRequest(id=ent))
-                        await event.edit("✅ آنبلاک شد")
+                        await event.edit("✅ رفع بلاک شد")
                     except Exception as e:
                         await event.edit(_friendly_error(e, "selfbot_cmd"))
                 else:
-                    await event.edit("❌ روی پیامِ همان کاربر ریپلای کن و دوباره «آنبلاک» را بفرست")
+                    await event.edit("ℹ️ روی پیام کاربر ریپلای کن")
                 return
 
             elif text == "ذخیره":
                 if not event.is_reply:
-                    await event.edit("❌ روی عکس/فیلم تایم‌دار ریپلای کنید")
+                    await event.edit("ℹ️ روی رسانه تایم‌دار ریپلای کن")
                     return
                 r = await event.get_reply_message()
                 if r is None:
-                    await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                    await event.edit("❌ پیام یافت نشد")
                     return
                 ttl = None
                 if r.photo:
@@ -21101,7 +21095,7 @@ class SelfBot:
                     ttl = (getattr(r.video, 'ttl_seconds', None)
                            or getattr(r.media, 'ttl_seconds', None))
                 if not ttl:
-                    await event.edit("❌ این رسانه تایم‌دار نیست")
+                    await event.edit("❌ تایم‌دار نیست")
                     return
                 ext = "jpg" if r.photo else "mp4"
                 path = os.path.join(DOWNLOADS_DIR, f"save_{random.randint(100000, 9999999)}.{ext}")
@@ -21117,26 +21111,26 @@ class SelfBot:
                         except Exception:
                             pass
                 await r.delete()
-                await event.edit("✅ ذخیره و حذف شد")
+                await event.edit("✅ ذخیره شد")
                 return
 
             elif text == "فوروارد":
                 if event.is_reply:
                     r = await event.get_reply_message()
                     if r is None:
-                        await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                        await event.edit("❌ پیام یافت نشد")
                         return
                     await r.forward_to("me")
-                    await event.edit("✅ فوروارد → Saved Messages")
+                    await event.edit("✅ فوروارد شد")
                 else:
-                    await event.edit("❌ ریپلای کنید")
+                    await event.edit("ℹ️ ریپلای کنید")
                 return
 
             elif text == "مشخصات":
                 if event.is_reply:
                     r = await event.get_reply_message()
                     if r is None:
-                        await event.edit("❌ پیام ریپلای‌شده دیگر وجود ندارد.")
+                        await event.edit("❌ پیام یافت نشد")
                         return
                     try:
                         full = await self.client(GetFullUserRequest(r.sender_id))
@@ -21153,19 +21147,19 @@ class SelfBot:
                     except Exception as e:
                         await event.edit(_friendly_error(e, "selfbot_cmd"))
                 else:
-                    await event.edit("❌ ریپلای کنید")
+                    await event.edit("ℹ️ ریپلای کنید")
                 return
 
             elif text == "سنجاق":
                 if not event.is_reply:
-                    await event.edit("❌ روی پیامی که می‌خواهی سنجاق کنی ریپلای کن")
+                    await event.edit("ℹ️ روی پیام ریپلای کن")
                     return
                 try:
                     reply_msg = await event.get_reply_message()
                     await self.client.pin_message(event.chat_id, reply_msg.id)
-                    await event.edit("📌 پیام سنجاق شد.")
+                    await event.edit("📌 سنجاق شد")
                 except errors.ChatAdminRequiredError:
-                    await event.edit("❌ برای سنجاق نیاز به دسترسی ادمین داری!")
+                    await event.edit("⛔ دسترسی ادمین لازم است")
                 except Exception as e:
                     await event.edit(_friendly_error(e, "selfbot_cmd"))
                 return
