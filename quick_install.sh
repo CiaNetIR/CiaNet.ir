@@ -141,7 +141,7 @@ fi
 
 # ─── ۷. مالکیت و permission ───
 echo -e "${YELLOW}۷. تنظیم permission...${NC}"
-mkdir -p "$INSTALL_DIR/sessions" "$INSTALL_DIR/data"
+mkdir -p "$INSTALL_DIR/sessions" "$INSTALL_DIR/data" "$INSTALL_DIR/versions"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 chmod 700 "$INSTALL_DIR/sessions"
 chmod 600 "$INSTALL_DIR/config.json" "$ENV_FILE" /etc/selfbot.env 2>/dev/null
@@ -162,7 +162,7 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=/etc/selfbot.env
-ExecStart=$VENV_PY main.py all
+ExecStart=$VENV_PY -u main.py all
 Restart=always
 RestartSec=10
 
@@ -170,6 +170,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=selfbot
 
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONFAULTHANDLER=1
 LimitNOFILE=65535
 OOMScoreAdjust=-100
 
