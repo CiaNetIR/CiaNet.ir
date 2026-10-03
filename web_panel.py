@@ -269,7 +269,9 @@ async def _global_exc_handler(request: Request, exc: Exception):
 async def auth_login(req: LoginRequest, response: Response):
     if not PANEL_ADMIN_PASS_HASH:
         raise HTTPException(503, "Login disabled — set PANEL_ADMIN_PASS_HASH env var")
-    if req.username != PANEL_ADMIN_USER:
+    # PATCH (v2.1.5): case-insensitive و trim — قبلاً «Admin» و «admin»
+    # متفاوت محسوب می‌شدند و کاربر گیج می‌شد.
+    if (req.username or "").strip().lower() != PANEL_ADMIN_USER.strip().lower():
         raise HTTPException(401, "Invalid credentials")
     if not _verify_password(req.password, PANEL_ADMIN_PASS_HASH):
         raise HTTPException(401, "Invalid credentials")
@@ -320,22 +322,26 @@ async def dashboard(request: Request, _: None = Depends(require_auth)):
             open_tickets = c.execute(
                 "SELECT COUNT(*) FROM tickets WHERE status='open'"
             ).fetchone()[0]
-            # MRR rough estimate
-            thirty_days_ago = (time.time() - 30*86400)
+            # PATCH (v2.1.5): table‌های saas.db به این شکل هستند:
+            #   purchases (amount, status, approved_at, created_at)
+            #   tickets (status: open/closed)
+            # قبلاً amount_toman و paid_at استفاده می‌شد که وجود ندارن.
+            # MRR rough estimate: sum از همه‌ی purchases با status='approved'
             mrr_row = c.execute(
-                "SELECT COALESCE(SUM(amount_toman),0) FROM purchases WHERE paid_at IS NOT NULL"
+                "SELECT COALESCE(SUM(amount),0) FROM purchases WHERE status='approved'"
             ).fetchone()
             mrr = mrr_row[0] if mrr_row else 0
             # revenue 30d
             rev_30d = c.execute(
-                "SELECT COALESCE(SUM(amount_toman),0) FROM purchases "
-                "WHERE paid_at >= date('now','-30 days')"
+                "SELECT COALESCE(SUM(amount),0) FROM purchases "
+                "WHERE status='approved' AND (approved_at IS NOT NULL AND approved_at >= date('now','-30 days'))"
             ).fetchone()[0]
             # 30-day chart (simple daily revenue)
             daily_rev = c.execute(
-                "SELECT date(paid_at) as d, SUM(amount_toman) as v FROM purchases "
-                "WHERE paid_at >= date('now','-30 days') "
-                "GROUP BY date(paid_at) ORDER BY d"
+                "SELECT date(approved_at) as d, SUM(amount) as v FROM purchases "
+                "WHERE status='approved' AND approved_at IS NOT NULL "
+                "AND approved_at >= date('now','-30 days') "
+                "GROUP BY date(approved_at) ORDER BY d"
             ).fetchall()
     except Exception as e:
         return {"error": f"DB: {e}"}
@@ -535,8 +541,9 @@ async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: Non
     try:
         with m._conn() as c:
             # آخرین اشتراک فعال/منقضی‌شده رو extension کن، یا یکی بساز
+            # PATCH (v2.1.5): status رو هم SELECT کن تا در شرط استفاده بشه
             sub = c.execute(
-                "SELECT id, expire_date, plan FROM subscriptions "
+                "SELECT id, expire_date, plan, status FROM subscriptions "
                 "WHERE user_id=? ORDER BY id DESC LIMIT 1",
                 (user_id,),
             ).fetchone()
@@ -555,10 +562,16 @@ async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: Non
             else:
                 # ساب جدید
                 new_expire = datetime.now() + timedelta(days=req.days)
+                # اگه sub بود ولی status != active، plan قبلی رو نگه دار
+                plan_name = "basic"
+                if sub and sub["plan"]:
+                    plan_name = sub["plan"]
+                if req.plan:
+                    plan_name = req.plan
                 c.execute(
                     "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status) "
                     "VALUES (?, ?, ?, ?, 'active')",
-                    (user_id, req.plan or sub["plan"] if sub else "basic",
+                    (user_id, plan_name,
                      datetime.now().isoformat(), new_expire.isoformat()),
                 )
             c.connection.commit()
@@ -756,7 +769,11 @@ async def finance_approve(pay_id: int, request: Request, _: None = Depends(requi
     m = _main()
     try:
         with m._conn() as c:
-            r = c.execute("UPDATE purchases SET status='approved' WHERE id=?", (pay_id,))
+            # PATCH (v2.1.5): approved_at رو هم ست کن
+            r = c.execute(
+                "UPDATE purchases SET status='approved', approved_at=datetime('now') WHERE id=?",
+                (pay_id,),
+            )
             c.connection.commit()
             if r.rowcount == 0:
                 raise HTTPException(404, "Payment not found")
@@ -788,17 +805,20 @@ async def finance_stats(request: Request, _: None = Depends(require_auth)):
     m = _main()
     try:
         with m._conn() as c:
+            # PATCH (v2.1.5): amount (نه amount_toman)، approved_at (نه paid_at)
             mrr = c.execute(
-                "SELECT COALESCE(SUM(amount_toman),0) FROM purchases WHERE status='approved'"
+                "SELECT COALESCE(SUM(amount),0) FROM purchases WHERE status='approved'"
             ).fetchone()[0]
             rev_30d = c.execute(
-                "SELECT COALESCE(SUM(amount_toman),0) FROM purchases "
-                "WHERE status='approved' AND paid_at >= date('now','-30 days')"
+                "SELECT COALESCE(SUM(amount),0) FROM purchases "
+                "WHERE status='approved' AND approved_at IS NOT NULL "
+                "AND approved_at >= date('now','-30 days')"
             ).fetchone()[0]
             daily = c.execute(
-                "SELECT date(paid_at) as d, SUM(amount_toman) as v FROM purchases "
-                "WHERE status='approved' AND paid_at >= date('now','-30 days') "
-                "GROUP BY date(paid_at) ORDER BY d"
+                "SELECT date(approved_at) as d, SUM(amount) as v FROM purchases "
+                "WHERE status='approved' AND approved_at IS NOT NULL "
+                "AND approved_at >= date('now','-30 days') "
+                "GROUP BY date(approved_at) ORDER BY d"
             ).fetchall()
             return {
                 "mrr_total_toman": mrr,
@@ -867,12 +887,16 @@ async def ticket_reply(ticket_id: int, reply: TicketReply, request: Request, _: 
             t = c.execute("SELECT 1 FROM tickets WHERE id=?", (ticket_id,)).fetchone()
             if not t:
                 raise HTTPException(404, "Ticket not found")
+            # PATCH (v2.1.5): ticket_messages schema:
+            #   (ticket_id, sender_role, sender_id, text, created_at)
+            # قبلاً body و sent_at استفاده می‌شد که وجود ندارن.
             c.execute(
-                "INSERT INTO ticket_messages (ticket_id, sender_id, body, sent_at) "
-                "VALUES (?, ?, ?, datetime('now'))",
+                "INSERT INTO ticket_messages (ticket_id, sender_role, sender_id, text, created_at) "
+                "VALUES (?, 'admin', ?, ?, datetime('now'))",
                 (ticket_id, m.ADMIN_ID, reply.text),
             )
-            c.execute("UPDATE tickets SET status='answered' WHERE id=?", (ticket_id,))
+            # PATCH (v2.1.5): tickets status enum: open/closed (نه answered)
+            c.execute("UPDATE tickets SET status='closed' WHERE id=?", (ticket_id,))
             c.connection.commit()
         return {"ok": True}
     except HTTPException:
@@ -1132,6 +1156,31 @@ async def tools_api_creds_rotate(request: Request, _: None = Depends(require_aut
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "time": time.time()}
+
+
+# ─── Static frontend (web_static/) ──────────────────────────────────
+# PATCH (v2.1.5): یک frontend استاتیک ساده‌تر با vanilla JS که نیاز به
+# npm build نداره. اگر `web_static/` وجود داشته باشد، mount می‌شه.
+# قبلاً فقط Next.js روی port 3000 نیاز بود — حالا هر دو کار می‌کنن.
+_WEB_STATIC_DIR = _PROJECT_DIR / "web_static"
+if _WEB_STATIC_DIR.exists() and _WEB_STATIC_DIR.is_dir():
+    # mount روی /app/* — صفحات HTML در web_static/
+    app.mount("/app", StaticFiles(directory=str(_WEB_STATIC_DIR), html=True), name="web_static")
+
+    # Root redirect → /app/login.html (اگه session نیست) یا /app/dashboard.html
+    @app.get("/")
+    async def root_redirect(request: Request):
+        if _valid_session(request):
+            return JSONResponse(
+                status_code=307,
+                headers={"Location": "/app/dashboard.html"},
+                content={"redirect": "/app/dashboard.html"},
+            )
+        return JSONResponse(
+            status_code=307,
+            headers={"Location": "/app/login.html"},
+            content={"redirect": "/app/login.html"},
+        )
 
 
 if __name__ == "__main__":

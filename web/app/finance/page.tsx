@@ -83,7 +83,7 @@ export default function FinancePage() {
                 <th className="px-3 py-2 font-medium">ID</th>
                 <th className="px-3 py-2 font-medium">user_id</th>
                 <th className="px-3 py-2 font-medium">مبلغ</th>
-                <th className="px-3 py-2 font-medium">روش</th>
+                <th className="px-3 py-2 font-medium">plan_id</th>
                 <th className="px-3 py-2 font-medium">وضعیت</th>
                 <th className="px-3 py-2 font-medium">تاریخ</th>
                 <th className="px-3 py-2 font-medium">عملیات</th>
@@ -98,8 +98,8 @@ export default function FinancePage() {
                 <tr key={p.id} className="border-t border-border hover:bg-accent/30">
                   <td className="px-3 py-2 font-mono text-xs">{p.id}</td>
                   <td className="px-3 py-2 font-mono text-xs">{p.user_id}</td>
-                  <td className="px-3 py-2">{formatToman(p.amount_toman)}</td>
-                  <td className="px-3 py-2 text-xs">{p.method || "—"}</td>
+                  <td className="px-3 py-2">{formatToman(p.amount)}</td>
+                  <td className="px-3 py-2 text-xs">{p.plan_id || "—"}</td>
                   <td className="px-3 py-2">
                     <span className={`rounded px-2 py-0.5 text-xs ${
                       p.status === "approved" ? "bg-green-500/20 text-green-400" :
@@ -109,7 +109,7 @@ export default function FinancePage() {
                       {p.status}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-xs">{p.paid_at || p.created_at || "—"}</td>
+                  <td className="px-3 py-2 text-xs">{p.approved_at || p.created_at || "—"}</td>
                   <td className="px-3 py-2">
                     {p.status === "pending" && (
                       <div className="flex gap-2">

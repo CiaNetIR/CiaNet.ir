@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>داشبورد — CiaNet Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app"><div class="loading">در حال بارگذاری…</div></div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+  <script>
+    (async () => {
+      const user = await checkAuth();
+      if (!user) { location.href = "login.html"; return; }
+
+      const d = await api("/api/dashboard").catch(err => ({ error: err.message }));
+      if (d.error) {
+        document.getElementById("app").innerHTML = layout(`<div class="error">خطا: ${d.error}</div>`);
+        return;
+      }
+
+      document.getElementById("app").innerHTML = layout(`
+        <div class="header"><h1>داشبورد</h1></div>
+        <div class="grid grid-4 mb-4">
+          <div class="stat">
+            <div class="label">کل اکانت‌ها <span>🤖</span></div>
+            <div class="value">${fmt(d.accounts.total)}</div>
+            <div class="hint">${fmt(d.accounts.running)} در حال اجرا</div>
+          </div>
+          <div class="stat">
+            <div class="label">کاربران <span>👥</span></div>
+            <div class="value">${fmt(d.users.total)}</div>
+          </div>
+          <div class="stat">
+            <div class="label">اشتراک فعال <span>✅</span></div>
+            <div class="value">${fmt(d.subscriptions.active)}</div>
+            <div class="hint">${fmt(d.subscriptions.expired)} منقضی</div>
+          </div>
+          <div class="stat">
+            <div class="label">تیکت‌های باز <span>🎫</span></div>
+            <div class="value">${fmt(d.tickets.open)}</div>
+          </div>
+        </div>
+        <div class="card mb-4">
+          <h2>آمار مالی (۳۰ روز اخیر)</h2>
+          <div class="grid grid-2">
+            <div>
+              <div class="text-muted text-sm">درآمد ۳۰ روز</div>
+              <div style="font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem;">${fmt(d.finance.revenue_30d_toman)} تومان</div>
+            </div>
+            <div>
+              <div class="text-muted text-sm">MRR (تقریبی)</div>
+              <div style="font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem;">${fmt(d.finance.mrr_toman)} تومان</div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>نسخه</h2>
+          <div class="flex gap-4">
+            <div><span class="text-muted text-sm">local: </span><code>${short(d.version.local_commit)}</code></div>
+            <div><span class="text-muted text-sm">remote: </span><code>${short(d.version.remote_commit)}</code></div>
+          </div>
+          ${d.version.build ? `<div class="text-muted text-sm mt-2">build: ${d.version.build}</div>` : ""}
+        </div>
+      `);
+    })();
+  </script>
+</body>
+</html>

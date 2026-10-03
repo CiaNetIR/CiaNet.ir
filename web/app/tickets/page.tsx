@@ -51,9 +51,9 @@ export default function TicketsPage() {
         <h1 className="text-2xl font-bold">تیکت‌ها</h1>
 
         <div className="flex gap-2">
-          {["open", "answered", "closed", ""].map((f) => (
+          {["open", "closed", ""].map((f) => (
             <button
-              key={f}
+              key={f || "all"}
               onClick={() => { setFilter(f); setSelected(null); }}
               className={`rounded-md px-3 py-1.5 text-sm ${
                 filter === f ? "bg-primary text-primary-foreground" : "border border-border"
@@ -80,7 +80,7 @@ export default function TicketsPage() {
                   <span>#{t.id}</span>
                   <span>{t.status}</span>
                 </div>
-                <div className="mt-1 text-sm font-medium truncate">{t.subject || "—"}</div>
+                <div className="mt-1 text-sm font-medium truncate">{t.unit || `تیکت #${t.id}`}</div>
                 <div className="text-xs text-muted-foreground">user: {t.user_id}</div>
               </button>
             ))}
@@ -92,16 +92,18 @@ export default function TicketsPage() {
             ) : (
               <div className="space-y-3">
                 <div className="flex justify-between">
-                  <h3 className="font-semibold">#{selected.ticket.id} — {selected.ticket.subject || "بدون موضوع"}</h3>
+                  <h3 className="font-semibold">#{selected.ticket.id} — {selected.ticket.unit || "بدون موضوع"}</h3>
                   <span className="text-xs text-muted-foreground">{selected.ticket.status}</span>
                 </div>
                 <div className="space-y-2 max-h-80 overflow-y-auto">
                   {selected.messages.map((m: any) => (
                     <div key={m.id} className={`rounded p-2 text-sm ${
-                      m.sender_id === selected.ticket.user_id ? "bg-muted" : "bg-primary/10"
+                      m.sender_role === "user" ? "bg-muted" : "bg-primary/10"
                     }`}>
-                      <div className="text-xs text-muted-foreground mb-1">user {m.sender_id}</div>
-                      <div className="whitespace-pre-wrap">{m.body}</div>
+                      <div className="text-xs text-muted-foreground mb-1">
+                        {m.sender_role === "user" ? "کاربر" : "پشتیبانی"} {m.sender_id}
+                      </div>
+                      <div className="whitespace-pre-wrap">{m.text}</div>
                     </div>
                   ))}
                 </div>

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>هش و api_id — CiaNet Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app"><div class="loading">در حال بارگذاری…</div></div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+  <script>
+    (async () => {
+      const user = await checkAuth();
+      if (!user) { location.href = "login.html"; return; }
+
+      const r = await api("/api/tools/api-creds");
+      const items = (r.items || []).map(c => `
+        <div class="card mb-2">
+          <div class="flex-between">
+            <span class="font-mono">api_id: ${c.api_id}</span>
+            <span class="text-muted text-sm">used by ${fmt(c.used_by.length)}</span>
+          </div>
+          <div class="font-mono text-sm text-muted mt-2" style="word-break: break-all;">${c.api_hash.slice(0, 32)}…</div>
+          <div class="text-muted text-sm mt-2">اکانت‌ها: ${c.used_by.slice(0, 5).join(", ")}${c.used_by.length > 5 ? "…" : ""}</div>
+        </div>
+      `).join("");
+      document.getElementById("app").innerHTML = layout(`
+        <div class="header"><h1>هش‌ها و api_id</h1></div>
+        <div class="card mb-4">
+          <h2>افزودن api_id/api_hash جدید</h2>
+          <div class="grid grid-3 gap-2">
+            <input id="apiId" class="input" placeholder="api_id" type="number">
+            <input id="apiHash" class="input" placeholder="api_hash" type="text">
+            <input id="label" class="input" placeholder="label (اختیاری)">
+          </div>
+          <div class="mt-2">
+            <button class="btn btn-primary" onclick="addCred()">افزودن</button>
+            <button class="btn" onclick="rotateCreds()">🔄 rotate روی همه‌ی اکانت‌ها</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>api_id/api_hash های موجود</h2>
+          ${items || '<div class="text-muted">هنوز api_id/api_hash ثبت نشده</div>'}
+        </div>
+      `);
+    })();
+
+    async function addCred() {
+      const id = document.getElementById("apiId").value;
+      const hash = document.getElementById("apiHash").value;
+      const label = document.getElementById("label").value;
+      if (!id || !hash) return;
+      try {
+        await api("/api/tools/api-creds", {
+          method: "POST", body: JSON.stringify({
+            api_id: parseInt(id), api_hash: hash, label
+          })
+        });
+        showToast("افزوده شد ✓"); location.reload();
+      } catch (e) { showToast(e.message, true); }
+    }
+    async function rotateCreds() {
+      if (!confirm("Rotate روی همه‌ی اکانت‌ها؟")) return;
+      try {
+        const r = await api("/api/tools/api-creds/rotate", { method: "POST" });
+        showToast(`${r.rotated_count} اکانت update شد`);
+      } catch (e) { showToast(e.message, true); }
+    }
+  </script>
+</body>
+</html>
