@@ -109,7 +109,21 @@ def get_pending_commits(repo_dir: str = None) -> list:
 
 
 def _acquire_lock(timeout: int = 30) -> bool:
-    """یک نمی‌تونه همزمان update کنه (همروندی جلوگیری)."""
+    """
+    یک نمی‌تونه همزمان update کنه (همروندی جلوگیری).
+
+    PATCH (v2.3.0): PID liveness check.
+    قبلاً فقط mtime-based stale detection بود — یه update اگر >۵min
+    طول می‌کشید (network slow, large repo, conflict timeout)، یه
+    update دوم می‌تونست lock رو force-unlink کنه → دو `git pull` هم‌زمان
+    → .git/index corruption احتمالی.
+
+    حالا قبل از unlink:
+    ۱. PID رو از lock file می‌خونه
+    ۲. `os.kill(pid, 0)` می‌زنه — اگه PID هنوز زنده باشه، lock رو
+       رها می‌کنه (wait می‌کنه).
+    ۳. فقط اگه PID مرده باشه (یا lock file corrupt باشه)، unlink می‌کنه.
+    """
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -118,13 +132,39 @@ def _acquire_lock(timeout: int = 30) -> bool:
             os.close(fd)
             return True
         except FileExistsError:
-            # چک کن اگه lock قدیمی شد (>5min)
+            # lock قبلاً وجود دارد — چک کن آیا owner هنوز زنده است
             try:
+                # PID رو از lock file بخون
+                lock_pid_str = LOCK_FILE.read_text().strip()
+                lock_pid = int(lock_pid_str) if lock_pid_str.isdigit() else None
+                if lock_pid is not None:
+                    # چک کن آیا پروسه‌ی lock_pid هنوز زنده است
+                    try:
+                        os.kill(lock_pid, 0)
+                        # پروسه هنوز زنده است — wait کن
+                        time.sleep(0.5)
+                        continue
+                    except ProcessLookupError:
+                        # پروسه مرده — lock stale
+                        log.info("Stale lock from dead PID %d — unlinking", lock_pid)
+                        LOCK_FILE.unlink()
+                        continue
+                    except PermissionError:
+                        # پروسه برای user دیگه‌ای است — فکر کن زنده است
+                        time.sleep(0.5)
+                        continue
+                # PID خواندن نشد (corrupt) — fallback به mtime
                 age = time.time() - LOCK_FILE.stat().st_mtime
                 if age > 300:
+                    log.info("Stale lock (no PID, age %ds) — unlinking", int(age))
                     LOCK_FILE.unlink()
-            except Exception:
+            except FileNotFoundError:
+                # lock file حذف شده توسط race — دوباره تلاش کن
                 pass
+            except Exception as e:
+                log.warning("Lock check failed: %s", e)
+                time.sleep(0.5)
+                continue
             time.sleep(0.5)
     return False
 
