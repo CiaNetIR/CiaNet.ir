@@ -11023,12 +11023,16 @@ class SaaSBot:
         """
         🌐 پنل وب — نشون‌دادن لینک به web panel و وضعیت service.
 
+        PATCH (v2.1.7): حالا روی دکمه کلیک کنی، مستقیم URL باز می‌شه (با
+        Telegram's URL button). قبلاً فقط یه صفحه نمایش داده می‌شد.
+
         URL از env var PANEL_URL خوانده می‌شه (مثلاً https://panel.cianet.ir
         یا http://localhost:8000). اگه تنظیم نشه، یه صفحه‌ی راهنما نشون
         داده می‌شه که چطور فعال کنه.
 
-        همچنین وضعیت systemd service `cianet-panel` رو چک می‌کنه (اگه روی
-        همون سرور باشیم) و اگه running بود به کاربر می‌گه.
+        همچنین وضعیت systemd service `cianet-panel` و `cianet-tunnel` رو
+        چک می‌کنه (اگه روی همون سرور باشیم) و اگه running بود به کاربر
+        می‌گه.
         """
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("⛔ فقط OWNER", alert=True)
@@ -11037,9 +11041,21 @@ class SaaSBot:
         # URL از env
         panel_url = os.environ.get("PANEL_URL", "").strip().rstrip("/")
         # اگه تنظیم نباشه، یه حدس از PORT پیشنهاد می‌دیم
-        # backend روی port 8000، frontend روی port 3000
-        backend_url = os.environ.get("PANEL_BACKEND_URL", "http://localhost:8000").strip()
-        frontend_url = os.environ.get("PANEL_FRONTEND_URL", "http://localhost:3000").strip()
+        # backend روی port 8000، frontend static روی همون port (path /app/*)
+        backend_url = os.environ.get("PANEL_BACKEND_URL", "http://localhost:8000").strip().rstrip("/")
+
+        # URL نهایی برای ورود: panel_url اگه تنظیم شده، وگرنه backend_url
+        # frontend static روی /app/login.html هست
+        if panel_url:
+            login_url = f"{panel_url}/app/login.html"
+            dashboard_url = f"{panel_url}/app/dashboard.html"
+            docs_url = f"{panel_url}/api/docs"
+            url_source = "PANEL_URL"
+        else:
+            login_url = f"{backend_url}/app/login.html"
+            dashboard_url = f"{backend_url}/app/dashboard.html"
+            docs_url = f"{backend_url}/api/docs"
+            url_source = "PANEL_BACKEND_URL (default)"
 
         # وضعیت service cianet-panel (اگه هست)
         panel_status = "نامشخص"
@@ -11057,44 +11073,58 @@ class SaaSBot:
         except Exception:
             panel_status = "❓ (امکان بررسی نبود)"
 
+        # وضعیت service cianet-tunnel (اگه هست — از v2.1.6)
+        tunnel_status = "نصب نشده"
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["systemctl", "is-active", "cianet-tunnel"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0:
+                tunnel_status = "✅ متصل" if r.stdout.strip() == "active" else f"⚠️ {r.stdout.strip()}"
+            else:
+                tunnel_status = "غیرفعال"
+        except Exception:
+            tunnel_status = "❓"
+
         body = []
         if panel_url:
             body.append(f"🌐 آدرس پنل:")
-            body.append(f"   {panel_url}/login")
+            body.append(f"   {login_url}")
             body.append("")
             body.append(f"{UI.GRAY} برای ورود از همون username/password که در")
             body.append(f"{UI.GRAY} نصب تنظیم کردی استفاده کن.")
         else:
             body.append(f"{UI.AMBER} ⚠️  PANEL_URL تنظیم نشده")
             body.append("")
-            body.append(f"{UI.GRAY} پنل روی این port‌ها اجرا می‌شه:")
-            body.append(f"   📊 Backend API:  {backend_url}/api/docs")
-            body.append(f"   🌐 Frontend:    {frontend_url}/login")
+            body.append(f"{UI.GRAY} پنل روی این آدرس در دسترس است (local):")
+            body.append(f"   🌐 Login:  {login_url}")
+            body.append(f"   📊 API:    {docs_url}")
             body.append("")
             body.append(f"{UI.GRAY} برای دسترسی از بیرون سرور، در فایل env:")
             body.append(f"{UI.GRAY} PANEL_URL=https://panel.your-domain.ir")
-            body.append(f"{UI.GRAY} بعد از تنظیم، cianet-panel رو restart کن.")
+            body.append(f"{UI.GRAY} بعد از تنظیم، cianet رو restart کن.")
 
         body.append("")
         body.append(f"📊 وضعیت cianet-panel: {panel_status}")
+        body.append(f"☁️  وضعیت cianet-tunnel: {tunnel_status}")
         body.append(f"{UI.GRAY} user: {os.environ.get('PANEL_ADMIN_USER', 'admin')}")
 
-        # دکمه‌ها
+        # دکمه‌ها — URL button‌ها با کلیک مستقیم مرورگر رو باز می‌کنن
         from telethon import Button as _Button
         buttons = []
-        if panel_url:
-            # clickable URL button
-            buttons.append([_Button.url("🌐 باز کردن پنل", f"{panel_url}/login")])
-        buttons.append([_Button.url("📊 Swagger UI (API docs)", f"{backend_url}/api/docs")])
-        # اگه frontend بالا باشه
-        buttons.append([_Button.url("🌐 Frontend", f"{frontend_url}/login")])
+        # دکمه‌ی اصلی: باز کردن پنل
+        buttons.append([_Button.url("🌐 باز کردن پنل (ورود)", login_url)])
+        buttons.append([_Button.url("📊 داشبورد", dashboard_url)])
+        buttons.append([_Button.url("📚 API docs (Swagger)", docs_url)])
         buttons.append(UI.nav_row())
 
         await event.edit(
             UI.screen("🌐 پنل وب CiaNet",
                       body=body,
                       subtitle="مدیریت کاملِ سلف‌بات‌ها از مرورگر",
-                      hint="اگه پنل بالا نیست: sudo systemctl restart cianet-panel"),
+                      hint="روی «🌐 باز کردن پنل» بزن تا مستقیم در مرورگر باز بشه"),
             buttons=buttons,
         )
 

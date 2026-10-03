@@ -1,460 +1,382 @@
 <div align="center">
 
-```
-   ╔════════════════════════════════════════════════════╗
-   ║                                                    ║
-   ║      ▄████▄  ██▓ ▄▄▄      ███▄    █ ▓█████ ▄▄▄    ║
-   ║     ▒██▀ ▀█  ▓██▒▒████▄    ██ ▀█   █ ▓█   ▀ ▒████▄  ║
-   ║     ▒▓█    ▄ ▒██▒▒██  ▀█▄  ▓██  ▀█ ██▒▒███   ▒██  ▀█▄║
-   ║     ▒▓▓▄ ▄██▒░██░░██▄▄▄▄██ ▓██▒  ▐▌██▒▒▓█  ▄ ░██▄▄▄▄██║
-   ║     ▒ ▓███▀ ░██░ ▓█   ▓██▒▒██░   ▓██░░▒████▒ ▓█   ▓██║
-   ║                                                    ║
-   ║          سلف‌بات تلگرام · Telegram Selfbot           ║
-   ╚════════════════════════════════════════════════════╝
-```
+# 🤖 CiaNet.ir
 
-**CiaNet.ir** — Telegram Selfbot SaaS Panel
+### Telegram Selfbot SaaS Panel
 
-پنل مدیریت چند‌اکانتی با رابط شیشه‌ای، سیستم مجوز متمرکز، و ربات‌های اختصاصی نمایندگان.
-*Multi-account selfbot panel with inline UI, central authorization, and dedicated reseller bots.*
-
----
+پنل مدیریت چند‌اکانتی با ربات تلگرام + پنل وب + آپدیت خودکار
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
 [![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests: 246](https://img.shields.io/badge/tests-246%20passing-success.svg)](#-tests)
-[![Version: 2.0](https://img.shields.io/badge/version-2.0-blue.svg)](#-changelog)
+[![Version](https://img.shields.io/badge/version-2.1.7-blue.svg)](#-changelog)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[Quick Start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Security](#-security) · [Changelog](#-changelog)
+[Quick Start](#-quick-start) · [Features](#-features) · [Web Panel](#-web-panel) · [Architecture](#-architecture) · [Changelog](#-changelog)
 
 </div>
 
 ---
 
-## ⚡ Quick Start / شروع سریع
+## ⚡ Quick Start
 
-> **One command. Everything automated.** / **یک دستور. همه چیز خودکار.**
-
-### 🚀 The One-Liner / دستور جادویی
+### نصب ربات سلف
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/setup.sh | sudo bash
+git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
+cd /opt/cianet
+sudo bash install_service.sh
 ```
 
-یا **non-interactive** با env vars:
+اسکریپت:
+- ✅ کاربر `cianet` می‌سازه
+- ✅ venv در `/opt/cianet/.venv/` می‌سازه
+- ✅ وابستگی‌ها (telethon) رو نصب می‌کنه
+- ✅ env file `/etc/cianet.env` با chmod 600 می‌سازه
+- ✅ systemd service `cianet` (با auto-restart)
+- ✅ session‌ها و config.json رو محدود می‌کنه به 600
+
+### نصب پنل وب (اختیاری ولی توصیه‌شده)
 
 ```bash
-API_ID=12345 \
-API_HASH=abc123def456 \
-ADMIN_BOT_TOKEN=123456:ABC-DEF \
-ADMIN_ID=123456789 \
-curl -sSL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/setup.sh | sudo bash -s -- --non-interactive
+cd /opt/cianet
+sudo bash install_panel.sh
 ```
 
-**بعد از ۲ دقیقه:**
-- ✅ CiaNet در `/opt/cianet` نصب شده
-- ✅ Python venv + dependencies
-- ✅ systemd service (`cianet.service`) — **هرگز خاموش نمی‌شه**
-- ✅ Watchdog (هر ۱ دقیقه چک می‌کنه)
-- ✅ Auto-updater (هر ۵ دقیقه GitHub رو چک می‌کنه)
-- ✅ اگه webhook تنظیم بشه: real-time update
-
-**Send `/start` to your bot. Done. ✨**
-**به ربات `/start` بفرستید. تمام. ✨**
-
-> 💡 قبل از اجرا، این‌ها رو آماده داشته باشید: **API ID** (my.telegram.org), **API Hash**, **Admin Bot Token** (@BotFather), **Admin ID** (@userinfobot).
-
-### 🔄 Self-Update Flow / آپدیت خودکار
-
-```
-شما روی GitHub push می‌کنید
-         ↓
-     [۱] polling (هر ۵ دقیقه) ────┐
-     [۲] webhook (real-time) ─────┤
-                                  ↓
-                  cianet_updater.check_for_update()
-                                  ↓
-            ┌─ آپدیت پیدا شد؟ ──────┐
-            ↓ YES                    ↓ NO
-    apply_update()               (ادامه)
-            ↓
-    ① graceful disable همه‌ی اکانت‌ها
-    ② backup main.py → versions/
-    ③ git pull
-    ④ systemd restart
-            ↓
-    ⑤ re-enable همه‌ی اکانت‌ها
-    ⑥ notify admin (با commit hash)
-```
-
-**نکات کلیدی:**
-- ⏸ **بدون قطعی برای کاربران**: اکانت‌ها disable می‌شن، آپدیت می‌شه، دوباره enable
-- 🔐 **بدون data loss**: backup اتوماتیک قبل از هر آپدیت
-- 🔄 **همیشه به‌روز**: اگه ۵ دقیقه polling از کار بیفته، webhook جبران می‌کنه
-- 📊 **ادغام با پنل**: `Ⅳ سیستم → 🔄 به‌روزرسانی` (با badge تعداد commit‌ها)
-
-### 📡 اختیاری: Webhook Setup (real-time) / وب‌هوک
-
-اگه می‌خواهید آپدیت real-time باشه (نه ۵ دقیقه delay):
-
-```bash
-# 1. یه URL عمومی نیاز دارید (مثلاً cloudflared tunnel)
-cloudflared tunnel --url http://localhost:9876
-
-# 2. secret URL رو در env تنظیم کنید
-export CIANET_WEBHOOK_SECRET=$(openssl rand -hex 16)
-# مثلاً: webhook URL = https://your-tunnel.trycloudflare.com/webhook/abc123...
-
-# 3. در GitHub:
-#    Settings → Webhooks → Add
-#    URL: https://your-tunnel.trycloudflare.com/webhook/abc123...
-#    Content: application/json
-#    Events: just the push event
-```
-
-حالا هر push شما بلافاصله ربات رو آپدیت می‌کنه (نه ۵ دقیقه delay).
+اسکریپت:
+- ✅ venv رو extend می‌کنه با FastAPI + uvicorn + passlib
+- ✅ bcrypt password hash می‌سازه (با sha256 fallback)
+- ✅ systemd service `cianet-panel` روی port 8000
+- ✅ ۳ گزینه برای دسترسی:
+  - **Cloudflare Tunnel** + Zero Trust (توصیه‌شده برای IP متغیر)
+  - **nginx + Let's Encrypt** (برای IP ثابت)
+  - بدون reverse proxy (فقط localhost یا SSH tunnel)
 
 ---
 
-## ✨ Features / قابلیت‌ها
+## ✨ Features
 
-### 🎛️ Admin Panel / پنل مدیریت
+### 🤖 ربات سلف (Telegram)
 
-| EN | FA |
-|---|---|
-| **5-section hub** — Sales, Users, Support, System, Security | **هاب ۵ بخشی** — فروش، کاربران، پشتیبانی، سیستم، امنیت |
-| **Roman-numeral navigation** (Ⅰ Ⅱ Ⅲ Ⅳ Ⅴ) | **شماره‌گذاری رومی** برای تشخیص سریع |
-| **Inline glass buttons** with Telegram's native `bg_success`/`bg_danger`/`bg_primary` | **دکمه‌های شیشه‌ای** با رنگ‌های بومی تلگرام |
-| **Pending count badges** on action buttons | **شمارنده‌ی کارهای معوق** روی دکمه‌ها |
-| **Two-column layout** for compact screens | **چیدمان دو ستونی** برای صفحات فشرده |
+| قابلیت | توضیح |
+|--------|------|
+| **چند اکانتی** | مدیریت unlimited اکانت کاربر از یک پنل |
+| **پنل شیشه‌ای** | UI کامل با callback buttons + nav stack |
+| **قابلیت‌های خودکار** | name/bio loop, presence, tabchi, dice |
+| **پروفایل پویا** | ساعت در name، bio متغیر |
+| **antiban** | jitter per-tag, detection بدونه الگوی synchronized |
+| **session guard** | auto-recovery، corruption detection |
+| **proxy support** | SOCKS5/HTTP/MTProto per-account |
 
-### 🔐 Security Core / لایه‌ی امنیتی مرکزی
+### 👥 نقش‌ها
 
-| EN | FA |
-|---|---|
-| **Central authorization** — every sensitive action passes through `authorize_sensitive_account_action()` | **مجوزدهی مرکزی** — همه‌ی عملیات حساس از یک تابع واحد رد می‌شوند |
-| **Scoped grants** — `reseller` / `dedicated_bot` / `account` | **مجوزهای مقید** — سه سطح |
-| **Owner bypass** only in main instance (never in dedicated bots) | **دور زدن توسط Owner** فقط در نمونه اصلی |
-| **Full audit trail** — every grant/revoke logged | **تاریخچه‌ی کامل** — همه‌چیز ثبت می‌شه |
-| **2FA management** with two-step confirmation for resets | **مدیریت 2FA** با تأیید دو مرحله‌ای برای بازنشانی |
-| **Replay protection** — txid / license redeem are atomic | **محافظت از تکرار** — تراکنش و لایسنس atomic |
+- **OWNER** — کل سیستم + auto-updater + web panel
+- **ADMIN** — مدیریت کاربران و اکانت‌ها
+- **RESELLER** — مشتری‌های خودش + ربات اختصاصی
+- **USER** — اکانت خودش + اشتراک
 
-### 🤖 Account Management / مدیریت اکانت
+### 🌐 Web Panel
 
-| EN | FA |
-|---|---|
-| **Multi-account** — run many selfbots from one panel | **چند‌اکانتی** — چند سلف از یک پنل |
-| **Per-account features** — toggle individual capabilities | **قابلیت‌های مستقل** — هر اکانت تنظیم خودش |
-| **Profile editor** — name + font (bold/double/sans/mono/normal) | **ویرایش پروفایل** — اسم + فونت |
-| **Message send** — to Saved Messages or any chat | **ارسال پیام** — به Saved Messages یا هر چت |
-| **Proxy support** — SOCKS5/SOCKS4/HTTP with optional auth | **پروکسی** — SOCKS5/4/HTTP با auth |
-| **Device management** — list, kick, logout-all | **مدیریت دستگاه** — لیست، بستن، خروج‌کلی |
+- 🔐 ورود با bcrypt (PANEL_ADMIN_USER + PANEL_ADMIN_PASS_HASH)
+- 📊 ۹ صفحه: داشبورد، کاربران، سلف‌بات‌ها، مالی، تیکت‌ها، audit، نسخه، هش، تنظیمات
+- 🎨 Dark theme (Vercel/Linear-inspired) + RTL
+- ⚡ Frontend استاتیک در `web_static/` (بدون نیاز به npm)
+- 🔄 در دسترس از: `http://localhost:8000/app/login.html` یا `https://panel.domain.ir/app/login.html`
 
-### 💳 Subscription & Payment / اشتراک و پرداخت
+### 🔒 امنیت
 
-| EN | FA |
-|---|---|
-| **Flexible plans** — duration × price in pricing table | **پلن‌های منعطف** — قیمت‌گذاری پویا |
-| **TRC20 (USDT)** verification via TronGrid | **تأیید TRC20** از طریق TronGrid |
-| **Card payment** manual approval workflow | **پرداخت کارتی** با تأیید دستی |
-| **License keys** with atomic redeem | **لایسنس** با فعال‌سازی atomic |
-| **Auto-expiry** with 24h warning | **انقضای خودکار** با هشدار ۲۴ ساعته |
-| **Live price feeds** — gold, USDT, TON, TRX, IRR | **قیمت لحظه‌ای** — طلا، تتر، تون، ترون، تومان |
+- bcrypt password hashing (با sha256 fallback)
+- ۸-hour session cookies با random 32-byte token
+- session در memory (در restart پاک می‌شه)
+- فقط OWNER می‌تونه login کنه (single-user model)
+- `(Optional)` Cloudflare Zero Trust access policy برای 2FA
 
-### 🤝 Reseller Program / برنامه‌ی نمایندگی
+### 🔄 آپدیت خودکار + Rollback
 
-| EN | FA |
-|---|---|
-| **Dedicated bot** per reseller (their own brand) | **ربات اختصاصی** برای هر نماینده |
-| **Customer management** — list, sub status, license issuance | **مدیریت مشتریان** — لیست، وضعیت اشتراک، صدور لایسنس |
-| **Auto income** — earnings calculated from sales | **درآمد خودکار** — محاسبه از فروش |
-| **Self-service application** — users request from main panel | **درخواست خودکار** — کاربر از پنل اصلی |
-
-### 🧭 Navigation & UX / ناوبری و تجربه
-
-| EN | FA |
-|---|---|
-| **Per-user back stack** — `back` is always 1 real step back | **پشته‌ی بازگشت** — همیشه یک قدم واقعی به عقب |
-| **`nav:home`** — always-safe exit from any depth | **منوی اصلی** — خروج امن از هر عمقی |
-| **Sticky breadcrumbs** on every page | **مسیر شناور** در همه‌ی صفحات |
-| **Single welcome block** — `/start` always returns to main menu | **منوی واحد** — `/start` همیشه به ریشه |
+- دکمه‌ی «🔄 آپدیت و ورژن» در پنل OWNER
+- backup خودکار از main.py قبل از هر آپدیت
+- rollback به هر نسخه‌ی قدیمی با یک کلیک
+- (Optional) `CIANET_MIN_COMMIT` env برای supply chain protection
 
 ---
 
-## 🏗️ Architecture / معماری
+## 🌐 Web Panel
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Telegram MTProto API                      │
-└──────────────┬──────────────────────────┬───────────────────┘
-               │                          │
-       ┌───────▼──────┐         ┌─────────▼────────┐
-       │  Admin Bot   │         │  Helper Bot      │
-       │  (SaaS panel)│         │  (read-only FAQ) │
-       │  Bot Token   │         │  Bot Token       │
-       └───────┬──────┘         └──────────────────┘
-               │
-       ┌───────▼──────────────────────────────────────┐
-       │           SaaSBot (Python)                    │
-       │  ┌────────────┐  ┌────────────┐  ┌────────┐  │
-       │  │  UI Class  │  │ NavStack   │  │  Auth  │  │
-       │  │  (glass)   │  │ (per-user) │  │ (grant)│  │
-       │  └────────────┘  └────────────┘  └────────┘  │
-       │  ┌──────────────────────────────────────┐     │
-       │  │  SelfBot × N (Telethon clients)      │     │
-       │  │  Account 1 · Account 2 · Account N   │     │
-       │  └──────────────────────────────────────┘     │
-       └───────┬──────────────────────────────────────┘
-               │
-       ┌───────▼──────────────────────────────────────┐
-       │      SQLite (saas.db · WAL mode)             │
-       │  users · accounts · subscriptions · licenses │
-       │  payments · tickets · dedicated_bots ·      │
-       │  permission_grants · audit_log ·             │
-       │  reseller_applications                       │
-       └────────────────────────────────────────────┘
-```
+### Frontend
 
-### Core Components / اجزای اصلی
+| آدرس | محتوا |
+|------|------|
+| `/app/login.html` | ورود |
+| `/app/dashboard.html` | داشبورد آمار |
+| `/app/users.html` | مدیریت کاربران |
+| `/app/accounts.html` | مدیریت سلف‌بات‌ها |
+| `/app/finance.html` | پرداخت‌ها |
+| `/app/tickets.html` | تیکت‌ها |
+| `/app/audit.html` | Audit log |
+| `/app/version.html` | آپدیت/rollback |
+| `/app/tools.html` | api_id/api_hash |
+| `/app/settings.html` | تنظیمات |
 
-| Component | Lines | Role |
-|---|---:|---|
-| `UI` | ~270 | Inline button factory, color palette, microcopy / ساخت دکمه، پالت، متن‌های ثابت |
-| `NavStack` | ~180 | Per-user back-stack with loop-breaker / پشته‌ی ناوبری |
-| `AdminBot` | ~2,600 | Standalone admin panel (legacy) / پنل ادمین مستقل |
-| `SaaSBot` | ~5,500 | Main SaaS bot, role-based menus / ربات اصلی |
-| `SelfBot` | ~1,500 | Single-account Telethon logic / منطق سلف |
-| `RunningAccount` | ~480 | Runtime wrapper with state machine / wrapper اکانت |
+### Backend API
 
-### Database Schema / اسکیمای دیتابیس
-
-**۲۲+ tables**, all created with `CREATE TABLE IF NOT EXISTS` (idempotent migration):
-
-```
-users              subscriptions      licenses           payments
-accounts           plans              orders             tickets
-admins             dedicated_bots     permission_grants  audit_log
-banned_users       sales_users        reseller_apps      ...
-sessions (table)   backups            notifications      ...
-```
-
-WAL mode · `foreign_keys=ON` · indexed hot paths.
+| آدرس | محتوا |
+|------|------|
+| `GET /api/health` | Health check (public) |
+| `POST /api/auth/login` | Login |
+| `GET /api/dashboard` | آمار کلی |
+| `GET /api/users` | لیست کاربران |
+| `GET /api/accounts` | لیست سلف‌بات‌ها |
+| `GET /api/finance/payments` | پرداخت‌ها |
+| `GET /api/tickets` | تیکت‌ها |
+| `GET /api/audit-log` | Audit log |
+| `GET /api/version` | اطلاعات نسخه |
+| `GET /api/tools/api-creds` | api_id/api_hash pool |
+| `/api/docs` | Swagger UI (interactive) |
 
 ---
 
-## 🔒 Security / امنیت
-
-### Three-layer model / مدل سه‌لایه
+## 📁 File Structure
 
 ```
-┌──────────────────────────────────────────────────┐
-│  Layer 1: Owner Bypass (main instance only)       │  ← short-circuit
-│  Layer 2: Central Auth (single decision point)   │  ← single chokepoint
-│  Layer 3: Tag ownership (callback validates tag) │  ← per-action check
-└──────────────────────────────────────────────────┘
-```
-
-### Guarantees / تضمین‌ها
-
-| EN | FA |
-|---|---|
-| **No security-critical code bypasses central auth** | **هیچ کد حساسی از مجوزدهی مرکزی رد نمی‌شه** |
-| **Replay-proof** — txid / license / 2FA-reset are atomic | **ضد تکرار** — تراکنش، لایسنس، بازنشانی 2FA همگی atomic |
-| **Sessions stored in `chmod 700` directory** | **سشن‌ها در پوشه‌ی `chmod 700`** |
-| **Backups never contain partial state** (validated before send) | **بکاپ‌ها هرگز ناقص نیستند** (قبل از ارسال validate می‌شن) |
-| **SQLite WAL** for crash-safety + concurrent reads | **WAL** برای ایمنی در برابر crash |
-
----
-
-## 🧪 Tests / تست‌ها
-
-**246 automated tests, 100% pass rate.**
-
-| Suite | Count | Coverage |
-|---|---:|---|
-| `test_panel_v2.py` | 18 | Panel structure, reseller flow |
-| `test_selfbot_features.py` | 57 | All per-account features |
-| `test_antiban.py` | 49 | Anti-ban heuristics |
-| `test_v1_8_0.py` | 44 | v1.8.0 features |
-| `test_backup_e2e.py` | 24 | Full backup-restore round-trip |
-| `test_user_menu.py` | 23 | User menu state machine |
-| `test_backup_scheduler.py` | 13 | Auto-backup scheduler |
-| `test_backup.py` | 12 | Backup internals |
-| `test_support_role.py` | 10 | Support ticket lifecycle |
-| `test_price_apis.py` | 9* | Price-feed API mocks (live-skip) |
-
-\* some require network; graceful in CI
-
-```bash
-# Run all
-for t in test_*.py; do python3 "$t"; done
-```
-
----
-
-## 📦 Environment / متغیرهای محیطی
-
-### Required / ضروری
-
-| Variable | Example | Source |
-|---|---|---|
-| `API_ID` | `12345` | [my.telegram.org/apps](https://my.telegram.org/apps) |
-| `API_HASH` | `abc123...` | [my.telegram.org/apps](https://my.telegram.org/apps) |
-| `ADMIN_BOT_TOKEN` | `123456:ABC...` | [@BotFather](https://t.me/BotFather) |
-| `ADMIN_ID` | `123456789` | [@userinfobot](https://t.me/userinfobot) |
-
-### Optional / اختیاری
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `HELPER_BOT_TOKEN` | — | Read-only FAQ bot (12 topics, FA+EN) |
-| `HELPER_BOT_USERNAME` | `HelpBot` | Without `@` |
-| `SELFBOT_DATA_DIR` | `./data` | Where DB, sessions, backups live |
-| `SELFBOT_DEDICATED_BOT` | `0` | Set to `1` to run as a dedicated bot |
-| `SELFBOT_DEDICATED_BOT_ID` | — | Required if `SELFBOT_DEDICATED_BOT=1` |
-| `SELFBOT_GRANTS_DB_PATH` | — | Path to main instance's `saas.db` (for grants lookup) |
-| `DEBUG` | `0` | Verbose logging |
-
-### External APIs (graceful failure) / APIهای خارجی
-
-| API | Use | Fallback chain |
-|---|---|---|
-| **Binance** · CoinGecko · Bybit · KuCoin | USDT, TON, TRX prices | Each other |
-| **OKX** | Gold (XAU-USDT) | — |
-| **Navasan (GitHub)** | Gold/coin IRR | Manual entry |
-| **Nobitex** · Wallex · Exir · Bit24 | IRR prices | Each other |
-| **TronGrid** | TRC20 transaction verification | — |
-
-> If a price API is unreachable, pricing features degrade gracefully; the bot stays online. / اگه API قیمت قطع باشه، قابلیت قیمت‌گذاری gracefully degrade می‌شه؛ ربات آنلاین می‌مونه.
-
----
-
-## 🗂️ Project Layout / ساختار پروژه
-
-```
-CiaNet.ir/
-├── main.py              # SaaS bot (single file, ~20k lines)
+/opt/cianet/
+├── main.py              # ربات اصلی (selfbot + admin + saas)
+├── cianet_updater.py    # auto-updater module
+├── web_panel.py         # FastAPI backend (port 8000)
+├── web_static/          # Frontend استاتیک (vanilla JS)
+│   ├── app.js
+│   ├── styles.css
+│   └── *.html           # 9 pages
+├── web/                 # (اختیاری) Next.js frontend
+├── install_service.sh   # نصب ربات
+├── install_panel.sh     # نصب پنل وب
+├── setup.sh             # legacy install (interactive)
 ├── requirements.txt
-├── versions/            # Stable snapshots for rollback
-│   └── v2.0_panel_redesign.py
-├── test_*.py            # 246 automated tests
-├── sessions/            # Telegram .session files (chmod 700)
-├── data/                # SQLite, config, backups
-│   ├── saas.db
-│   ├── config.json
-│   ├── admin_bot_admins.json
-│   └── backups/
-└── helper_bot/          # Read-only FAQ bot (optional)
+└── data/
+    ├── config.json      # api_id, api_hash, sessions per account
+    ├── saas.db          # users, subscriptions, payments, tickets
+    ├── bot_data.db      # account metadata
+    └── sessions/        # .session files (chmod 600)
 ```
 
 ---
 
-## 🛠️ Operations / عملیات
+## ⚙️ Environment Variables
 
-### Daily / روزانه
+در `/etc/cianet.env`:
+
+### ضروری
 
 ```bash
-# View logs
-sudo journalctl -u selfbot -f
-
-# Check status
-sudo systemctl status selfbot
-
-# Restart
-sudo systemctl restart selfbot
+API_ID=12345                       # از my.telegram.org
+API_HASH=abc123def456...           # از my.telegram.org
+ADMIN_BOT_TOKEN=123456:ABC-DEF      # از @BotFather
+ADMIN_ID=123456789                 # Telegram user_id شما
 ```
 
-### Backup & Restore / بکاپ و بازیابی
-
-The bot ships a **self-update** command accessible from the admin panel:
-
-1. **Auto backup** — 3× daily, sent to all OWNER/ADMIN
-2. **Manual backup** — `/start` → Admin → System → Backup
-3. **Restore** — OWNER-only, with rollback support
-
-Backups are **validated before delivery** (no partial state ever sent).
-
-### Update / به‌روزرسانی
+### اختیاری
 
 ```bash
-cd /opt/selfbot && git pull
-sudo systemctl restart selfbot
+# Multi-OWNER (اگه چند صاحب داری)
+OWNER_IDS=123456789,987654321
+
+# Bootstrap api_id (اگه config.json خالی شد)
+CIANET_API_ID=12345
+CIANET_API_HASH=abc123def456...
+
+# Auto-updater supply chain protection
+CIANET_MIN_COMMIT=<40-char SHA از آخرین شناخته‌شده‌ی خوب>
+
+# Web panel auth
+PANEL_ADMIN_USER=admin
+PANEL_ADMIN_PASS_HASH=$2b$12$...   # bcrypt hash
+PANEL_SESSION_SECRET=<32-byte hex>
+
+# Web panel URL (برای دکمه‌ی «پنل وب» در ربات)
+PANEL_URL=https://panel.cianet.ir
+
+# CORS
+PANEL_CORS_ORIGINS=https://panel.cianet.ir,http://localhost:3000
+
+# Helper bot (اختیاری)
+HELPER_BOT_TOKEN=...
 ```
 
-Snapshots in `versions/` allow instant rollback if needed.
+---
+
+## 🛠️ Operations
+
+### سرویس‌ها
+
+```bash
+# ربات اصلی
+sudo systemctl status cianet
+sudo systemctl restart cianet
+sudo journalctl -u cianet -f
+
+# پنل وب
+sudo systemctl status cianet-panel
+sudo systemctl restart cianet-panel
+sudo journalctl -u cianet-panel -f
+
+# (اگه Cloudflare Tunnel انتخاب کردی)
+sudo systemctl status cianet-tunnel
+sudo journalctl -u cianet-tunnel -f
+```
+
+### بکاپ
+
+```bash
+# بکاپ کامل (config + sessions + databases):
+cd /opt/cianet
+sudo tar -czf /tmp/cianet-backup-$(date +%F).tar.gz data/
+
+# یا از داخل ربات: پنل OWNER → 💾 بکاپ و بازیابی
+```
+
+### آپدیت
+
+```bash
+# روش ۱: از داخل ربات (توصیه‌شده)
+# پنل OWNER → 🔄 آپدیت و ورژن → 📥 اعمال آپدیت
+
+# روش ۲: manual
+cd /opt/cianet
+sudo git pull origin main
+sudo systemctl restart cianet cianet-panel
+```
+
+### Rollback
+
+```bash
+# از داخل ربات: پنل OWNER → 🔄 آپدیت و ورژن → ↩️ لیست نسخه‌های قابل rollback
+# یا از web panel: /app/version.html
+```
 
 ---
 
-## 🤝 Contributing / مشارکت
+## 🔐 Security Notes
 
-Pull requests welcome. For major changes, open an issue first.
+- **session files** = کلید takeover اکانت‌ها. همیشه با `chmod 600` ذخیره می‌شن
+- **config.json** = شامل api_id, api_hash, phone. با `chmod 600` ذخیره می‌شه
+- **saas.db / bot_data.db** = PII + payments. با `chmod 600` بعد از init
+- **دکمه‌ی antiban** = قبل از عملیات حساس (terminate sessions, 2FA reset) روی اکانت‌های خارجی، تأیید دوم می‌خواد
 
-**Code style:** *No comments unless asked* · Type hints required for new functions · Tests for new features.
+### توصیه‌ها
 
-**قبل از PR:**
-- `for t in test_*.py; do python3 "$t"; done` ← همه پاس بشن
-- تغییرات schema در `init_db()` با `IF NOT EXISTS` اضافه شوند
-
----
-
-## 📜 License / لایسنس
-
-[MIT](LICENSE) — use, modify, distribute freely. / استفاده، تغییر و توزیع آزاد.
+1. **حتماً** توکن GitHub و سرویس‌های ابری رو بعد از استفاده revoke کن
+2. اگه از Cloudflare Tunnel استفاده می‌کنی، Zero Trust Access Policy فعال کن
+3. password پنل وب رو قوی بزار (۱۲+ کاراکتر)
+4. هر چند ماه یک‌بار از `/app/audit.html` لاگ‌ها رو بررسی کن
 
 ---
 
-## 📋 Changelog / تاریخچه
+## 🐛 Troubleshooting
 
-### v2.1 — Self-Update & One-Command Install (2026-10-01) / نصب یک‌دستوری
+### پنل بالا نمیاد
 
-> **یک `curl` تا ربات کامل + آپدیت خودکار.**
+```bash
+sudo systemctl status cianet-panel
+sudo journalctl -u cianet-panel --no-pager -n 30
+```
 
-- **setup.sh**: یک اسکریپت که `/opt/cianet` می‌سازه + venv + deps + systemd + watchdog + auto-updater
-- **cianet_updater.py**: polling (۵min) + webhook (real-time) + propagation
-- **پنل ادمین → Ⅳ سیستم → 🔄 به‌روزرسانی**: با badge تعداد commit
-- **Propagation**: بعد از آپدیت، همه‌ی اکانت‌های کاربران re-enable می‌شن
-- **Watchdog**: اگه ربات بمیره، ۱ دقیقه بعد بیدارش می‌کنه
-- **۱۱ تست E2E** (همه پاس، lock، backup، propagation، git pull failure)
+### خطای "Cannot uninstall typing_extensions"
 
-### v2.0 — Panel Redesign (2026-10-01) / بازطراحی پنل
+این یعنی apt و pip conflict دارن. راه‌حل: از venv استفاده کن (در install_panel.sh خودکار انجام می‌شه).
 
-> **5-section admin hub with Roman-numeral navigation + reseller flow.**
+```bash
+sudo rm -rf /opt/cianet/.venv
+sudo bash /opt/cianet/install_panel.sh
+```
 
-- **Ⅰ** Sales · **Ⅱ** Users · **Ⅲ** Support · **Ⅳ** System · **Ⅴ** Security (OWNER-only)
-- Welcome block shortened from 8 lines to 2
-- New `reseller_applications` table + `_show_reseller_info` flow
-- `UI.section_header`, `UI.NUM`, `UI.microcopy()` helpers
-- 18 new tests (257 total, 100% pass)
+### خطای "Address already in use" (port 8000)
 
-### v1.9.3 — Backup Timeout Fix (2026-10-01) / فیکس تایم‌اوت بکاپ
+```bash
+sudo lsof -i :8000
+sudo kill <PID>
+sudo systemctl restart cianet-panel
+```
 
-> SQLite backup hung indefinitely on locked sessions.
+### Cloudflare Tunnel وصل نمی‌شه
 
-- 10s timeout in `_snapshot_db_to_temp`
-- 60s timeout in handler + scheduler
-- Better error message to user
+```bash
+sudo systemctl status cianet-tunnel
+sudo journalctl -u cianet-tunnel --no-pager -n 20
+```
 
-### v1.9.0 — Flat Admin Hub (2026-09-xx) / پنل تخت
+اگه خطای "token invalid" داد، tunnel رو در Cloudflare dashboard دوباره بساز.
 
-> All admin ops on one page.
+### ربات کرش می‌کنه
 
-- Replaced 4-level nested menus with single flat hub
-- 12–15 buttons per page, 1-tap reach for daily tasks
+```bash
+sudo journalctl -u cianet --no-pager -n 50
+# یا:
+DEBUG=1 sudo systemctl restart cianet
+```
 
-### v1.8.0 — User/Reseller/Admin Unification (2026-09-xx) / یکپارچه‌سازی منوها
+---
 
-> One menu for all roles, with role-specific extensions.
+## 📋 Changelog
 
-- Common top section + privileged extensions below
-- Reseller dashboard reachable from main menu
+### v2.1.7 (current)
+
+- ✅ دکمه‌ی «🌐 پنل وب» در ربات با URL buttons که مستقیم مرورگر رو باز می‌کنن
+- ✅ تشخیص خودکار وضعیت cianet-panel و cianet-tunnel
+- ✅ README مرتب و تمیز
+
+### v2.1.6
+
+- ☁️ پشتیبانی از Cloudflare Tunnel + Zero Trust در install_panel.sh
+- ✅ نصب خودکار `cloudflared` با apt/yum/binary fallback
+- ✅ systemd service `cianet-tunnel` با auto-restart
+- ✅ ثبت خودکار `PANEL_URL` در env
+
+### v2.1.5
+
+- 🔐 Username case-insensitive در login
+- 🐛 فیکس DB schema در ۵ endpoint (amount, approved_at, text, etc.)
+- 🌐 Frontend استاتیک (web_static/) — بدون نیاز به npm
+- 🤖 دکمه‌ی «🌐 پنل وب» در پنل OWNER ربات
+
+### v2.1.0 — v2.1.4
+
+- 🌐 پنل وب کامل (FastAPI + Next.js frontend)
+- 🐛 فیکس venv برای typing_extensions conflict
+- 🐛 فیکس password prompt UX
+
+### v2.0.8 — v2.0.13
+
+- 🔄 آپدیت خودکار + Rollback (دکمه‌ی «🔄 آپدیت و ورژن»)
+- 🚀 Owner quick-actions panel
+- 🔒 Supply chain protection (CIANET_MIN_COMMIT)
+- 📊 Resilience fixes (wizard TTL, logs trim)
+
+### v2.0.0 — v2.0.7
+
+- 🤖 پایه‌ی ربات سلف + پنل ادمین
+- 🐛 ۱۴ باگ critical فیکس شد
+- 🎨 UI overhaul با nav stack
+
+---
+
+## 📜 License
+
+MIT License — see [LICENSE](LICENSE) file.
+
+---
+
+## 🤝 Contributing
+
+PR ها welcome هستن. لطفاً قبل از submit:
+
+1. `python3 -c "import ast; ast.parse(open('main.py').read())"` رو اجرا کن
+2. shell syntax رو با `bash -n install_panel.sh` بررسی کن
+3. commit message مطابق با conventional commits باشه
 
 ---
 
 <div align="center">
 
-**CiaNet.ir** · Made with care in Tehran · ساخته‌شده با دقت در تهران
+**ساخته‌شده با ❤️ توسط [DLSDT](https://github.com/DLSDT)**
 
-[⬆ Back to top](#top)
+اگه این پروژه بهت کمک کرد، یه ⭐ بده!
 
 </div>
