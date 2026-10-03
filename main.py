@@ -15725,7 +15725,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.6.6"
+BUILD_VERSION = "2026-10-03-v2.6.7"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -16622,16 +16622,13 @@ async def _reenable_all_accounts_after_update() -> str:
             if not isinstance(acc, dict):
                 continue
             if acc.get("disabled"):
-                # اگر disabled_reason از نوع subscription_expired هست،
-                # re-enable نکن. ولی اگر manual یا auto_ban_counter هست،
-                # پس از update باید دوباره start بشن.
-                # PATCH (v2.6.6): manual و legacy رو هم skip کن — این‌ها
-                # عمداً disabled شدن و نباید re-enable بشن. bootstrap
-                # اکانت هم manual disabled هست و نباید وصل بشه.
-                reason = acc.get("disabled_reason")
-                if reason in ("subscription_expired", "manual", "manual_web_panel"):
-                    skipped_disabled += 1
-                    continue
+                # PATCH (v2.6.7 CRITICAL): اگه disabled=True، همیشه skip کن.
+                # مهم نیست reason چی هست — اگه owner اکانت رو disable کرده،
+                # نباید re-enable بشه. قبلاً فقط subscription_expired رو
+                # skip می‌کردیم ولی bootstrap که disabled=true بدون reason
+                # بود، باز هم سعی می‌کرد وصل بشه و خطا می‌داد.
+                skipped_disabled += 1
+                continue
             try:
                 ready, status = await ensure_started(tag, acc, caller="update.reenable")
                 if ready:
