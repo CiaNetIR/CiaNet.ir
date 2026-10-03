@@ -485,7 +485,7 @@ async def user_update(user_id: int, update: UserUpdate, request: Request, _: Non
                     )
             if update.reseller_id is not None:
                 c.execute("UPDATE users SET reseller_id=? WHERE user_id=?", (update.reseller_id, user_id))
-            c.connection.commit()
+            c.commit()
         return {"ok": True}
     except HTTPException:
         raise
@@ -510,7 +510,7 @@ async def user_delete(user_id: int, request: Request, _: None = Depends(require_
             c.execute("DELETE FROM permission_grants WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM users WHERE user_id=?", (user_id,))
-            c.connection.commit()
+            c.commit()
         # remove from config.json
         cfg = m.load_config()
         to_remove = [
@@ -574,7 +574,7 @@ async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: Non
                     (user_id, plan_name,
                      datetime.now().isoformat(), new_expire.isoformat()),
                 )
-            c.connection.commit()
+            c.commit()
         return {"ok": True, "new_expire": new_expire.isoformat()}
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
@@ -774,7 +774,7 @@ async def finance_approve(pay_id: int, request: Request, _: None = Depends(requi
                 "UPDATE purchases SET status='approved', approved_at=datetime('now') WHERE id=?",
                 (pay_id,),
             )
-            c.connection.commit()
+            c.commit()
             if r.rowcount == 0:
                 raise HTTPException(404, "Payment not found")
         return {"ok": True}
@@ -790,7 +790,7 @@ async def finance_reject(pay_id: int, request: Request, _: None = Depends(requir
     try:
         with m._conn() as c:
             r = c.execute("UPDATE purchases SET status='rejected' WHERE id=?", (pay_id,))
-            c.connection.commit()
+            c.commit()
             if r.rowcount == 0:
                 raise HTTPException(404, "Payment not found")
         return {"ok": True}
@@ -897,7 +897,7 @@ async def ticket_reply(ticket_id: int, reply: TicketReply, request: Request, _: 
             )
             # PATCH (v2.1.5): tickets status enum: open/closed (نه answered)
             c.execute("UPDATE tickets SET status='closed' WHERE id=?", (ticket_id,))
-            c.connection.commit()
+            c.commit()
         return {"ok": True}
     except HTTPException:
         raise
