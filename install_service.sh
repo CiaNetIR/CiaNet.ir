@@ -131,6 +131,11 @@ WantedBy=multi-user.target
 EOF
 
 # محدودسازی دسترسی فایل‌های حساس به کاربر سرویس (سشن‌ها/کانفیگ/بکاپ‌ها)
+# PATCH (v2.5.2): اگه config.json وجود نداره، یه فایل خالی معتبر بساز
+# تا ربات در حالت "all" به‌جای interactive add_account، منتظر بمونه.
+if [ ! -f "$SCRIPT_DIR/config.json" ]; then
+    echo '{}' > "$SCRIPT_DIR/config.json"
+fi
 chown -R cianet:cianet "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
 chmod 700 "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" 2>/dev/null || true
 chmod 600 "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
