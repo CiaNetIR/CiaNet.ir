@@ -10895,11 +10895,21 @@ class SaaSBot:
                 UI.go("🌐 اتصال و پروکسی", _act("conn")),
                 UI.go("📊 وضعیت", _act("status")),
             ],
-            [
+        ]
+        # PATCH (v2.6.3): دکمه‌های 2FA/دستگاه‌ها فقط برای OWNER و مجوز خاص
+        # کاربر عادی نباید ببینه — فقط مالک اصلی یا کسایی که CAP_ACCOUNT_SECURITY دارن
+        viewer_role = self._role(event.sender_id)
+        can_sec = viewer_role == ROLE_OWNER or bool(
+            get_active_grants(event.sender_id, CAP_ACCOUNT_SECURITY)
+            if hasattr(self, 'sb') else False
+        )
+        if can_sec:
+            buttons.append([
                 UI.go("📨 ارسال پیام", _act("send")),
                 UI.go("🔒 دستگاه‌ها/2FA", _act("sess")),
-            ],
-        ]
+            ])
+        else:
+            buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
         # عملیات حالت‌دار: سبز برای فعال‌سازی (اگر disabled)، خاکستری برای
         # توقف موقت (اگر enabled).
         if disabled:
@@ -15719,7 +15729,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.6.2"
+BUILD_VERSION = "2026-10-03-v2.6.3"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
