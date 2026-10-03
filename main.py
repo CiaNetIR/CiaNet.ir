@@ -8292,6 +8292,17 @@ class AdminBot:
                 await self._owner_revoke_dbot_capability(event, bot_id)
             else:
                 return False
+        except errors.MessageNotModifiedError:
+            # PATCH (v2.0.6): تلگرام وقتی event.edit با همان محتوای فعلی
+            # صدا زده بشه، این خطا رو برمی‌گردونه (به‌جای silent success).
+            # این معمولاً روی دکمه‌های Refresh یا callbackهای idempotent
+            # رخ می‌ده (مثلاً کاربر چند بار روی 🔄 بزنه). خطا واقعی نیست و
+            # نباید به کاربر نشت کنه — کافیه event.answer خالی بزنیم تا
+            # spinner بسته بشه.
+            try:
+                await event.answer()
+            except Exception:
+                pass
         except Exception as e:
             # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
             # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
@@ -14180,6 +14191,17 @@ class SaaSBot:
                 # PATCH (audit-7): این return غیرقابل‌دسترس (unreachable)
                 # حذف شد — خطِ بعد از آن در `except Exception` قرار دارد و
                 # این return هیچ‌وقت اجرا نمی‌شد.
+            except errors.MessageNotModifiedError:
+                # PATCH (v2.0.6): تلگرام وقتی event.edit با همان محتوای
+                # فعلی صدا زده بشه، این خطا رو برمی‌گردونه (به‌جای silent
+                # success). این معمولاً روی دکمه‌های Refresh یا callbackهای
+                # idempotent رخ می‌ده (مثلاً کاربر چند بار روی 🔄 بزنه).
+                # خطا واقعی نیست و نباید به کاربر نشت کنه — کافیه
+                # event.answer خالی بزنیم تا spinner بسته بشه.
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
             except Exception as e:
                 # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
                 # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
