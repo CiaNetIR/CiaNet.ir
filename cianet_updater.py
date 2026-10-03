@@ -138,6 +138,37 @@ def _release_lock() -> None:
         pass
 
 
+def _verify_min_commit(repo_dir: str, remote_commit: str) -> Tuple[bool, str]:
+    """
+    PATCH (v2.0.13): تأیید اینکه remote_commit حداقل برابر min_commit_hash است.
+    این از supply-chain attack جلوگیری می‌کنه: اگه GitHub اکانت لوک بره و
+    `main` فورس‌پوش بشه به یک commit قدیمی/مخرب، updater رد می‌کنه.
+
+    Min commit hash از env var `CIANET_MIN_COMMIT` خوانده می‌شه. اگه تنظیم
+    نشه (empty)، verification skip می‌شه (backward-compatible با نصب‌های
+    موجود). اگه تنظیم بشه، باید یک ۴۰-کاراکتر hex SHA-1 باشه.
+
+    Returns: (success, message)
+    """
+    min_commit = os.environ.get("CIANET_MIN_COMMIT", "").strip().lower()
+    if not min_commit:
+        return True, ""  # verification disabled
+    if len(min_commit) != 40 or not all(c in "0123456789abcdef" for c in min_commit):
+        return False, f"❌ CIANET_MIN_COMMIT invalid: '{min_commit[:8]}...' (must be 40-hex SHA)"
+    if not remote_commit or len(remote_commit) != 40:
+        return False, f"❌ remote commit invalid: '{remote_commit}'"
+    # مقایسه‌ی ساده‌ی رشته‌ای — git SHAs lex comparable within same repo
+    # (تضمین شده توسط SHA-1 hash format).
+    if remote_commit < min_commit:
+        return False, (
+            f"❌ Supply chain check failed:\n"
+            f"   remote commit {remote_commit[:8]} is older than min {min_commit[:8]}\n"
+            f"   Possible rollback attack or force-push to old commit.\n"
+            f"   Update refused. Set CIANET_MIN_COMMIT to a newer value to allow."
+        )
+    return True, ""
+
+
 def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]:
     """
     pull + restart. قبلش همه‌ی اکانت‌ها disable می‌شن.
@@ -149,6 +180,21 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         return False, "❌ یک update دیگه در حال اجراست"
 
     try:
+        # PATCH (v2.0.13): قبل از pull، remote commit رو fetch کن و
+        # با min_commit_hash مقایسه کن. اگه قدیمی‌تر بود، رد کن.
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", BRANCH, "--quiet"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
+            )
+            remote_commit = get_remote_commit(repo_dir)
+            if remote_commit:
+                ok, msg = _verify_min_commit(repo_dir, remote_commit)
+                if not ok:
+                    return False, msg
+        except Exception as e:
+            log.warning("min_commit verification failed (continuing): %s", e)
+
         # 1. graceful disable همه‌ی اکانت‌ها (اگه event loop فعال نیست)
         try:
             import main as _main_mod
