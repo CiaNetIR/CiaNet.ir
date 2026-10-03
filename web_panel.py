@@ -1453,6 +1453,112 @@ async def health():
     return {"status": "ok", "time": time.time()}
 
 
+# ─── v2.8.4: Live Session API — user picks a selfbot & enters "control mode" ───
+# کاربر بعد از لاگین با لایسنس، اکانت‌های self خودش رو می‌بینه. روی هر کدام
+# بزنه تا وارد «حالت کنترل» بشه — بدون نیاز به کد تلگرام یا لایسنس دوباره.
+# این یه session موقت می‌سازه که فقط برای همون اکانت اجرا می‌شه.
+
+class LiveSessionRequest(BaseModel):
+    tag: str  # selfbot tag (e.g. "8102")
+
+@app.get("/api/user/accounts")
+async def user_list_accounts(request: Request):
+    """لیست اکانت‌های self کاربر (همون لیستی که در پنل ادمین تلگرام می‌بینه)."""
+    uid = require_user_auth(request)
+    m = _main()
+    cfg = m.load_config()
+    mine = m.accounts_of_user(cfg, uid)
+    items = []
+    for tag, acc in mine.items():
+        if not isinstance(acc, dict):
+            continue
+        state, note = "unknown", ""
+        # وضعیت اکانت از ACCOUNTS runtime
+        entry = getattr(m, "ACCOUNTS", {}).get(tag)
+        if entry is not None:
+            try:
+                me = getattr(entry.bot, "my_id", None)
+                if me:
+                    state = "ready"
+                    note = f"متصل — {me}"
+                else:
+                    state = "starting"
+                    note = "در حال راه‌اندازی..."
+            except Exception:
+                state = "unknown"
+        else:
+            if acc.get("disabled"):
+                state = "stopped"
+                note = "متوقف"
+            else:
+                state = "pending"
+                note = "در انتظار"
+        items.append({
+            "tag": tag,
+            "tg_user_id": acc.get("tg_user_id"),
+            "name": acc.get("first_name") or acc.get("name") or "—",
+            "phone": (acc.get("phone") or "")[:6] + "…",  # ماسک شده
+            "state": state,
+            "note": note,
+            "disabled": bool(acc.get("disabled")),
+        })
+    return {"items": items, "count": len(items)}
+
+@app.post("/api/user/live-session")
+async def user_start_live_session(req: LiveSessionRequest, request: Request):
+    """شروع live session — کاربر اکانت خودش رو انتخاب می‌کنه و وارد می‌شه."""
+    uid = require_user_auth(request)
+    m = _main()
+    cfg = m.load_config()
+    acc = cfg.get(req.tag)
+    if not acc:
+        raise HTTPException(404, "اکانت پیدا نشد")
+    if not m.account_belongs_to(acc, req.tag, uid):
+        raise HTTPException(403, "این اکانت متعلق به شما نیست")
+    # session فعلی رو update کن تا tag رو هم نگه داره
+    token = request.cookies.get("cianet_user_session")
+    if not token or token not in _user_sessions:
+        raise HTTPException(401, "Session نامعتبر")
+    _user_sessions[token]["active_tag"] = req.tag
+    _user_sessions[token]["live_started_at"] = time.time()
+    return {"ok": True, "tag": req.tag}
+
+@app.get("/api/user/live-session")
+async def user_get_live_session(request: Request):
+    """اطلاعات اکانت فعال در live session."""
+    uid = require_user_auth(request)
+    token = request.cookies.get("cianet_user_session")
+    if not token or token not in _user_sessions:
+        raise HTTPException(401, "Session نامعتبر")
+    s = _user_sessions[token]
+    if "active_tag" not in s:
+        raise HTTPException(404, "هیچ اکانتی در live session انتخاب نشده")
+    tag = s["active_tag"]
+    m = _main()
+    cfg = m.load_config()
+    acc = cfg.get(tag)
+    if not acc:
+        raise HTTPException(404, "اکانت پیدا نشد")
+    return {
+        "tag": tag,
+        "tg_user_id": acc.get("tg_user_id"),
+        "name": acc.get("first_name") or acc.get("name") or "—",
+        "username": acc.get("username"),
+        "phone": (acc.get("phone") or "")[:6] + "…",
+        "disabled": bool(acc.get("disabled")),
+        "live_started_at": s.get("live_started_at", 0),
+    }
+
+@app.post("/api/user/live-session/stop")
+async def user_stop_live_session(request: Request):
+    """خروج از live session (ولی لاگین باقی می‌مونه)."""
+    uid = require_user_auth(request)
+    token = request.cookies.get("cianet_user_session")
+    if token and token in _user_sessions:
+        _user_sessions[token].pop("active_tag", None)
+        _user_sessions[token].pop("live_started_at", None)
+    return {"ok": True}
+
 # ─── Static frontend (web_static/) ──────────────────────────────────
 # PATCH (v2.1.5): یک frontend استاتیک ساده‌تر با vanilla JS که نیاز به
 # npm build نداره. اگر `web_static/` وجود داشته باشد، mount می‌شه.

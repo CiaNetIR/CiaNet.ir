@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiaNet — اکانت‌ها</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">CiaNet</div>
+    <div class="nav-items">
+      <a href="dashboard.html">داشبورد</a>
+      <a href="accounts.html" class="active">🤖 اکانت‌ها</a>
+      <a href="wallet.html">💰 کیف پول</a>
+      <a href="orders.html">🧾 سفارش‌ها</a>
+      <button id="logout-btn" class="link-btn">خروج</button>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="card">
+      <h2>🤖 اکانت‌های سلف‌بات شما</h2>
+      <p class="hint">روی هر اکانت بزن تا وارد «حالت زنده» بشی — بدون نیاز به کد تلگرام.</p>
+      <div id="accounts-list" class="accounts-list">در حال بارگذاری...</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    async function loadAccounts() {
+      const me = await requireAuth();
+      if (!me) return;
+      try {
+        const data = await apiCall('GET', '/api/user/accounts');
+        renderAccounts(data.items || []);
+      } catch (err) {
+        document.getElementById('accounts-list').textContent = 'خطا: ' + err.message;
+      }
+    }
+    function renderAccounts(items) {
+      const c = document.getElementById('accounts-list');
+      if (!items.length) {
+        c.innerHTML = '<p class="hint">شما هنوز هیچ اکانت سلف‌باتی ندارید. در تلگرام با ربات /start بزن و اکانت اضافه کن.</p>';
+        return;
+      }
+      c.innerHTML = '';
+      for (const a of items) {
+        const div = document.createElement('div');
+        div.className = 'acc-item ' + (a.disabled ? 'stopped' : a.state);
+        const stateLabel = {
+          'ready': '✅ متصل',
+          'starting': '⏳ در حال راه‌اندازی',
+          'pending': '⏸ در انتظار',
+          'stopped': '⏹ متوقف',
+          'unknown': '❓ نامشخص',
+        }[a.state] || a.state;
+        div.innerHTML = `
+          <div class="acc-name">${escapeHtml(a.name)}</div>
+          <div class="acc-meta">tag: <code>${a.tag}</code> · ${stateLabel} · ${a.note || ''}</div>
+          <button class="primary" data-tag="${a.tag}">ورود به اکانت →</button>
+        `;
+        div.querySelector('button').addEventListener('click', async () => {
+          try {
+            await apiCall('POST', '/api/user/live-session', {tag: a.tag});
+            window.location.href = 'live.html?tag=' + encodeURIComponent(a.tag);
+          } catch (err) {
+            alert('خطا: ' + err.message);
+          }
+        });
+        c.appendChild(div);
+      }
+    }
+    document.addEventListener('DOMContentLoaded', loadAccounts);
+  </script>
+</body>
+</html>

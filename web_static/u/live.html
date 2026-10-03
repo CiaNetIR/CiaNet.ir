@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiaNet — حالت زنده</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">CiaNet</div>
+    <div class="nav-items">
+      <a href="dashboard.html">داشبورد</a>
+      <a href="accounts.html">🤖 اکانت‌ها</a>
+      <a href="wallet.html">💰 کیف پول</a>
+      <button id="logout-btn" class="link-btn">خروج</button>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="card">
+      <h2>🎮 حالت زنده</h2>
+      <div id="live-info">در حال بارگذاری...</div>
+    </div>
+
+    <div class="card">
+      <h2>⚡ اقدامات سریع</h2>
+      <p class="hint">در نسخه‌های بعدی قابلیت‌های بیشتری اضافه می‌شود: ارسال پیام، مشاهده چت‌ها، تنظیم پروکسی و...</p>
+      <button id="stop-btn" class="primary" style="background:#dc2626">خروج از حالت زنده</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    async function loadLive() {
+      const me = await requireAuth();
+      if (!me) return;
+      try {
+        const info = await apiCall('GET', '/api/user/live-session');
+        document.getElementById('live-info').innerHTML = `
+          <div class="info-grid">
+            <div><span>🏷️ تگ:</span> <code>${info.tag}</code></div>
+            <div><span>👤 نام:</span> <code>${escapeHtml(info.name)}</code></div>
+            <div><span>🆔 آیدی تلگرام:</span> <code>${info.tg_user_id || '—'}</code></div>
+            <div><span>📞 تلفن:</span> <code>${info.phone || '—'}</code></div>
+            <div><span>📊 وضعیت:</span> <code>${info.disabled ? 'متوقف' : 'فعال'}</code></div>
+            <div><span>⏱ شروع live:</span> <code>${new Date(info.live_started_at * 1000).toLocaleString('fa-IR')}</code></div>
+          </div>
+        `;
+      } catch (err) {
+        document.getElementById('live-info').textContent = 'خطا: ' + err.message;
+      }
+    }
+    document.getElementById('stop-btn').addEventListener('click', async () => {
+      try {
+        await apiCall('POST', '/api/user/live-session/stop');
+        window.location.href = 'accounts.html';
+      } catch (err) {
+        alert('خطا: ' + err.message);
+      }
+    });
+    document.addEventListener('DOMContentLoaded', loadLive);
+  </script>
+</body>
+</html>
