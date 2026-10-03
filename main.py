@@ -15725,7 +15725,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.6.4"
+BUILD_VERSION = "2026-10-03-v2.6.5"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -17123,8 +17123,10 @@ def _first_account_creds(cfg: dict):
         ):
             return acc["api_id"], acc["api_hash"]
     # PATCH (v2.0.10): env fallback برای bootstrap از deadlock
-    env_api_id = os.environ.get("CIANET_API_ID", "").strip()
-    env_api_hash = os.environ.get("CIANET_API_HASH", "").strip()
+    # PATCH (v2.6.5 CRITICAL): همچنین API_ID / API_HASH چون نصب‌ها از این
+    # نام‌ها استفاده می‌کنن (install_service.sh، quick_install.sh).
+    env_api_id = os.environ.get("CIANET_API_ID", "").strip() or os.environ.get("API_ID", "").strip()
+    env_api_hash = os.environ.get("CIANET_API_HASH", "").strip() or os.environ.get("API_HASH", "").strip()
     if env_api_id and env_api_hash:
         try:
             return int(env_api_id), env_api_hash
@@ -22291,18 +22293,21 @@ async def _run_all_accounts(cfg: dict) -> None:
     # Runtimeِ SelfBotها cancel می‌شوند. ترجیح با saas_bot.py است؛ اگر آن
     # فایل هنوز آپلود نشده، به admin_bot.py برمی‌گردد.
     mgmt_task = None
-    if cfg:
+    # PATCH (v2.6.5 CRITICAL): ربات مدیریت باید همیشه استارت بشه، حتی اگه
+    # هیچ اکانتی در config نباشه — تا OWNER بتونه از ربات تلگرام اکانت
+    # اضافه کنه. قبلاً `if cfg:` این رو block می‌کرد وقتی config خالی بود
+    # (cfg = {} → if cfg: → False). حالا همیشه اجرا می‌شه.
+    try:
+        mgmt_task = asyncio.create_task(run_saas_bot_forever(sys.modules[__name__]))
+    except ImportError:
         try:
-            mgmt_task = asyncio.create_task(run_saas_bot_forever(sys.modules[__name__]))
+            mgmt_task = asyncio.create_task(run_admin_bot_forever(sys.modules[__name__]))
         except ImportError:
-            try:
-                mgmt_task = asyncio.create_task(run_admin_bot_forever(sys.modules[__name__]))
-            except ImportError:
-                pass
-            except Exception as e:
-                print(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+            pass
         except Exception as e:
-            print(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+            print(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
+    except Exception as e:
+        print(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
 
     # ربات کمکی (helper) از فایلِ جداگانه‌ی helper.py بالا می‌آید — اسپاون
     # در همان ابتدای main() انجام می‌شود (نه اینجا)، تا همه‌ی مسیرهای اجرا
