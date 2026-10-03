@@ -9348,10 +9348,13 @@ class SaaSBot:
         # Ⅳ سیستم
         # PATCH (audit-7): «💼 کیف پول USDT» handler نداشت؛ حذف شد تا وقتی
         # که `owner_set_wallet` به‌عنوان alias پیاده‌سازی شود.
+        # PATCH (v2.0.8): دکمه‌ی «🔄 آپدیت و ورژن» فقط برای OWNER اضافه شد.
         sec4 = [
             UI.go("📢 کانال عضویت", "owner_channel_set", primary=True),
             UI.go("💾 بکاپ و بازیابی", "admin_backup"),
         ]
+        if role == ROLE_OWNER:
+            sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
         # Ⅴ امنیت (فقط OWNER)
         sec5 = []
         if role == ROLE_OWNER:
@@ -10899,6 +10902,361 @@ class SaaSBot:
                 changed = True
         if changed:
             self.sb.save_config(cfg)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  PATCH (v2.0.8): آپدیت خودکار و Rollback — فقط OWNER
+    #  ─────────────────────────────────────────────────────────────────
+    #  این بخش با ماژولِ cianet_updater.py که از قبل موجود بود (ولی به
+    #  main.py متصل نبود) کار می‌کند. ماژول اصلی کارهای آپدیت (git fetch /
+    #  git pull / backup / restart / propagation) را انجام می‌دهد؛ اینجا
+    #  فقط UI و routing برای OWNER اضافه می‌شود.
+    #
+    #  همه‌ی توابع این بخش فقط برای ROLE_OWNER کار می‌کنند — چک صریح
+    #  در callback_h و دوباره در اینجا با `self._role` انجام می‌شود.
+    # ══════════════════════════════════════════════════════════════════
+
+    def _import_updater_safe(self):
+        """
+        cianet_updater.py را به‌صورت lazy import می‌کند تا اگه import
+        شکست خورد (مثلاً git نصب نیست یا فایل حذف شده)، ربات کرش نکند.
+        """
+        try:
+            import cianet_updater
+            return cianet_updater, None
+        except Exception as e:
+            return None, f"❌ cianet_updater import نشد: {type(e).__name__}: {e}"
+
+    async def _show_owner_update(self, event):
+        """
+        صفحه‌ی اصلی «🔄 آپدیت و ورژن»:
+          - ورژن محلی (commit hash و تاریخ)
+          - آخرین commit روی remote
+          - تعداد commit‌های pending
+          - دکمه‌های: چک آپدیت / اعمال آپدیت / لیست نسخه‌های rollback
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+
+        updater, err = self._import_updater_safe()
+        if err:
+            await event.edit(err, buttons=[UI.nav_row()])
+            return
+
+        try:
+            info = updater.get_version_info()
+        except Exception as e:
+            await event.edit(
+                f"❌ خطا در گرفتن اطلاعات ورژن: {type(e).__name__}: {e}",
+                buttons=[UI.nav_row()],
+            )
+            return
+
+        local = info.get("local_commit") or "نامشخص"
+        remote = info.get("remote_commit") or "نامشخص"
+        pending = info.get("pending_commits") or []
+        last_check = info.get("last_check", 0)
+        last_update = info.get("last_update_at", 0)
+
+        # فرمت‌سازی تاریخ‌ها به فارسی
+        def _fmt_ts(ts: int) -> str:
+            if not ts:
+                return "—"
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+                return fa_digits(dt.strftime("%Y/%m/%d %H:%M"))
+            except Exception:
+                return str(ts)
+
+        is_up_to_date = (local == remote) or not pending
+        body = [
+            f"🏷 ورژن محلی: `{local[:8]}`" if local != "نامشخص" else "🏷 ورژن محلی: نامشخص",
+            f"🌐 آخرین ورژن remote: `{remote[:8]}`" if remote != "نامشخص" else "🌐 ورژن remote: نامشخص",
+        ]
+        if is_up_to_date:
+            body.append(f"{UI.GREEN} ✅ آپ‌تو‌دِیت هستی")
+        else:
+            body.append(f"{UI.AMBER} 📥 {fa_digits(len(pending))} commit جدید منتظر apply")
+            for line in pending[:5]:
+                body.append(f"   `{line[:8]}` {line[9:60]}")
+            if len(pending) > 5:
+                body.append(f"   {UI.GRAY}… و {fa_digits(len(pending) - 5)} commit دیگر")
+        body.append("")
+        body.append(f"{UI.GRAY} آخرین چک: {_fmt_ts(last_check)}")
+        body.append(f"{UI.GRAY} آخرین آپدیت: {_fmt_ts(last_update)}")
+
+        buttons = []
+        if not is_up_to_date:
+            buttons.append([UI.confirm("📥 اعمال آپدیت", "owner_update_apply")])
+        buttons.append([UI.go("🔄 چک آپدیت", "owner_update_check")])
+        buttons.append([UI.go("↩️ لیست نسخه‌های قابل rollback", "owner_rollback_list")])
+        buttons.append(UI.nav_row())
+
+        await event.edit(
+            UI.screen("🔄 آپدیت و ورژن",
+                      body=body,
+                      subtitle="آپدیت‌های جدید یا بازگشت به نسخه‌ی قبل.",
+                      hint="📥 اعمال آپدیت → restart خودکار. ↩️ rollback → جایگزینی main.py."),
+            buttons=buttons,
+        )
+
+    async def _owner_check_update(self, event):
+        """دکمه‌ی «🔄 چک آپدیت» — صرفاً دوباره fetch می‌کند و صفحه را refresh."""
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+        try:
+            await event.answer("🔄 در حال چک کردن...")
+        except Exception:
+            pass
+        await self._show_owner_update(event)
+
+    async def _owner_apply_update(self, event):
+        """
+        دکمه‌ی «📥 اعمال آپدیت»:
+        1. backup main.py (به versions/main.py.pre-auto-update.<ts>)
+        2. git pull origin main
+        3. systemctl restart cianet
+        4. بعد از restart، cianet_updater.propagate_to_accounts به‌صورت
+           خودکار اکانت‌ها را enable می‌کند.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+
+        updater, err = self._import_updater_safe()
+        if err:
+            await event.answer(err, alert=True)
+            return
+
+        try:
+            await event.answer("📥 در حال آپدیت... مدت کمی طول می‌کشد.")
+        except Exception:
+            pass
+
+        loop = asyncio.get_event_loop()
+        try:
+            success, msg = await loop.run_in_executor(
+                None, updater.apply_update
+            )
+        except Exception as e:
+            await event.edit(
+                f"❌ خطا در apply_update: {type(e).__name__}: {e}",
+                buttons=[UI.go("🔄 بازگشت", "owner_update"), UI.nav_row()],
+            )
+            return
+
+        if success:
+            await event.edit(
+                UI.screen("✅ آپدیت اعمال شد",
+                          body=[
+                              msg,
+                              "",
+                              f"{UI.GRAY} سرویس در حال restart است.",
+                              f"{UI.GRAY} بعد از بالا آمدن، اکانت‌ها خودکار re-enable می‌شوند.",
+                          ],
+                          subtitle="اگه تا ۳۰ ثانیه دیگر ربات پاسخ نداد، SSH بزن و لاگ رو ببین."),
+                buttons=[UI.nav_row()],
+            )
+        else:
+            await event.edit(
+                f"❌ آپدیت ناموفق بود:\n\n{msg}",
+                buttons=[UI.go("🔄 بازگشت", "owner_update"), UI.nav_row()],
+            )
+
+    async def _owner_show_rollback_list(self, event):
+        """
+        لیست نسخه‌های قابل rollback:
+          - فایل‌های `versions/main.py.pre-auto-update.<ts>` (آپدیت‌های اخیر)
+          - فایل‌های `versions/v*.py` (نسخه‌های قدیمی‌تر)
+          - فایل‌های `versions/stable/*.py`
+        برای هر کدام، دکمه‌ای نشان داده می‌شود تا OWNER بتواند rollback کند.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+
+        import os as _os
+        from pathlib import Path as _Path
+        install_dir = _os.environ.get("CIANET_INSTALL_DIR", _os.path.dirname(_os.path.abspath(__file__)))
+        versions_dir = _Path(install_dir) / "versions"
+
+        try:
+            candidates = []
+            if versions_dir.exists():
+                # ۱. فایل‌های pre-auto-update.<ts>
+                for f in sorted(versions_dir.glob("main.py.pre-auto-update.*"), reverse=True):
+                    if f.is_file():
+                        try:
+                            size = f.stat().st_size
+                        except Exception:
+                            size = 0
+                        candidates.append((f.name, "backup خودکار", f, size))
+                # ۲. فایل‌های v*.py (نسخه‌های قدیمی‌تر)
+                for f in sorted(versions_dir.glob("v*.py"), reverse=True):
+                    if f.is_file():
+                        try:
+                            size = f.stat().st_size
+                        except Exception:
+                            size = 0
+                        candidates.append((f.name, "نسخه‌ی قدیمی", f, size))
+                # ۳. versions/stable/*.py
+                stable = versions_dir / "stable"
+                if stable.exists():
+                    for f in sorted(stable.glob("*.py"), reverse=True):
+                        if f.is_file():
+                            try:
+                                size = f.stat().st_size
+                            except Exception:
+                                size = 0
+                            candidates.append((f"stable/{f.name}", "stable", f, size))
+        except Exception as e:
+            await event.edit(
+                f"❌ خطا در لیست نسخه‌ها: {type(e).__name__}: {e}",
+                buttons=[UI.nav_row()],
+            )
+            return
+
+        if not candidates:
+            body = [
+                f"{UI.GRAY} هنوز هیچ نسخه‌ی پشتیبان یا قدیمی موجود نیست.",
+                "",
+                f"{UI.GRAY} بعد از اولین آپدیت، فایل main.py قبل از آپدیت در",
+                f"{UI.GRAY} پوشه‌ی versions/ ذخیره می‌شود و قابل rollback خواهد بود.",
+            ]
+            buttons = [UI.nav_row()]
+            await event.edit(
+                UI.screen("↩️ Rollback", body=body,
+                          subtitle="هیچ نسخه‌ی پشتیبان موجود نیست."),
+                buttons=buttons,
+            )
+            return
+
+        shown = candidates[:10]
+        body = [
+            f"📦 {fa_digits(len(candidates))} نسخه‌ی قابل rollback موجود:",
+            "",
+        ]
+        buttons = []
+        for name, kind, path, size in shown:
+            size_kb = fa_digits(max(1, size // 1024))
+            body.append(f"• `{name}` ({size_kb} KB) — {kind}")
+            import urllib.parse as _up
+            encoded = _up.quote(name, safe="")
+            buttons.append([UI.danger(f"↩️ {name}", f"owner_rollback_go:{encoded}")])
+        if len(candidates) > 10:
+            body.append(f"{UI.GRAY} … و {fa_digits(len(candidates) - 10)} مورد دیگر")
+        buttons.append(UI.nav_row())
+
+        await event.edit(
+            UI.screen("↩️ Rollback به نسخه",
+                      body=body,
+                      subtitle="روی هر کدام بزن تا main.py جایگزین شود.",
+                      hint="⚠️ قبل از rollback، main.py فعلی به‌صورت خودکار backup می‌شود."),
+            buttons=buttons,
+        )
+
+    async def _owner_rollback_go(self, event, encoded_name: str):
+        """
+        اجرای rollback: جایگزینی main.py با نسخه‌ی انتخاب‌شده.
+        قبل از جایگزینی، main.py فعلی به‌صورت خودکار به
+        versions/main.py.pre-rollback.<ts> backup می‌شود.
+        بعد از جایگزینی، systemctl restart cianet.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+
+        import urllib.parse as _up
+        import os as _os
+        from pathlib import Path as _Path
+        import shutil as _shutil
+        import time as _time
+
+        name = _up.unquote(encoded_name)
+        install_dir = _os.environ.get("CIANET_INSTALL_DIR", _os.path.dirname(_os.path.abspath(__file__)))
+        versions_dir = _Path(install_dir) / "versions"
+        main_py = _Path(install_dir) / "main.py"
+        if not main_py.exists():
+            main_py = _Path(_os.path.abspath(__file__))
+
+        # پیدا کردن فایلِ مبدا
+        src_path = None
+        candidate1 = versions_dir / name
+        if candidate1.is_file():
+            src_path = candidate1
+        if src_path is None:
+            candidate2 = versions_dir / "stable" / name
+            if candidate2.is_file():
+                src_path = candidate2
+        if src_path is None:
+            # fallback: کل path
+            candidate3 = _Path(name)
+            if candidate3.is_file():
+                src_path = candidate3
+
+        if src_path is None:
+            await event.edit(
+                f"❌ نسخه‌ی `{name}` پیدا نشد.",
+                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+            )
+            return
+
+        # backup main.py فعلی
+        try:
+            ts = int(_time.time())
+            backup_name = f"main.py.pre-rollback.{ts}"
+            backup_path = versions_dir / backup_name
+            versions_dir.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(main_py, backup_path)
+            backup_str = str(backup_path)
+        except Exception as e:
+            await event.edit(
+                f"❌ backup main.py قبل از rollback ناموفق: {e}",
+                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+            )
+            return
+
+        # جایگزینی
+        try:
+            _shutil.copy2(src_path, main_py)
+        except Exception as e:
+            try:
+                _shutil.copy2(backup_path, main_py)
+            except Exception:
+                pass
+            await event.edit(
+                f"❌ جایگزینی ناموفق: {e}\n\nmain.py به حالت قبل برگردانده شد.",
+                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+            )
+            return
+
+        # restart
+        try:
+            import subprocess as _sp
+            _sp.Popen(
+                ["systemctl", "restart", "cianet"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            restart_msg = "🔄 سرویس در حال restart..."
+        except Exception as e:
+            restart_msg = f"⚠️ restart ناموفق (دستی بزن): {e}"
+
+        await event.edit(
+            UI.screen("✅ Rollback انجام شد",
+                      body=[
+                          f"✅ main.py با `{name}` جایگزین شد.",
+                          f"📦 backupِ نسخه‌ی قبلی: `{backup_name}`",
+                          "",
+                          restart_msg,
+                          "",
+                          f"{UI.GRAY} اگه بعد از restart مشکلی دیدی، باز از همین منو",
+                          f"{UI.GRAY} rollback کن و `{backup_name}` را انتخاب کن.",
+                      ],
+                      subtitle="روی نسخه‌ی پشتیبان، دوباره rollback کن تا برگردی."),
+            buttons=[UI.nav_row()],
+        )
 
     async def _owner_review_payment(self, event, payment_id: int, approve: bool,
                                     from_notif: bool = False):
@@ -13680,6 +14038,24 @@ class SaaSBot:
                     return
                 if data == "admin_backup" and role == ROLE_OWNER:
                     await self._admin_show_backup_hub(event)
+                    return
+                # PATCH (v2.0.8): آپدیت خودکار و rollback — فقط OWNER
+                if data == "owner_update" and role == ROLE_OWNER:
+                    await self._show_owner_update(event)
+                    return
+                if data == "owner_update_check" and role == ROLE_OWNER:
+                    await self._owner_check_update(event)
+                    return
+                if data == "owner_update_apply" and role == ROLE_OWNER:
+                    await self._owner_apply_update(event)
+                    return
+                if data == "owner_rollback_list" and role == ROLE_OWNER:
+                    await self._owner_show_rollback_list(event)
+                    return
+                if data.startswith("owner_rollback_go:") and role == ROLE_OWNER:
+                    # فرمت: owner_rollback_go:{urlencoded_name}
+                    encoded_name = data[len("owner_rollback_go:"):]
+                    await self._owner_rollback_go(event, encoded_name)
                     return
                 if data == "owner_users" and role in (ROLE_OWNER, ROLE_ADMIN):
                     await self._owner_show_users(event)
