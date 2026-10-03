@@ -10896,14 +10896,10 @@ class SaaSBot:
                 UI.go("📊 وضعیت", _act("status")),
             ],
         ]
-        # PATCH (v2.6.3): دکمه‌های 2FA/دستگاه‌ها فقط برای OWNER و مجوز خاص
-        # کاربر عادی نباید ببینه — فقط مالک اصلی یا کسایی که CAP_ACCOUNT_SECURITY دارن
+        # PATCH (v2.6.3): دکمه‌های 2FA/دستگاه‌ها فقط برای OWNER
+        # کاربر عادی نباید ببینه — فقط مالک اصلی
         viewer_role = self._role(event.sender_id)
-        can_sec = viewer_role == ROLE_OWNER or bool(
-            get_active_grants(event.sender_id, CAP_ACCOUNT_SECURITY)
-            if hasattr(self, 'sb') else False
-        )
-        if can_sec:
+        if viewer_role == ROLE_OWNER:
             buttons.append([
                 UI.go("📨 ارسال پیام", _act("send")),
                 UI.go("🔒 دستگاه‌ها/2FA", _act("sess")),
