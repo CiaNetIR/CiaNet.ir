@@ -6344,15 +6344,6 @@ class AdminBot:
             )
             return
 
-        # عملیات تأیید شد → اجرای عملیات اصلی با ساختن callback data مجازی
-        # ساده‌ترین راه: دوباره فراخوانی همان هندلر اصلی با data بدون antiban.
-        # اما چون هندلرها بر اساس event.data تصمیم می‌گیرند، ما خودشان را
-        # با event.data جدید فراخوانی می‌کنیم.
-        new_data = f"{action}:{tag}"
-        if action == "sesskill":
-            new_data = f"sesskill:{tag}"  # عملیات sesskill به لیست انتخاب نیاز دارد
-        # برای سادگی، فقط به صفحه‌ی مربوطه هدایت می‌کنیم و پیام می‌دهیم
-        # که تأیید ثبت شد.
         # عملیات تأیید شد → اجرای عملیات اصلی. PATCH (antiban-loop): تا
         # قبلش، این متدها دوباره antiban_guarded_action را صدا می‌زدند و
         # چون کاربر non-owner است و اکانت dangerous است، یک token تازه
@@ -11074,7 +11065,9 @@ class SaaSBot:
             panel_status = "❓ (امکان بررسی نبود)"
 
         # وضعیت service cianet-tunnel (اگه هست — از v2.1.6)
-        tunnel_status = "نصب نشده"
+        # PATCH (v2.2.0): تمایز بین "نصب نشده" (returncode ۳/۴ از systemctl)
+        # و "غیرفعال" (returncode ۱). قبلاً هر دو رو "غیرفعال" نشون می‌دادیم.
+        tunnel_status = "نامشخص"
         try:
             import subprocess as _sp
             r = _sp.run(
@@ -11083,7 +11076,11 @@ class SaaSBot:
             )
             if r.returncode == 0:
                 tunnel_status = "✅ متصل" if r.stdout.strip() == "active" else f"⚠️ {r.stdout.strip()}"
+            elif r.returncode == 3 or r.returncode == 4:
+                # exit 3 = unit is masked or not found; exit 4 = not loaded
+                tunnel_status = "نصب نشده"
             else:
+                # exit 1 = inactive; exit 2 = failed
                 tunnel_status = "غیرفعال"
         except Exception:
             tunnel_status = "❓"
@@ -15422,7 +15419,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-08-01-connguard2"
+BUILD_VERSION = "2026-10-03-v2.2.0"
 
 # ══════════════════════════════════════════════════════════
 #  مسیرها و فایل‌های تنظیمات
@@ -16013,6 +16010,78 @@ def _active_runtime_tags() -> list:
 async def wait_ready(tag: str, timeout: float = ACCOUNT_START_POLL_TIMEOUT) -> tuple:
     """همان _await_account_ready — منتظر READY واقعی."""
     return await _await_account_ready(tag, timeout)
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  PATCH (v2.2.0): Hooks برای cianet_updater.py
+#  ─────────────────────────────────────────────────────────────────────
+#  cianet_updater در apply_update() و propagate_to_accounts() این دو
+#  تابع رو import می‌کنه. قبلاً وجود نداشتن → graceful disable قبل از
+#  update کار نمی‌کرد و re-enable بعد از restart هم نشده بود.
+#  حالا هر دو پیاده‌سازی شدن.
+# ─────────────────────────────────────────────────────────────────────
+
+async def _disable_all_accounts_for_update() -> None:
+    """
+    قبل از `git pull` صدا زده می‌شه — همه‌ی اکانت‌های running رو
+    gracefully stop می‌کنه تا بعد از restart با configuration تازه
+    دوباره start بشن.
+
+    این تابع در cianet_updater.apply_update فراخوانی می‌شه.
+    """
+    try:
+        cfg = load_config()
+        # tagهای فعال رو (نه disabled) پیدا کن و stop کن
+        for tag, acc in cfg.items():
+            if not isinstance(acc, dict):
+                continue
+            if acc.get("disabled"):
+                continue
+            try:
+                await ensure_stopped(tag, "update.disable_all")
+            except Exception as e:
+                print(f"⚠️ [{tag}] stop قبل از update ناموفق (continue): {e}")
+    except Exception as e:
+        print(f"⚠️ [update] _disable_all_accounts_for_update ناموفق: {e}")
+
+
+async def _reenable_all_accounts_after_update() -> str:
+    """
+    بعد از restart صدا زده می‌شه — اکانت‌هایی که `disabled_reason=
+    subscription_expired` نیستن ولی متوقف شدن، رو دوباره start می‌کنه.
+
+    تفاوت با resume معمولی: این تابع فقط برای propagation بعد از update
+    استفاده می‌شه و یه گزارش متنی برمی‌گردونه.
+
+    برمی‌گرداند: خلاصه‌ی متن برای notification به OWNER.
+    """
+    try:
+        cfg = load_config()
+        started = 0
+        skipped_disabled = 0
+        skipped_no_cfg = 0
+        for tag, acc in cfg.items():
+            if not isinstance(acc, dict):
+                continue
+            if acc.get("disabled"):
+                # اگر disabled_reason از نوع subscription_expired هست،
+                # re-enable نکن. ولی اگر manual یا auto_ban_counter هست،
+                # پس از update باید دوباره start بشن.
+                reason = acc.get("disabled_reason")
+                if reason == "subscription_expired":
+                    skipped_disabled += 1
+                    continue
+            try:
+                ready, status = await ensure_started(tag, acc, caller="update.reenable")
+                if ready:
+                    started += 1
+                else:
+                    print(f"⚠️ [{tag}] reenable ناموفق: {status}")
+            except Exception as e:
+                print(f"⚠️ [{tag}] reenable exception: {e}")
+        return f"اکانت‌های re-enable شده: {started} · skip‌شده (disabled): {skipped_disabled}"
+    except Exception as e:
+        return f"خطا در _reenable_all_accounts_after_update: {e}"
 
 
 async def ensure_stopped(tag: str, caller: str = "?") -> bool:
@@ -21121,6 +21190,20 @@ class SelfBot:
         await self._cancel_background_tasks(destructive_tabchi=False)
 
     async def stop(self):
+        # PATCH (v2.2.0 REGRESSION FIX): re-add None-check که در commit
+        # 59a8baf (revert to v2.0) حذف شده بود ولی commit message صریحاً
+        # نوشته بود «can be re-applied on top of v2.0 in a future commit
+        # if needed». حالا re-apply می‌کنیم چون بدون این check، اگر
+        # start() شکست بخوره و self.client = None بمونه، stop() در هر
+        # finally بلوک ۳ AttributeError لاگ می‌کنه (disconnect, save,
+        # close) و خطاهای نمایشی در journalctl تولید می‌کنه.
+        if self.client is None:
+            # تسک‌های پس‌زمینه‌ی مربوط به اکانت ممکنه هنوز زنده باشن —
+            # بدون اطمینان از cancel شدنشون، تسک‌های مرده روی event loop
+            # باقی می‌مونن.
+            await self._cancel_background_tasks(destructive_tabchi=True)
+            self._clear_tracker_cache()
+            return
         self.enabled = self.time_enabled = self.online_enabled = self.bio_enabled = False
         # توقفِ مشترکِ تسک‌های پس‌زمینه — destructive_tabchi=True چون shutdown
         # عادی است (پاک‌سازیِ کامل تبچی + حذف رسانه از دیسک).
@@ -21434,7 +21517,29 @@ async def _run_all_accounts(cfg: dict) -> None:
     دفاع دوم (لایه‌ی امنیتی): حتی اگر از مسیر دیگری صدا زده شود، قبل از
     استارتِ SelfBotها env ربات مدیریت (SaaS) اعتبارسنجی می‌شود؛ اگر ناقص
     باشد هیچ سرویسی بالا نمی‌آید.
+
+    PATCH (v2.2.0): propagate_to_accounts — اگر قبل از restart یک آپدیت
+    apply شده باشه (pending_propagation=True در state file)، اکانت‌ها
+    re-enable می‌شن و OWNER notify می‌شه.
     """
+    # PATCH (v2.2.0): propagation check — اگه قبل از restart یک آپدیت
+    # apply شده باشه، cianet_updater در state file علامت گذاشته و حالا
+    # وقت re-enable کردن اکانت‌هاست.
+    try:
+        from cianet_updater import propagation_marker_present, propagate_to_accounts
+        if propagation_marker_present():
+            print("🔄 [update] propagation marker پیدا شد — re-enabling accounts...")
+            try:
+                report = await propagate_to_accounts(admin_bot=None)
+                print(f"✅ [update] propagation done: {report}")
+            except Exception as e:
+                print(f"⚠️ [update] propagation ناموفق: {e}")
+    except ImportError:
+        # cianet_updater در نصب‌های قدیمی نیست — skip
+        pass
+    except Exception as e:
+        print(f"⚠️ [update] propagation check ناموفق: {e}")
+
     problems = _validate_saas_env()
     if problems:
         print("❌ راه‌اندازی SelfBotها متوقف شد — متغیرهای محیطی ربات مدیریت ناقص‌اند:")
@@ -21457,6 +21562,13 @@ async def _run_all_accounts(cfg: dict) -> None:
     # هر tag فقط یک Runtime ساخته شود.
     start_tasks = []
     for t, c in cfg.items():
+        # PATCH (v2.2.0): guard against non-dict entries in config.json —
+        # اگر فایل JSON به‌صورت دستی خراب شده باشه و یکی از مقادیر dict
+        # نباشه، c.get("disabled") AttributeError می‌داد و کل startup
+        # شکست می‌خورد. حالا فقط لاگ می‌کنه و skip می‌کنه.
+        if not isinstance(c, dict):
+            print(f"⚠️ [{t}] ورودی در config.json معتبر نیست (dict نیست) — skip شد")
+            continue
         if c.get("disabled"):
             print(f"⏸ [{t}] این اکانت غیرفعال‌شده (disabled) است — لانچ نمی‌شود")
             continue
