@@ -4895,6 +4895,11 @@ WIZ_TAG = "awaiting_tag"
 WIZ_PHONE = "awaiting_phone"
 WIZ_CODE = "awaiting_code"
 WIZ_PASSWORD = "awaiting_password"
+# PATCH (v2.6.2): wizard states برای تغییر/حذف رمز 2FA و تغییر ایمیل
+WIZ_2FA_OLD_PASS = "awaiting_2fa_old_pass"
+WIZ_2FA_NEW_PASS = "awaiting_2fa_new_pass"
+WIZ_2FA_NEW_HINT = "awaiting_2fa_new_hint"
+WIZ_2FA_EMAIL = "awaiting_2fa_email"
 # مراحل ویزارد «تنظیم پروکسی» (هم برای لاگین اکانت جدید، هم برای اکانت موجود)
 WIZ_PROXY_ADDR = "awaiting_proxy_addr"
 WIZ_PROXY_PORT = "awaiting_proxy_port"
@@ -6612,6 +6617,10 @@ class AdminBot:
             entry_for_antiban3 = self.sb.ACCOUNTS.get(tag)
             if entry_for_antiban3 and is_dangerous_account(entry_for_antiban3.acc):
                 antiban_mark3 = " 🛡️"
+            # PATCH (v2.6.2): دکمه‌های تغییر/حذف رمز و ایمیل
+            buttons.append([UI.go("🔑 تغییر رمز", f"tfachange:{tag}")])
+            buttons.append([UI.go("🗑 حذف رمز", f"tfaremove:{tag}", tone="danger")])
+            buttons.append([UI.go("📧 تغییر ایمیل", f"tfaemail:{tag}")])
             buttons.append([UI.danger(
                 f"درخواست بازنشانی رمز{antiban_mark3}", f"tfareset:{tag}")])
         buttons.append([UI.refresh(f"tfa:{tag}")])
@@ -6667,6 +6676,159 @@ class AdminBot:
                 [UI.neutral("انصراف", f"tfa:{tag}")],
             ],
         )
+
+    async def _start_2fa_change_wizard(self, event, tag: str, mode: str = "change"):
+        """شروع ویزارد تغییر/حذف رمز 2FA — از کاربر رمز قدیم را می‌گیرد."""
+        entry, ok = await self._sess_guard(event, tag)
+        if not entry:
+            return
+        self.wizards[event.sender_id] = {
+            "state": WIZ_2FA_OLD_PASS,
+            "data": {"tag": tag, "mode": mode, "back": f"tfa:{tag}"},
+        }
+        title = "🔑 تغییر رمز دو مرحله‌ای" if mode == "change" else "🗑 حذف رمز دو مرحله‌ای"
+        await event.respond(
+            f"**{title}**\n\nرمز فعلی را بفرست:\n"
+            f"(برای امنیت، پیام شما پس از استفاده حذف می‌شود)",
+            buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+        )
+
+    async def _start_2fa_email_wizard(self, event, tag: str):
+        """شروع ویزارد تغییر ایمیل بازیابی 2FA — از کاربر رمز فعلی + ایمیل جدید را می‌گیرد."""
+        entry, ok = await self._sess_guard(event, tag)
+        if not entry:
+            return
+        self.wizards[event.sender_id] = {
+            "state": WIZ_2FA_OLD_PASS,
+            "data": {"tag": tag, "mode": "email", "back": f"tfa:{tag}"},
+        }
+        await event.respond(
+            "**📧 تغییر ایمیل بازیابی**\n\nرمز فعلی را بفرست:\n"
+            "(برای امنیت، پیام شما پس از استفاده حذف می‌شود)",
+            buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+        )
+
+    async def _handle_2fa_wizard(self, event, wiz: dict):
+        """مدیریت مراحل ویزارد تغییر/حذف رمز 2FA و تغییر ایمیل."""
+        state = wiz["state"]
+        data = wiz["data"]
+        text = (event.raw_text or "").strip()
+        tag = data["tag"]
+        mode = data.get("mode", "change")
+
+        # حذف پیام کاربر (رمز/ایمیل) برای امنیت
+        try:
+            await event.message.delete()
+        except Exception:
+            pass
+
+        entry = self.sb.ACCOUNTS.get(tag)
+        if not entry:
+            await event.respond("❌ اکانت دیگر روشن نیست.")
+            self.wizards.pop(event.sender_id, None)
+            return
+
+        if state == WIZ_2FA_OLD_PASS:
+            data["old_pass"] = text
+            if mode == "change":
+                wiz["state"] = WIZ_2FA_NEW_PASS
+                await event.respond(
+                    "رمز جدید را بفرست:\n(خالی = حذف رمز، فقط «حذف» بنویس)",
+                    buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                )
+            elif mode == "remove":
+                # مستقیم حذف کن
+                await self._execute_2fa_change(event, tag, data, new_pass="", hint="")
+            elif mode == "email":
+                wiz["state"] = WIZ_2FA_EMAIL
+                await event.respond(
+                    "📧 ایمیل بازیابی جدید را بفرست:\n(خالی = حذف ایمیل، فقط «حذف» بنویس)",
+                    buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                )
+            return
+
+        if state == WIZ_2FA_NEW_PASS:
+            if text.lower() in ("حذف", "delete", ""):
+                await self._execute_2fa_change(event, tag, data, new_pass="", hint="")
+            else:
+                data["new_pass"] = text
+                wiz["state"] = WIZ_2FA_NEW_HINT
+                await event.respond(
+                    "💡 راهنمای رمز (اختیاری) — خالی بفرست تا بدون راهنما باشد:",
+                    buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                )
+            return
+
+        if state == WIZ_2FA_NEW_HINT:
+            hint = text if text.lower() not in ("خالی", "بدون", "no", "-") else ""
+            await self._execute_2fa_change(event, tag, data,
+                                           new_pass=data.get("new_pass", ""), hint=hint)
+            return
+
+        if state == WIZ_2FA_EMAIL:
+            email = text if text.lower() not in ("حذف", "delete", "") else ""
+            await self._execute_2fa_email_change(event, tag, data, email=email)
+            return
+
+    async def _execute_2fa_change(self, event, tag: str, data: dict, new_pass: str, hint: str):
+        """اجرای تغییر/حذف رمز 2FA."""
+        self.wizards.pop(event.sender_id, None)
+        entry = self.sb.ACCOUNTS.get(tag)
+        if not entry:
+            await event.respond("❌ اکانت روشن نیست.")
+            return
+        await event.respond("⏳ در حال اعمال تغییرات...")
+        try:
+            res = await entry.bot.change_2fa_password(
+                old_pass=data.get("old_pass", ""),
+                new_pass=new_pass,
+                hint=hint,
+            )
+            if res.get("ok"):
+                if res.get("action") == "removed":
+                    await event.respond("✅ رمز دو مرحله‌ای حذف شد.")
+                else:
+                    await event.respond("✅ رمز دو مرحله‌ای تغییر کرد.")
+                log_action(event.sender_id, "2fa_password_changed",
+                           f"tag={tag} action={res.get('action', 'changed')}")
+            else:
+                err = res.get("error", "unknown")
+                msg = {
+                    "invalid_password": "❌ رمز فعلی اشتباه است.",
+                    "no_password": "❌ رمزی روی این اکانت فعال نیست.",
+                }.get(err, f"❌ خطا: {err}")
+                await event.respond(msg)
+        except Exception as e:
+            await event.respond(f"❌ خطا: {type(e).__name__}")
+
+    async def _execute_2fa_email_change(self, event, tag: str, data: dict, email: str):
+        """اجرای تغییر ایمیل بازیابی 2FA."""
+        self.wizards.pop(event.sender_id, None)
+        entry = self.sb.ACCOUNTS.get(tag)
+        if not entry:
+            await event.respond("❌ اکانت روشن نیست.")
+            return
+        await event.respond("⏳ در حال اعمال تغییرات...")
+        try:
+            res = await entry.bot.change_2fa_email(
+                old_pass=data.get("old_pass", ""),
+                new_email=email,
+            )
+            if res.get("ok"):
+                if email:
+                    await event.respond(f"✅ ایمیل بازیابی به‌روزرسانی شد: {email}")
+                else:
+                    await event.respond("✅ ایمیل بازیابی حذف شد.")
+                log_action(event.sender_id, "2fa_email_changed", f"tag={tag}")
+            else:
+                err = res.get("error", "unknown")
+                msg = {
+                    "invalid_password": "❌ رمز فعلی اشتباه است.",
+                    "no_password": "❌ رمزی روی این اکانت فعال نیست.",
+                }.get(err, f"❌ خطا: {err}")
+                await event.respond(msg)
+        except Exception as e:
+            await event.respond(f"❌ خطا: {type(e).__name__}")
 
     async def _do_2fa_reset(self, event, tag: str, skip_antiban: bool = False):
         """اجرای درخواست بازنشانی، بازخوانیِ وضعیت از تلگرام، و گزارش."""
@@ -7873,6 +8035,11 @@ class AdminBot:
             await self._finish_add_account(event, data)
             return
 
+        # PATCH (v2.6.2): 2FA wizard states
+        if state in (WIZ_2FA_OLD_PASS, WIZ_2FA_NEW_PASS, WIZ_2FA_NEW_HINT, WIZ_2FA_EMAIL):
+            await self._handle_2fa_wizard(event, wiz)
+            return
+
     async def _finish_add_account(self, event, data: dict):
         tag = data["tag"]
         temp_client: TelegramClient = data["temp_client"]
@@ -8235,6 +8402,12 @@ class AdminBot:
                 await self._show_2fa(event, data.split(":", 1)[1])
             elif data.startswith("tfareset:"):
                 await self._confirm_2fa_reset(event, data.split(":", 1)[1])
+            elif data.startswith("tfachange:"):
+                await self._start_2fa_change_wizard(event, data.split(":", 1)[1], mode="change")
+            elif data.startswith("tfaremove:"):
+                await self._start_2fa_change_wizard(event, data.split(":", 1)[1], mode="remove")
+            elif data.startswith("tfaemail:"):
+                await self._start_2fa_email_wizard(event, data.split(":", 1)[1])
             elif data.startswith("tfago:"):
                 await self._do_2fa_reset(event, data.split(":", 1)[1])
             elif data.startswith("tfacancel:"):
@@ -15546,7 +15719,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.6.1"
+BUILD_VERSION = "2026-10-03-v2.6.2"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -19235,6 +19408,111 @@ class SelfBot:
             return True
         except Exception:
             return False
+
+    # PATCH (v2.6.2): تغییر یا حذف رمز 2FA با دانستن رمز فعلی
+    async def change_2fa_password(self, old_pass: str, new_pass: str = "", hint: str = "") -> dict:
+        """
+        تغییر یا حذف رمز دو مرحله‌ای با رمز فعلی.
+
+        Args:
+            old_pass: رمز فعلی (الزامی)
+            new_pass: رمز جدید (خالی = حذف رمز)
+            hint: راهنمای رمز جدید (اختیاری)
+
+        Returns:
+            {"ok": True, "action": "changed"|"removed"} یا {"ok": False, "error": "..."}
+        """
+        from telethon.tl.functions.account import UpdatePasswordSettingsRequest
+        from telethon.tl.types import account
+        from telethon.password import compute_check, compute_password_hash
+        try:
+            pw_info = await asyncio.wait_for(
+                self.client(GetPasswordRequest()), timeout=25
+            )
+            if not pw_info or not pw_info.has_password:
+                return {"ok": False, "error": "no_password"}
+
+            old_check = compute_check(pw_info, old_pass)
+            if old_check is None:
+                return {"ok": False, "error": "invalid_password"}
+
+            if not new_pass:
+                # حذف رمز
+                new_settings = account.PasswordInputSettings(
+                    flags=0,
+                    new_password_hash=None,
+                    new_hint=None,
+                    new_email=None,
+                )
+            else:
+                new_hash = compute_password_hash(pw_info.new_algo, new_pass)
+                new_settings = account.PasswordInputSettings(
+                    flags=3,  # hash + hint
+                    new_password_hash=new_hash,
+                    new_hint=hint if hint else None,
+                    new_email=None,
+                )
+
+            await asyncio.wait_for(
+                self.client(UpdatePasswordSettingsRequest(
+                    password=old_check,
+                    new_settings=new_settings,
+                )),
+                timeout=25
+            )
+            return {"ok": True, "action": "removed" if not new_pass else "changed"}
+
+        except Exception as e:
+            if 'PASSWORD_HASH_INVALID' in str(e).upper():
+                return {"ok": False, "error": "invalid_password"}
+            return {"ok": False, "error": type(e).__name__, "raw": str(e)[:120]}
+
+    # PATCH (v2.6.2): تغییر یا حذف ایمیل بازیابی 2FA
+    async def change_2fa_email(self, old_pass: str, new_email: str = "") -> dict:
+        """
+        تغییر یا حذف ایمیل بازیابی 2FA.
+
+        Args:
+            old_pass: رمز فعلی (الزامی)
+            new_email: ایمیل جدید (خالی = حذف ایمیل)
+
+        Returns:
+            {"ok": True} یا {"ok": False, "error": "..."}
+        """
+        from telethon.tl.functions.account import UpdatePasswordSettingsRequest
+        from telethon.tl.types import account
+        from telethon.password import compute_check
+        try:
+            pw_info = await asyncio.wait_for(
+                self.client(GetPasswordRequest()), timeout=25
+            )
+            if not pw_info or not pw_info.has_password:
+                return {"ok": False, "error": "no_password"}
+
+            old_check = compute_check(pw_info, old_pass)
+            if old_check is None:
+                return {"ok": False, "error": "invalid_password"}
+
+            new_settings = account.PasswordInputSettings(
+                flags=4,  # new_email
+                new_password_hash=None,
+                new_hint=None,
+                new_email=new_email if new_email else None,
+            )
+
+            await asyncio.wait_for(
+                self.client(UpdatePasswordSettingsRequest(
+                    password=old_check,
+                    new_settings=new_settings,
+                )),
+                timeout=25
+            )
+            return {"ok": True}
+
+        except Exception as e:
+            if 'PASSWORD_HASH_INVALID' in str(e).upper():
+                return {"ok": False, "error": "invalid_password"}
+            return {"ok": False, "error": type(e).__name__, "raw": str(e)[:120]}
 
     @staticmethod
     def _fmt_dt_local(dt=None) -> str:
