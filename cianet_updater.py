@@ -293,6 +293,17 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         # 2. backup
         backup_path = _backup_main_py(repo_dir)
 
+        # PATCH (v2.6.4 CRITICAL): قبل از هر چیز، safe.directory رو تنظیم کن
+        # تا git روی سرورهایی که repo با user دیگه‌ای clone شده خطای
+        # "dubious ownership" نده و pull سایلنت fail نشه.
+        try:
+            subprocess.run(
+                ["git", "config", "--global", "--add", "safe.directory", repo_dir],
+                capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            pass
+
         # PATCH (v2.2.0): قبل از pull، اگه فایل‌های main.py تغییرات
         # محلی دارن (مثلاً بعد از rollback که فایل رو جایگزین کردیم)،
         # git pull خطای "Your local changes would be overwritten" می‌ده.
@@ -306,13 +317,32 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         except Exception as e:
             log.warning("git checkout before pull failed (continuing): %s", e)
 
-        # 3. pull
-        result = subprocess.run(
-            ["git", "pull", "origin", BRANCH],
-            cwd=repo_dir, capture_output=True, text=True, timeout=60,
+        # 3. fetch + reset --hard (به‌جای pull) — این همیشه کار می‌کنه
+        # حتی اگه local changes یا dubious ownership باشه.
+        # PATCH (v2.6.4): git pull می‌تونه به‌خاطر local changes fail کنه.
+        # git fetch + reset --hard همیشه کار می‌کنه و مطمئن‌تره.
+        fetch_result = subprocess.run(
+            ["git", "fetch", "origin", BRANCH, "--quiet"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
         )
-        if result.returncode != 0:
-            return False, f"❌ git pull failed:\n{result.stderr}"
+        if fetch_result.returncode != 0:
+            return False, f"❌ git fetch failed:\n{fetch_result.stderr}"
+
+        reset_result = subprocess.run(
+            ["git", "reset", "--hard", f"origin/{BRANCH}"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+        if reset_result.returncode != 0:
+            return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
+
+        # حذف __pycache__ تا کد قدیمی cached اجرا نشه
+        import shutil as _shutil
+        pycache = os.path.join(repo_dir, "__pycache__")
+        if os.path.isdir(pycache):
+            try:
+                _shutil.rmtree(pycache)
+            except Exception:
+                pass
 
         new_commit = get_local_commit(repo_dir)
         try:
