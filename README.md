@@ -19,37 +19,39 @@
 
 ## ⚡ Quick Start
 
-### نصب ربات سلف
+### 🚀 نصب یک‌مرحله‌ای (توصیه‌شده)
 
 ```bash
 git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
 cd /opt/cianet
-sudo bash install_service.sh
+sudo API_ID=YOUR_API_ID API_HASH=YOUR_API_HASH ADMIN_BOT_TOKEN=YOUR_TOKEN ADMIN_ID=YOUR_ID bash quick_install.sh
 ```
 
-اسکریپت:
-- ✅ کاربر `cianet` می‌سازه
-- ✅ venv در `/opt/cianet/.venv/` می‌سازه
-- ✅ وابستگی‌ها (telethon) رو نصب می‌کنه
-- ✅ env file `/etc/cianet.env` با chmod 600 می‌سازه
-- ✅ systemd service `cianet` (با auto-restart)
-- ✅ session‌ها و config.json رو محدود می‌کنه به 600
-
-### نصب پنل وب (اختیاری ولی توصیه‌شده)
+یا interactive (ازت می‌پرسه):
 
 ```bash
+git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
 cd /opt/cianet
-sudo bash install_panel.sh
+sudo bash quick_install.sh
 ```
 
-اسکریپت:
-- ✅ venv رو extend می‌کنه با FastAPI + uvicorn + passlib
-- ✅ bcrypt password hash می‌سازه (با sha256 fallback)
-- ✅ systemd service `cianet-panel` روی port 8000
-- ✅ ۳ گزینه برای دسترسی:
-  - **Cloudflare Tunnel** + Zero Trust (توصیه‌شده برای IP متغیر)
-  - **nginx + Let's Encrypt** (برای IP ثابت)
-  - بدون reverse proxy (فقط localhost یا SSH tunnel)
+این اسکریپت همه‌چیز رو انجام می‌ده:
+- ✅ venv + telethon + fastapi نصب
+- ✅ کاربر `cianet` می‌سازه
+- ✅ env file با credentials شما
+- ✅ config.json خالی معتبر
+- ✅ systemd service `selfbot` (ربات)
+- ✅ systemd service `cianet-panel` (پنل وب port 8000)
+- ✅ هر دو سرویس رو start می‌کنه
+
+### نصب مرحله‌ای (قدیمی)
+
+```bash
+git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
+cd /opt/cianet
+sudo bash install_service.sh    # ربات سلف
+sudo bash install_panel.sh      # پنل وب
+```
 
 ---
 
