@@ -1457,12 +1457,22 @@ async def health():
 # PATCH (v2.1.5): یک frontend استاتیک ساده‌تر با vanilla JS که نیاز به
 # npm build نداره. اگر `web_static/` وجود داشته باشد، mount می‌شه.
 # قبلاً فقط Next.js روی port 3000 نیاز بود — حالا هر دو کار می‌کنن.
+#
+# PATCH (v2.8.3): پنل کاربر به‌جای GitHub Pages از همین سرور سرو می‌شه
+# تا CORS لازم نباشه. صفحات کاربر در web_static/u/ هستن و از /app/u/
+# قابل دسترسی هستن. به‌علاوه یه alias کوتاه‌تر /u/ هم اضافه شد.
 _WEB_STATIC_DIR = _PROJECT_DIR / "web_static"
 if _WEB_STATIC_DIR.exists() and _WEB_STATIC_DIR.is_dir():
-    # mount روی /app/* — صفحات HTML در web_static/
+    # mount روی /app/* — صفحات HTML در web_static/ (ادمین + کاربر)
     app.mount("/app", StaticFiles(directory=str(_WEB_STATIC_DIR), html=True), name="web_static")
+    # alias کوتاه‌تر برای پنل کاربر: /u/login.html و غیره
+    _USER_STATIC_DIR = _WEB_STATIC_DIR / "u"
+    if _USER_STATIC_DIR.exists() and _USER_STATIC_DIR.is_dir():
+        app.mount("/u", StaticFiles(directory=str(_USER_STATIC_DIR), html=True), name="user_static")
 
-    # Root redirect → /app/login.html (اگه session نیست) یا /app/dashboard.html
+    # Root redirect:
+    #   - اگه admin session هست → /app/dashboard.html (پنل ادمین)
+    #   - در غیر این صورت → /app/u/login.html (پنل کاربر — ورود با لایسنس)
     @app.get("/")
     async def root_redirect(request: Request):
         if _valid_session(request):
@@ -1473,8 +1483,8 @@ if _WEB_STATIC_DIR.exists() and _WEB_STATIC_DIR.is_dir():
             )
         return JSONResponse(
             status_code=307,
-            headers={"Location": "/app/login.html"},
-            content={"redirect": "/app/login.html"},
+            headers={"Location": "/app/u/login.html"},
+            content={"redirect": "/app/u/login.html"},
         )
 
 

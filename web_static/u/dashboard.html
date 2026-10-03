@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiaNet — داشبورد</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">CiaNet</div>
+    <div class="nav-items">
+      <a href="dashboard.html" class="active">داشبورد</a>
+      <a href="wallet.html">💰 کیف پول</a>
+      <a href="orders.html">🧾 سفارش‌ها</a>
+      <button id="logout-btn" class="link-btn">خروج</button>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="grid">
+      <div class="card stat">
+        <div class="label">💳 موجودی کیف پول</div>
+        <div class="value" id="balance">—</div>
+        <div class="hint">Toman</div>
+      </div>
+      <div class="card stat">
+        <div class="label">⏳ اشتراک</div>
+        <div class="value" id="sub-status">—</div>
+        <div class="hint" id="sub-detail"></div>
+      </div>
+      <div class="card stat">
+        <div class="label">🤖 سلف‌بات‌ها</div>
+        <div class="value" id="bots-count">—</div>
+        <div class="hint">اکانت فعال</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>اطلاعات کاربر</h2>
+      <div class="info-grid">
+        <div><span>🆔 شناسه:</span> <code id="user-id">—</code></div>
+        <div><span>👤 نام:</span> <code id="username">—</code></div>
+        <div><span>🎭 نقش:</span> <code id="role">—</code></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>تراکنش‌های اخیر</h2>
+      <div id="recent-txs" class="tx-list">در حال بارگذاری...</div>
+      <a href="wallet.html" class="see-all">→ همه‌ی تراکنش‌ها</a>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

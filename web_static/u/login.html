@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiaNet — ورود</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>🔑 ورود به CiaNet</h1>
+      <p class="hint">با کد لایسنس خود وارد شوید.</p>
+
+      <div class="step">
+        <label for="license-code">🎫 کد لایسنس</label>
+        <input type="text" id="license-code" placeholder="SELF-XXXX-XXXX" autocomplete="off" spellcheck="false" style="text-transform: uppercase;">
+      </div>
+
+      <button id="login-btn" class="primary">ورود</button>
+
+      <div id="error" class="error" hidden></div>
+      <div id="loading" class="loading" hidden>در حال ورود...</div>
+    </div>
+
+    <p class="footer">
+      <a href="https://github.com/DLSDT/CiaNet.ir" target="_blank">گیت‌هاب</a>
+    </p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

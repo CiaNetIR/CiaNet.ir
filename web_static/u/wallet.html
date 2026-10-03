@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiaNet — کیف پول</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">CiaNet</div>
+    <div class="nav-items">
+      <a href="dashboard.html">داشبورد</a>
+      <a href="wallet.html" class="active">💰 کیف پول</a>
+      <a href="orders.html">🧾 سفارش‌ها</a>
+      <button id="logout-btn" class="link-btn">خروج</button>
+    </div>
+  </nav>
+
+  <div class="container">
+    <div class="card">
+      <h2>💰 کیف پول</h2>
+      <div class="balance-block">
+        <div class="label">موجودی فعلی</div>
+        <div class="value" id="balance">—</div>
+        <div class="hint">Toman</div>
+      </div>
+      <p class="hint">برای شارژ، با پشتیبانی یا OWNER تماس بگیر.</p>
+    </div>
+
+    <div class="card">
+      <h2>تاریخچه‌ی تراکنش‌ها</h2>
+      <div id="tx-list" class="tx-list">در حال بارگذاری...</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
