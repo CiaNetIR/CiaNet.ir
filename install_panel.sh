@@ -317,21 +317,175 @@ fi
 
 echo -e "${GREEN}✅ service file ساخته شد${NC}"
 
-# ─── nginx config (optional) ───
-NGINX_CONF="/etc/nginx/sites-available/cianet-panel"
-NGINX_LINK="/etc/nginx/sites-enabled/cianet-panel"
+# ─── Reverse proxy / public access (optional) ─────────────────────────
+# PATCH (v2.1.6): سه گزینه برای دسترسی از بیرون:
+#   ۱. Cloudflare Tunnel + Zero Trust (توصیه‌شده برای IP متغیر)
+#   ۲. nginx + Let's Encrypt (برای IP ثابت)
+#   ۳. هیچ‌کدام (port 8000 مستقیم — فقط برای localhost یا SSH tunnel)
 
-if command -v nginx >/dev/null 2>&1; then
-    echo ""
-    echo -e "${YELLOW}🌐 nginx پیدا شد — ایجاد config...${NC}"
-    read -p "   Domain or IP for panel (مثلاً panel.cianet.ir یا 127.0.0.1، Enter برای skip): " PANEL_DOMAIN
-    if [ -n "$PANEL_DOMAIN" ]; then
-        read -p "   Enable HTTPS via Let's Encrypt? (y/N): " ENABLE_SSL
+echo ""
+echo -e "${YELLOW}🌐 روش دسترسی به پنل از بیرون:${NC}"
+echo "   ۱) Cloudflare Tunnel + Zero Trust  ← توصیه‌شده (IP متغیر OK، SSL خودکار)"
+echo "   ۲) nginx + Let's Encrypt          ← برای IP ثابت"
+echo "   ۳) بدون reverse proxy            ← فقط localhost:8000 یا SSH tunnel"
+echo "   ۴) skip (بعداً تنظیم می‌کنم)"
+read -p "   انتخاب (1-4) [4]: " ACCESS_CHOICE
+ACCESS_CHOICE="${ACCESS_CHOICE:-4}"
 
-        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+case "$ACCESS_CHOICE" in
+    1)
+        # ─── Cloudflare Tunnel ───
+        echo ""
+        echo -e "${BLUE}╔═══════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║   ☁️  نصب Cloudflare Tunnel             ║${NC}"
+        echo -e "${BLUE}╚═══════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${YELLOW}📋 پیش‌نیازها (خارج از این اسکریپت):${NC}"
+        echo "   ۱. یک دامنه روی Cloudflare (مثلاً cianet.ir)"
+        echo "   ۲. فعال‌سازی Zero Trust ( gratuita — dashboard.cloudflare.com → Zero Trust)"
+        echo "   ۳. ساخت Tunnel در: Zero Trust → Networks → Tunnels → Create a tunnel"
+        echo ""
+        echo -e "${YELLOW}   بعد از ساخت Tunnel، Cloudflare یه توکن بهت می‌ده${NC}"
+        echo -e "${YELLOW}   به این شکل: eyJhIjoi... (طولانی)${NC}"
+        echo ""
+        read -p "   آیا Tunnel را ساختی و توکن را داری؟ (y/N): " HAS_TOKEN
+        if [ "$HAS_TOKEN" != "y" ] && [ "$HAS_TOKEN" != "Y" ]; then
+            echo -e "${YELLOW}   ابتدا Tunnel بساز، بعد دوباره اجرا کن.${NC}"
+            echo -e "${YELLOW}   راهنما: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/${NC}"
+        else
+            read -p "   Tunnel token (paste کنید): " CF_TUNNEL_TOKEN
 
-        if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
-            cat > "$NGINX_CONF" <<EOF
+            # نصب cloudflared
+            echo -e "${YELLOW}📦 نصب cloudflared...${NC}"
+            if ! command -v cloudflared >/dev/null 2>&1; then
+                if command -v apt-get >/dev/null 2>&1; then
+                    # اضافه‌کردن repo رسمی Cloudflare
+                    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+                        | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+                    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" \
+                        | tee /etc/apt/sources.list.d/cloudflared.list
+                    apt-get update -qq 2>&1 | tail -2
+                    apt-get install -y cloudflared 2>&1 | tail -3
+                elif command -v yum >/dev/null 2>&1; then
+                    cat > /etc/yum.repos.d/cloudflared.repo <<'EOF'
+[cloudflared-stable]
+name=cloudflared-stable
+baseurl=https://pkg.cloudflare.com/cloudflared/rpm
+enabled=1
+type=rpm-md
+gpgcheck=0
+EOF
+                    yum install -y cloudflared 2>&1 | tail -3
+                else
+                    # fallback: دانلود مستقیم binary
+                    ARCH=$(uname -m)
+                    case "$ARCH" in
+                        x86_64) CF_ARCH="amd64" ;;
+                        aarch64|arm64) CF_ARCH="arm64" ;;
+                        *) CF_ARCH="amd64" ;;
+                    esac
+                    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
+                        -o /usr/local/bin/cloudflared
+                    chmod +x /usr/local/bin/cloudflared
+                fi
+            fi
+
+            if ! command -v cloudflared >/dev/null 2>&1 && [ ! -x /usr/local/bin/cloudflared ]; then
+                echo -e "${RED}❌ نصب cloudflared ناموفق بود${NC}"
+                echo -e "${YELLOW}   نصب دستی:${NC}"
+                echo "   curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared"
+                echo "   chmod +x /usr/local/bin/cloudflared"
+            else
+                # systemd service برای cloudflared
+                CF_SERVICE_FILE="/etc/systemd/system/cianet-tunnel.service"
+                cat > "$CF_SERVICE_FILE" <<EOF
+[Unit]
+Description=Cloudflare Tunnel for CiaNet Web Panel
+After=network-online.target cianet-panel.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate run --token $CF_TUNNEL_TOKEN
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cianet-tunnel
+
+[Install]
+WantedBy=multi-user.target
+EOF
+                # اگه cloudflared در /usr/local/bin نصب شده (fallback)، اصلاح کن
+                if [ ! -x /usr/bin/cloudflared ] && [ -x /usr/local/bin/cloudflared ]; then
+                    sed -i 's|/usr/bin/cloudflared|/usr/local/bin/cloudflared|' "$CF_SERVICE_FILE"
+                fi
+
+                systemctl daemon-reload
+                systemctl enable cianet-tunnel
+                systemctl restart cianet-tunnel
+                sleep 3
+
+                if systemctl is-active --quiet cianet-tunnel; then
+                    echo -e "${GREEN}✅ Cloudflare Tunnel نصب و فعال شد${NC}"
+                    echo ""
+                    echo -e "${YELLOW}🧭 حالا تو Cloudflare dashboard:${NC}"
+                    echo "   ۱. به Tunnel برو → Public Hostnames → Add a public hostname"
+                    echo "   ۲. Subdomain: مثلاً panel"
+                    echo "   ۳. Domain: cianet.ir (دامنه خودت)"
+                    echo "   ۴. Type: HTTP"
+                    echo "   ۵. URL: localhost:8000"
+                    echo "   ۶. Save"
+                    echo ""
+                    echo -e "${YELLOW}🔐 (اختیاری ولی توصیه‌شده) Access Policy:${NC}"
+                    echo "   Zero Trust → Access → Applications → Add → Self-hosted"
+                    echo "   Public hostname: panel.cianet.ir"
+                    echo "   Policy: فقط Telegram user_id های مجاز (با identity provider)"
+                    echo ""
+                    echo -e "${GREEN}🌐 بعد از تنظیم، پنل در https://panel.cianet.ir/app/login.html در دسترس خواهد بود${NC}"
+
+                    # اضافه‌کردن PANEL_URL به env
+                    read -p "   Subdomain + domain (مثلاً panel.cianet.ir): " PANEL_URL_DOMAIN
+                    if [ -n "$PANEL_URL_DOMAIN" ]; then
+                        PANEL_URL_FULL="https://$PANEL_URL_DOMAIN"
+                        # اگه از قبل PANEL_URL هست، replace کن؛ وگرنه append
+                        if grep -q "^PANEL_URL=" "$ENV_FILE" 2>/dev/null; then
+                            sed -i "s|^PANEL_URL=.*|PANEL_URL=$PANEL_URL_FULL|" "$ENV_FILE"
+                        else
+                            echo "PANEL_URL=$PANEL_URL_FULL" >> "$ENV_FILE"
+                        fi
+                        # اگه PANEL_CORS_ORIGINS تنظیم شده، update کن
+                        if grep -q "^PANEL_CORS_ORIGINS=" "$ENV_FILE" 2>/dev/null; then
+                            sed -i "s|^PANEL_CORS_ORIGINS=.*|PANEL_CORS_ORIGINS=$PANEL_URL_FULL,http://localhost:3000,http://127.0.0.1:3000|" "$ENV_FILE"
+                        fi
+                        echo -e "${GREEN}✅ PANEL_URL=$PANEL_URL_FULL در env ثبت شد${NC}"
+                        echo -e "${YELLOW}   برای اعمال، cianet و cianet-panel رو restart کن${NC}"
+                    fi
+                else
+                    echo -e "${RED}❌ cianet-tunnel failed to start — checking logs...${NC}"
+                    journalctl -u cianet-tunnel --no-pager -n 20
+                fi
+            fi
+        fi
+        ;;
+
+    2)
+        # ─── nginx + Let's Encrypt (مثل قبل) ───
+        NGINX_CONF="/etc/nginx/sites-available/cianet-panel"
+        NGINX_LINK="/etc/nginx/sites-enabled/cianet-panel"
+
+        if command -v nginx >/dev/null 2>&1; then
+            echo ""
+            echo -e "${YELLOW}🌐 nginx پیدا شد — ایجاد config...${NC}"
+            read -p "   Domain or IP for panel (مثلاً panel.cianet.ir یا 127.0.0.1): " PANEL_DOMAIN
+            if [ -n "$PANEL_DOMAIN" ]; then
+                read -p "   Enable HTTPS via Let's Encrypt? (y/N): " ENABLE_SSL
+
+                mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+                if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
+                    cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
     server_name $PANEL_DOMAIN;
@@ -347,7 +501,7 @@ server {
     # ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -356,25 +510,16 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
 }
 EOF
-        else
-            cat > "$NGINX_CONF" <<EOF
+                else
+                    cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
     server_name $PANEL_DOMAIN;
 
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -383,35 +528,47 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
 }
 EOF
-        fi
-        ln -sf "$NGINX_CONF" "$NGINX_LINK"
-        if nginx -t 2>&1 | tail -5; then
-            systemctl reload nginx
-            echo -e "${GREEN}✅ nginx config اعمال شد${NC}"
-            if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
-                echo -e "${YELLOW}⚠️  برای SSL اجرا کن:${NC}"
-                echo "   sudo certbot --nginx -d $PANEL_DOMAIN"
+                fi
+                ln -sf "$NGINX_CONF" "$NGINX_LINK"
+                if nginx -t 2>&1 | tail -5; then
+                    systemctl reload nginx
+                    echo -e "${GREEN}✅ nginx config اعمال شد${NC}"
+                    if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
+                        echo -e "${YELLOW}⚠️  برای SSL اجرا کن:${NC}"
+                        echo "   sudo certbot --nginx -d $PANEL_DOMAIN"
+                    fi
+                    # PANEL_URL به env
+                    if [ -n "$PANEL_DOMAIN" ]; then
+                        SCHEME=$([ "$ENABLE_SSL" = "y" ] && echo "https" || echo "http")
+                        PANEL_URL_FULL="$SCHEME://$PANEL_DOMAIN"
+                        if grep -q "^PANEL_URL=" "$ENV_FILE" 2>/dev/null; then
+                            sed -i "s|^PANEL_URL=.*|PANEL_URL=$PANEL_URL_FULL|" "$ENV_FILE"
+                        else
+                            echo "PANEL_URL=$PANEL_URL_FULL" >> "$ENV_FILE"
+                        fi
+                        echo -e "${GREEN}✅ PANEL_URL=$PANEL_URL_FULL در env ثبت شد${NC}"
+                    fi
+                else
+                    echo -e "${YELLOW}⚠️  nginx config نامعتبر — بررسی کن${NC}"
+                fi
             fi
         else
-            echo -e "${YELLOW}⚠️  nginx config نامعتبر — بررسی کن${NC}"
+            echo -e "${YELLOW}⚠️  nginx نصب نیست — ابتدا نصب کن:${NC}"
+            echo "   sudo apt install -y nginx"
         fi
-    else
-        echo -e "${YELLOW}   nginx config skip شد (port 8000 مستقیم در دسترس است)${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠️  nginx نصب نیست — پنل روی port 8000 مستقیم در دسترس خواهد بود${NC}"
-fi
+        ;;
+
+    3)
+        echo -e "${YELLOW}   بدون reverse proxy — پنل روی port 8000 مستقیم در دسترس است${NC}"
+        echo -e "${YELLOW}   برای دسترسی: SSH tunnel یا فایروال روی port 8000${NC}"
+        ;;
+
+    4|*)
+        echo -e "${YELLOW}   skip شد — بعداً با نصب مجدد اسکریپت تنظیم کن${NC}"
+        ;;
+esac
 
 # ─── Frontend: static web_static/ رو پیشنهاد می‌دهیم (no npm needed) ───
 echo ""
@@ -497,7 +654,16 @@ echo "   ری‌استارت:        sudo systemctl restart cianet-panel"
 echo "   وضعیت:            sudo systemctl status cianet-panel"
 echo ""
 echo -e "${BLUE}🌐 دسترسی:${NC}"
-if [ -f "$NGINX_LINK" ]; then
+if systemctl is-active --quiet cianet-tunnel 2>/dev/null; then
+    PANEL_URL_VALUE=$(grep '^PANEL_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2)
+    if [ -n "$PANEL_URL_VALUE" ]; then
+        echo "   Panel URL:        $PANEL_URL_VALUE/app/login.html"
+    else
+        echo "   Panel URL:        (در Cloudflare dashboard یک Public Hostname اضافه کن)"
+    fi
+    echo "   Tunnel service:   cianet-tunnel (active)"
+    echo "   لاگ:              sudo journalctl -u cianet-tunnel -f"
+elif [ -n "$NGINX_LINK" ] && [ -f "$NGINX_LINK" ]; then
     DOMAIN=$(grep -m1 server_name "$NGINX_CONF" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
     echo "   Panel URL:        http://$DOMAIN/app/login.html"
 else
@@ -505,8 +671,9 @@ else
     echo "   Backend API docs: http://localhost:8000/api/docs"
     echo ""
     echo -e "${YELLOW}💡 برای دسترسی از بیرون:${NC}"
-    echo "   ۱. nginx یا caddy نصب کن و port 8000 رو proxy کن (443 → 8000)"
-    echo "   ۲. یا فایروال رو روی port 8000 باز کن و مستقیم به /app/login.html برو"
+    echo "   ۱. دوباره اسکریپت رو اجرا کن و Cloudflare Tunnel (گزینه ۱) رو انتخاب کن"
+    echo "   ۲. یا nginx + Let's Encrypt (گزینه ۲)"
+    echo "   ۳. یا فایروال رو روی port 8000 باز کن و مستقیم به /app/login.html برو"
 fi
 echo ""
 echo -e "${BLUE}📋 ورود:${NC}"
