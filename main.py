@@ -15179,6 +15179,7 @@ except ImportError:
 _FATAL_AUTH_ERROR_TYPES = tuple(
     t for t in (
         getattr(errors, "AuthKeyError", None),
+        getattr(errors, "AuthKeyDuplicatedError", None),  # PATCH (v2.0.11): duplicate session = fatal
         getattr(errors, "UnauthorizedError", None),
     ) if t is not None
 )
@@ -16105,6 +16106,15 @@ def config_state() -> str:
     return _config_state
 
 
+# PATCH (v2.0.11): کشِ load_config بر اساس mtime. این متغیرها توسط
+# load_config و save_config ست/پاک می‌شن. thread-safe نیستند ولی
+# asyncio single-thread است و GIL پایتون از write های atomic محافظت
+# می‌کنه. threading.Lock اضافه نشد چون caller های sync هم هستن و asyncio.Lock
+# در sync context deadlock می‌سازه.
+_CONFIG_CACHE: dict = None
+_CONFIG_CACHE_MTIME: float = 0.0
+
+
 def load_config() -> dict:
     """
     خواندن config.json با سه حالتِ جدا:
@@ -16114,20 +16124,41 @@ def load_config() -> dict:
         (cleanup_orphan_sessions / overwrite / delete / یتیم‌سازی) باید
         config_state() را چک کنند؛ {} به معنی «هیچ اکانتی نیست» نیست،
         بلکه یعنی «config خراب است؛ دست نزن».
+
+    PATCH (v2.0.11): caching با mtime. قبلاً هر بار که load_config صدا
+    زده می‌شد، کل JSON از دیسک خوانده و re-parse می‌شد — در هر کلیکِ
+    کاربر ~۵۰ بار. با ۱۰۰۰ اکانت (config ~۵-۱۰MB) هر کلیک ۲۵۰ms-۲s
+    CPU sync می‌خورد. حالا فقط اگه mtime فایل تغییر کرده باشه، re-parse
+    می‌کنیم.
     """
-    global _config_state
+    global _config_state, _CONFIG_CACHE, _CONFIG_CACHE_MTIME
     if not os.path.exists(CONFIG_FILE):
         _config_state = CONFIG_MISSING
+        _CONFIG_CACHE = None
+        _CONFIG_CACHE_MTIME = 0.0
         return {}
+    try:
+        mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        mtime = 0.0
+    # از کش استفاده کن اگه فایل تغییری نکرده
+    if _CONFIG_CACHE is not None and _CONFIG_CACHE_MTIME == mtime:
+        _config_state = CONFIG_VALID
+        # یک کپی برگردون تا caller نتونه کش رو mutate کنه
+        return dict(_CONFIG_CACHE)
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict):
             raise ValueError(f"config.json باید یک آبجکت JSON باشد، نه {type(cfg).__name__}")
         _config_state = CONFIG_VALID
-        return cfg
+        _CONFIG_CACHE = cfg
+        _CONFIG_CACHE_MTIME = mtime
+        return dict(cfg)
     except Exception as e:
         _config_state = CONFIG_INVALID
+        _CONFIG_CACHE = None
+        _CONFIG_CACHE_MTIME = 0.0
         print(
             f"⛔ config.json خراب/ناخوانا است — مسیر: {CONFIG_FILE}. "
             f"عملیات‌های مخرب (پاک‌سازی سشن/بازنویسی/حذف) متوقف شدند؛ "
@@ -16366,6 +16397,17 @@ def save_config(cfg: dict) -> bool:
             raise
         _chmod_private(CONFIG_FILE)
         _config_state = CONFIG_VALID
+        # PATCH (v2.0.11): invalidate کشِ mtime بعد از save. بعد از
+        # os.replace، mtime فایل جدید است و کش به‌روزرسانی می‌شه.
+        # اگه مستقیم cache رو update کنیم، یه round-trip به disk ذخیره
+        # می‌کنیم. ولی save_config گهگاه صدا زده می‌شه، پس performance
+        # اهمیت چندانی نداره — invalidation کافیه.
+        global _CONFIG_CACHE, _CONFIG_CACHE_MTIME
+        _CONFIG_CACHE = cfg
+        try:
+            _CONFIG_CACHE_MTIME = os.path.getmtime(CONFIG_FILE)
+        except OSError:
+            _CONFIG_CACHE_MTIME = 0.0
         return True
 
 
