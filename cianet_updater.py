@@ -332,15 +332,37 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
             msg += f"\n📦 بکاپ: {backup_path}"
 
         # 4. restart از طریق systemd (اگه هست)
+        # PATCH (v2.5.0 CRITICAL FIX): service name auto-detect
+        # قبلاً hardcoded "cianet" بود که با نصب‌های install_service.sh
+        # (که "selfbot.service" می‌سازه) mismatch داشت. حالا:
+        # ۱. از env var CIANET_SERVICE_NAME می‌خونه (اگه تنظیم شده)
+        # ۲. وگرنه auto-detect می‌کنه: cianet → selfbot → هر چی با cianet
+        # ۳. وگرنه هیچ‌کدام نبود، "cianet" به‌عنوان fallback
         if restart:
+            svc_name = os.environ.get("CIANET_SERVICE_NAME", "").strip()
+            if not svc_name:
+                for svc in ("cianet", "selfbot"):
+                    try:
+                        r = subprocess.run(
+                            ["systemctl", "is-enabled", svc],
+                            capture_output=True, text=True, timeout=3,
+                        )
+                        if r.returncode == 0:
+                            svc_name = svc
+                            break
+                    except Exception:
+                        continue
+            if not svc_name:
+                svc_name = "cianet"  # fallback
             try:
                 subprocess.Popen(
-                    ["systemctl", "restart", "cianet"],
+                    ["systemctl", "restart", svc_name],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                msg += "\n🔄 سلف در حال restart..."
+                msg += f"\n🔄 سلف در حال restart (service: {svc_name})..."
             except Exception as e:
-                log.warning("systemctl restart failed: %s", e)
+                log.warning("systemctl restart %s failed: %s", svc_name, e)
+                msg += f"\n⚠️ restart ناموفق (service: {svc_name}): {e}\nدستی: sudo systemctl restart {svc_name}"
 
         return True, msg
 
