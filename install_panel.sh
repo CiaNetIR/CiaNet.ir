@@ -1,8 +1,13 @@
 #!/bin/bash
 # ══════════════════════════════════════════════════════════
-#  CiaNet Web Panel — Install Script
+#  CiaNet Web Panel — Install Script (v2 — auto-detect)
 #  سرویس systemd برای FastAPI backend روی port 8000
 #  + nginx config برای reverse proxy از 443
+#
+#  PATCH (v2.1.1): تشخیص خودکار service name و user
+#  - اولین service فعال بین cianet / selfbot رو پیدا می‌کنه
+#  - user از همان service رو detect می‌کنه (systemctl show -p User)
+#  - اگه هیچ کدام نبود، خودش user cianet می‌سازه
 # ══════════════════════════════════════════════════════════
 
 set -e
@@ -21,7 +26,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo -e "${BLUE}╔═══════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║   🌐 نصب پنل وب CiaNet              ║${NC}"
+echo -e "${BLUE}║   🌐 نصب پنل وب CiaNet (v2)            ║${NC}"
 echo -e "${BLUE}╚═══════════════════════════════════════╝${NC}"
 echo ""
 
@@ -31,43 +36,149 @@ if [ ! -f "$SCRIPT_DIR/web_panel.py" ]; then
     exit 1
 fi
 
-SERVICE_USER="cianet"
-if ! id "$SERVICE_USER" >/dev/null 2>&1; then
-    echo -e "${YELLOW}⚠️  کاربر cianet وجود نداره — اول install_service.sh رو اجرا کن${NC}"
-    exit 1
+# ─── Detect existing CiaNet service ─────────────────────
+# Try service names in order: cianet (most common in this deployment),
+# selfbot (install_service.sh default), then anything with cianet in name.
+EXISTING_SERVICE=""
+for svc in cianet selfbot; do
+    if systemctl is-enabled --quiet "$svc" 2>/dev/null \
+        || systemctl is-active --quiet "$svc" 2>/dev/null; then
+        EXISTING_SERVICE="$svc"
+        break
+    fi
+done
+# fallback: any unit with cianet in the name
+if [ -z "$EXISTING_SERVICE" ]; then
+    FOUND=$(systemctl list-unit-files --type=service --no-legend 2>/dev/null \
+            | awk '{print $1}' | grep -i 'cianet\|selfbot' | head -1)
+    if [ -n "$FOUND" ]; then
+        EXISTING_SERVICE="${FOUND%.service}"
+    fi
 fi
+
+# Detect service user
+SERVICE_USER=""
+if [ -n "$EXISTING_SERVICE" ]; then
+    echo -e "${GREEN}✓ سرویس موجود پیدا شد: ${EXISTING_SERVICE}.service${NC}"
+    SERVICE_USER=$(systemctl show -p User "${EXISTING_SERVICE}.service" 2>/dev/null | cut -d= -f2)
+    if [ -z "$SERVICE_USER" ] || [ "$SERVICE_USER" = "" ]; then
+        SERVICE_USER="root"
+    fi
+    echo -e "${GREEN}  user: ${SERVICE_USER}${NC}"
+else
+    echo -e "${YELLOW}⚠️  هیچ سرویس cianet/selfbot پیدا نشد${NC}"
+    echo -e "${YELLOW}   اول install_service.sh رو اجرا کن یا خودت سرویس بساز${NC}"
+    echo ""
+    read -p "  با این حال ادامه بدیم و user cianet رو بسازیم؟ (y/N): " CONFIRM
+    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+        exit 1
+    fi
+    SERVICE_USER="cianet"
+    if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+        echo -e "${YELLOW}👤 ساخت کاربر سرویس: ${SERVICE_USER}${NC}"
+        useradd --system --shell /usr/sbin/nologin --home "$SCRIPT_DIR" "$SERVICE_USER" || {
+            echo -e "${RED}❌ ساخت کاربر ${SERVICE_USER} شکست خورد!${NC}"
+            exit 1
+        }
+    fi
+    EXISTING_SERVICE="cianet"  # برای reference در systemd After=
+fi
+
+# اگر user پیدا شده root نباشه ولی وجود نداشته باشه، fallback
+if [ "$SERVICE_USER" != "root" ] && ! id "$SERVICE_USER" >/dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  کاربر ${SERVICE_USER} وجود نداره — استفاده از root${NC}"
+    SERVICE_USER="root"
+fi
+
+echo ""
+echo -e "${BLUE}📊 تنظیمات:${NC}"
+echo "  service user:    $SERVICE_USER"
+echo "  existing service: $EXISTING_SERVICE"
+echo "  install dir:     $SCRIPT_DIR"
+echo ""
 
 # ─── Install web panel Python deps ───
 echo -e "${YELLOW}📦 نصب dependencies پنل وب...${NC}"
 cd "$SCRIPT_DIR"
 PYTHON_BIN=$(which python3)
-$PYTHON_BIN -m pip install fastapi "uvicorn[standard]" pydantic "passlib[bcrypt]" python-multipart 2>&1 | tail -3
+# اگه python3.11+ در دسترسه از اون استفاده کن (سریع‌تر)
+for p in python3.12 python3.11 python3.10 python3; do
+    if command -v "$p" >/dev/null 2>&1; then
+        PYTHON_BIN=$(which "$p")
+        break
+    fi
+done
+echo "  using: $PYTHON_BIN"
 
-# ─── Generate password hash if not set ───
-ENV_FILE="/etc/cianet.env"
-if [ ! -f "$ENV_FILE" ]; then
-    echo -e "${YELLOW}📝 ساخت env file...${NC}"
+# نصب در system (با --break-system-packages در اگه PEP 668 فعال باشه)
+PIP_FLAGS=""
+if $PYTHON_BIN -m pip install --help 2>&1 | grep -q -- "--break-system-packages"; then
+    PIP_FLAGS="--break-system-packages"
+fi
+$PYTHON_BIN -m pip install $PIP_FLAGS fastapi "uvicorn[standard]" pydantic "passlib[bcrypt]" python-multipart 2>&1 | tail -3 || {
+    echo -e "${RED}❌ pip install شکست خورد!${NC}"
+    echo -e "${YELLOW}   سعی کن با virtualenv نصب کن:${NC}"
+    echo "   $PYTHON_BIN -m venv /opt/cianet/.venv"
+    echo "   /opt/cianet/.venv/bin/pip install -r requirements.txt"
+    exit 1
+}
+
+# ─── Find env file ───────────────────────────────────────
+# چندین مسیر ممکن برای env file
+ENV_FILE=""
+for candidate in /etc/cianet.env /etc/selfbot.env "$SCRIPT_DIR/.env" "$SCRIPT_DIR/cianet.env"; do
+    if [ -f "$candidate" ]; then
+        ENV_FILE="$candidate"
+        break
+    fi
+done
+# اگر هیچ کدام نبود، /etc/cianet.env رو به‌عنوان default بساز
+if [ -z "$ENV_FILE" ]; then
+    ENV_FILE="/etc/cianet.env"
+    echo -e "${YELLOW}📝 ساخت env file در ${ENV_FILE}${NC}"
     touch "$ENV_FILE"
     chmod 600 "$ENV_FILE"
 fi
+echo -e "${GREEN}✓ env file: ${ENV_FILE}${NC}"
 
-# اگر PANEL_ADMIN_PASS_HASH در env نیست، بپرس
+# اگر فایل env متعلق به user دیگه‌ای هست، مالکیت رو با service user هم‌اهنگ کن
+if [ "$SERVICE_USER" != "root" ]; then
+    chown "$SERVICE_USER:$SERVICE_USER" "$ENV_FILE" 2>/dev/null || true
+    chmod 600 "$ENV_FILE"
+fi
+
+# ─── Generate password hash if not set ───
 if ! grep -q "PANEL_ADMIN_PASS_HASH" "$ENV_FILE" 2>/dev/null; then
     echo ""
     echo -e "${YELLOW}🔐 تنظیم پسورد ورود به پنل وب:${NC}"
-    read -s -p "   Password: " PANEL_PASS
-    echo ""
-    if [ -z "$PANEL_PASS" ]; then
-        echo -e "${RED}❌ Password نمی‌تونه خالی باشه${NC}"
-        exit 1
-    fi
-    # Generate bcrypt hash
-    PANEL_PASS_HASH=$($PYTHON_BIN -c "from passlib.hash import bcrypt; print(bcrypt.hash('$PANEL_PASS'))" 2>/dev/null)
+    while true; do
+        read -s -p "   Password (حداقل ۸ کاراکتر): " PANEL_PASS
+        echo ""
+        if [ -z "$PANEL_PASS" ] || [ ${#PANEL_PASS} -lt 8 ]; then
+            echo -e "${RED}   ❌ Password باید حداقل ۸ کاراکتر باشه${NC}"
+            continue
+        fi
+        read -s -p "   Confirm password: " PANEL_PASS_CONFIRM
+        echo ""
+        if [ "$PANEL_PASS" != "$PANEL_PASS_CONFIRM" ]; then
+            echo -e "${RED}   ❌ Passwords مطابقت ندارند${NC}"
+            continue
+        fi
+        break
+    done
+
+    # Generate bcrypt hash با passlib
+    PANEL_PASS_HASH=$($PYTHON_BIN -c "
+from passlib.hash import bcrypt
+print(bcrypt.encrypt('$PANEL_PASS'))
+" 2>/dev/null)
     if [ -z "$PANEL_PASS_HASH" ]; then
-        echo -e "${RED}❌ تولید hash ناموفق بود${NC}"
-        exit 1
+        # fallback با هش ساده‌تر (sha256) — بهتر از هیچ
+        echo -e "${YELLOW}   ⚠️  passlib نصب نیست — استفاده از sha256 (کم‌امن‌تر)${NC}"
+        PANEL_PASS_HASH="sha256:"$(echo -n "$PANEL_PASS" | sha256sum | awk '{print $1}')
     fi
-    # اگه PANEL_ADMIN_USER تنظیم نشده، default admin
+
+    # تنظیم PANEL_ADMIN_USER اگه نباشه
     if ! grep -q "PANEL_ADMIN_USER" "$ENV_FILE" 2>/dev/null; then
         read -p "   Username (default: admin): " PANEL_USER
         PANEL_USER="${PANEL_USER:-admin}"
@@ -82,28 +193,31 @@ else
     echo -e "${GREEN}✅ پسورد از قبل تنظیم شده${NC}"
 fi
 
-# اگر PANEL_CORS_ORIGINS تنظیم نشده، default localhost:3000
+# اگه PANEL_CORS_ORIGINS تنظیم نشده، default localhost:3000
 if ! grep -q "PANEL_CORS_ORIGINS" "$ENV_FILE" 2>/dev/null; then
     echo "PANEL_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000" >> "$ENV_FILE"
 fi
-
-chown "$SERVICE_USER:$SERVICE_USER" "$ENV_FILE"
-chmod 600 "$ENV_FILE"
 
 # ─── systemd service ───
 SERVICE_FILE="/etc/systemd/system/cianet-panel.service"
 echo -e "${YELLOW}⚙️  ساخت systemd service...${NC}"
 
+# After dependency: اگه service اصلی هست، به اون وابسته باش
+AFTER_DEP="network-online.target"
+if [ -n "$EXISTING_SERVICE" ]; then
+    AFTER_DEP="network-online.target ${EXISTING_SERVICE}.service"
+fi
+
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=CiaNet Web Panel (FastAPI backend on port 8000)
-After=network-online.target cianet.service
+After=$AFTER_DEP
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=$SERVICE_USER
-Group=$SERVICE_USER
+Group=${SERVICE_USER}
 WorkingDirectory=$SCRIPT_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=$PYTHON_BIN -m uvicorn web_panel:app --host 127.0.0.1 --port 8000 --workers 2
@@ -122,6 +236,17 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
+# مالکیت scripts رو به service user تغییر بده (اگه non-root)
+if [ "$SERVICE_USER" != "root" ]; then
+    chown "$SERVICE_USER:$SERVICE_USER" "$SCRIPT_DIR/web_panel.py" 2>/dev/null || true
+    chown "$SERVICE_USER:$SERVICE_USER" "$SCRIPT_DIR/main.py" 2>/dev/null || true
+    chown "$SERVICE_USER:$SERVICE_USER" "$SCRIPT_DIR/cianet_updater.py" 2>/dev/null || true
+    # data dir رو هم دسترسی بده
+    if [ -d "$SCRIPT_DIR/data" ]; then
+        chown -R "$SERVICE_USER:$SERVICE_USER" "$SCRIPT_DIR/data" 2>/dev/null || true
+    fi
+fi
+
 echo -e "${GREEN}✅ service file ساخته شد${NC}"
 
 # ─── nginx config (optional) ───
@@ -131,18 +256,17 @@ NGINX_LINK="/etc/nginx/sites-enabled/cianet-panel"
 if command -v nginx >/dev/null 2>&1; then
     echo ""
     echo -e "${YELLOW}🌐 nginx پیدا شد — ایجاد config...${NC}"
-    read -p "   Domain or IP for panel (مثلاً panel.cianet.ir یا 127.0.0.1): " PANEL_DOMAIN
-    PANEL_DOMAIN="${PANEL_DOMAIN:-panel.cianet.ir}"
-    read -p "   Enable HTTPS via Let's Encrypt? (y/N): " ENABLE_SSL
+    read -p "   Domain or IP for panel (مثلاً panel.cianet.ir یا 127.0.0.1، Enter برای skip): " PANEL_DOMAIN
+    if [ -n "$PANEL_DOMAIN" ]; then
+        read -p "   Enable HTTPS via Let's Encrypt? (y/N): " ENABLE_SSL
 
-    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+        mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
 
-    if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
-        cat > "$NGINX_CONF" <<EOF
+        if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
+            cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
     server_name $PANEL_DOMAIN;
-    # Redirect HTTP → HTTPS
     return 301 https://\$host\$request_uri;
 }
 
@@ -154,7 +278,6 @@ server {
     # ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
     # ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
 
-    # Frontend (Next.js) on port 3000
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -164,10 +287,8 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
     }
 
-    # Backend API (FastAPI) on port 8000
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -178,16 +299,12 @@ server {
     }
 }
 EOF
-        ln -sf "$NGINX_CONF" "$NGINX_LINK"
-        echo -e "${YELLOW}⚠️  nginx config ساخته شد. برای SSL اجرا کن:${NC}"
-        echo "   sudo certbot --nginx -d $PANEL_DOMAIN"
-    else
-        cat > "$NGINX_CONF" <<EOF
+        else
+            cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
     server_name $PANEL_DOMAIN;
 
-    # Frontend (Next.js) on port 3000
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -197,10 +314,8 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_cache_bypass \$http_upgrade;
     }
 
-    # Backend API (FastAPI) on port 8000
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
@@ -211,43 +326,80 @@ server {
     }
 }
 EOF
+        fi
         ln -sf "$NGINX_CONF" "$NGINX_LINK"
+        if nginx -t 2>&1 | tail -5; then
+            systemctl reload nginx
+            echo -e "${GREEN}✅ nginx config اعمال شد${NC}"
+            if [ "$ENABLE_SSL" = "y" ] || [ "$ENABLE_SSL" = "Y" ]; then
+                echo -e "${YELLOW}⚠️  برای SSL اجرا کن:${NC}"
+                echo "   sudo certbot --nginx -d $PANEL_DOMAIN"
+            fi
+        else
+            echo -e "${YELLOW}⚠️  nginx config نامعتبر — بررسی کن${NC}"
+        fi
+    else
+        echo -e "${YELLOW}   nginx config skip شد (port 8000 مستقیم در دسترس است)${NC}"
     fi
-    nginx -t 2>&1 | tail -5
-    systemctl reload nginx
-    echo -e "${GREEN}✅ nginx config اعمال شد${NC}"
 else
     echo -e "${YELLOW}⚠️  nginx نصب نیست — پنل روی port 8000 مستقیم در دسترس خواهد بود${NC}"
-    echo -e "${YELLOW}   برای دسترسی از بیرون، nginx یا caddy نصب کن${NC}"
 fi
 
-# ─── Build frontend ───
+# ─── Build frontend (Next.js) ───
+echo ""
 if [ -f "$SCRIPT_DIR/web/package.json" ]; then
-    echo ""
     echo -e "${YELLOW}🔨 build frontend Next.js...${NC}"
     cd "$SCRIPT_DIR/web"
     if ! command -v npm >/dev/null 2>&1; then
-        echo -e "${YELLOW}📦 نصب Node.js...${NC}"
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-        apt-get install -y nodejs
+        echo -e "${YELLOW}📦 نصب Node.js 20...${NC}"
+        if command -v apt-get >/dev/null 2>&1; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
+            apt-get install -y nodejs 2>&1 | tail -3
+        elif command -v yum >/dev/null 2>&1; then
+            curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
+            yum install -y nodejs 2>&1 | tail -3
+        fi
     fi
-    npm install --silent 2>&1 | tail -5
-    npm run build 2>&1 | tail -5
-    cd "$SCRIPT_DIR"
+    if command -v npm >/dev/null 2>&1; then
+        npm install --silent 2>&1 | tail -5 || {
+            echo -e "${RED}❌ npm install شکست خورد${NC}"
+            echo -e "${YELLOW}   پنل backend بدون frontend هم کار می‌کنه — می‌تونی بعداً build کنی${NC}"
+        }
+        npm run build 2>&1 | tail -5 || {
+            echo -e "${YELLOW}⚠️  build ناموفق بود — می‌تونی به‌صورت dev اجرا کنی:${NC}"
+            echo "   cd $SCRIPT_DIR/web && npm run dev"
+        }
+        cd "$SCRIPT_DIR"
+    else
+        echo -e "${RED}❌ npm در دسترس نیست — frontend رو بعداً build کن${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  web/ پیدا نشد — frontend رو جدا نصب کن${NC}"
 fi
 
 # ─── Start services ───
+echo ""
 echo -e "${YELLOW}🔄 فعال‌سازی services...${NC}"
 systemctl daemon-reload
 systemctl enable cianet-panel
 systemctl restart cianet-panel
 
 sleep 3
-systemctl is-active --quiet cianet-panel && echo -e "${GREEN}✅ cianet-panel running${NC}" || {
+if systemctl is-active --quiet cianet-panel; then
+    echo -e "${GREEN}✅ cianet-panel running${NC}"
+else
     echo -e "${RED}❌ cianet-panel failed to start — checking logs...${NC}"
-    journalctl -u cianet-panel --no-pager -n 20
+    journalctl -u cianet-panel --no-pager -n 30
+    echo ""
+    echo -e "${YELLOW}نکته‌های عیب‌یابی:${NC}"
+    echo "  ۱. اگه خطا 'Permission denied' روی data/ هست:"
+    echo "     sudo chown -R $SERVICE_USER:$SERVICE_USER $SCRIPT_DIR/data"
+    echo "  ۲. اگه خطا 'PANEL_ADMIN_PASS_HASH not set' هست:"
+    echo "     echo \"PANEL_ADMIN_PASS_HASH=\$(python3 -c 'from passlib.hash import bcrypt; print(bcrypt.encrypt(\"PASS\"))')\" >> /etc/cianet.env"
+    echo "  ۳. اگه خطا 'Address already in use' روی port 8000:"
+    echo "     sudo lsof -i :8000  # چه پروسه‌ای داره اشغال می‌کنه"
     exit 1
-}
+fi
 
 # ─── Status ───
 echo ""
@@ -265,11 +417,17 @@ echo "   وضعیت:            sudo systemctl status cianet-panel"
 echo ""
 echo -e "${BLUE}🌐 دسترسی:${NC}"
 if [ -f "$NGINX_LINK" ]; then
-    echo "   Panel URL:        http://$(grep -m1 server_name $NGINX_CONF | awk '{print $2}' | tr -d ';')"
+    DOMAIN=$(grep -m1 server_name "$NGINX_CONF" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
+    echo "   Panel URL:        http://$DOMAIN/login"
 else
-    echo "   Backend API:     http://localhost:8000/api/docs"
-    echo "   Frontend (dev):   http://localhost:3000"
+    echo "   Backend API:      http://localhost:8000/api/docs"
+    echo "   Frontend (dev):   http://localhost:3000/login"
+    echo ""
+    echo -e "${YELLOW}💡 برای دسترسی از بیرون:${NC}"
+    echo "   ۱. nginx یا caddy نصب کن و port 3000 + 8000 رو proxy کن"
+    echo "   ۲. یا فایروال رو روی port 8000 باز کن و مستقیم به /api/docs برو"
 fi
 echo ""
-echo -e "${YELLOW}💡 برای build frontend:${NC}"
-echo "   cd $SCRIPT_DIR/web && npm install && npm run build && npm start"
+echo -e "${BLUE}📋 ورود:${NC}"
+echo "   username: $(grep '^PANEL_ADMIN_USER=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 || echo 'admin')"
+echo "   password: همان که در نصب وارد کردی"
