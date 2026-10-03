@@ -660,6 +660,11 @@ LICENSE_TYPE_ACCOUNT = "account"
 LICENSE_TYPE_RESELLER = "reseller"
 LICENSE_TYPE_ADMIN = "admin"
 
+# حداکثر تعداد لایسنس در یک درخواستِ ساخت گروهی — محدودیتِ امنیتی تا
+#-DDOS/اسپمِ جدول licenses جلوگیری می‌کند و در همان زمان اجازه می‌دهد
+# OWNER/ADMIN در یک حرکت تا ۱۰۰ کد بسازند.
+BATCH_LICENSE_MAX = 100
+
 # منبعِ ساخت یک اکانت سلف (provision_source) — برای تشخیص «اضافه‌شده‌ی دستی»
 # در کارت کاربران:
 #   manual       → توسط OWNER/ADMIN/نماینده از پنل مدیریت برای یک کاربر ساخته شد
@@ -1779,6 +1784,47 @@ def ensure_referral_schema() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by)")
 
 
+def ensure_wallet_schema() -> None:
+    """Schema کیف پول کاربر — ستونِ موجودی روی users + جدولِ تراکنش‌ها.
+
+    ستون wallet_balance روی users به‌صورت ALTER TABLE اضافه می‌شود (اگه نباشد)
+    تا دیتابیس‌های قدیمی بدون dump/restore هم آپدیت شوند.
+
+    جدول wallet_transactions:
+      - id           — کلید اصلی
+      - user_id      — کاربر صاحب کیف پول (FK به users.user_id، ON DELETE CASCADE)
+      - amount       — مثبت = شارژ، منفی = برداشت/پرداخت (Toman)
+      - balance_after — موجودی بعد از این تراکنش (برای تاریخچه‌ی حسابرسی)
+      - type         — credit|debit|payment|admin_adjust|refund
+      - ref          — مرجع اختیاری (مثلاً شماره سفارش)
+      - reason       — یادداشتِ انسانی (مثلاً «شارژ دستی توسط OWNER»)
+      - created_by   — کاربری که این تراکنش را ایجاد کرده (OWNER/ADMIN یا خود کاربر)
+      - created_at   — timestamp ISO
+    """
+    with _conn() as c:
+        # ۱) ستون wallet_balance روی users — اگر قدیمی است، ALTER اضافه کن
+        cols = {r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+        if "wallet_balance" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN wallet_balance INTEGER NOT NULL DEFAULT 0")
+            print("✅ [wallet] ستون wallet_balance به users اضافه شد")
+        # ۲) جدول تراکنش‌ها
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS wallet_transactions ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  user_id INTEGER NOT NULL,"
+            "  amount INTEGER NOT NULL,"  # مثبت=شارژ، منفی=برداشت
+            "  balance_after INTEGER NOT NULL,"
+            "  type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund')),"
+            "  ref TEXT,"                  # مرجع سفارش/پرداخت (اختیاری)
+            "  reason TEXT,"
+            "  created_by INTEGER,"
+            "  created_at TEXT NOT NULL"
+            ")"
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_user ON wallet_transactions(user_id, created_at DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_created ON wallet_transactions(created_at DESC)")
+
+
 def referral_link(bot_username: str, user_id: int) -> str:
     return f"https://t.me/{(bot_username or 'bot').lstrip('@')}?start=ref_{user_id}"
 
@@ -1857,6 +1903,134 @@ def claim_referral_rewards(user_id: int) -> int:
             )
         log_action(user_id, "referral_reward", f"{granted}×{REFERRAL_REWARD_DAYS}d")
     return granted
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  سیستم کیف پول کاربر (User Wallet) — v2.8.0
+# ══════════════════════════════════════════════════════════════════════
+#  موجودی به Toman ذخیره می‌شود (INTEGER — فراکشن‌ها فقط در USDT/کریپتو).
+#  هر تغییر در موجودی در یک UPDATE اتمیک + INSERT تراکنش ثبت می‌شود.
+#  هیچ مسیری مستقیماً wallet_balance را UPDATE نمی‌کند — فقط از طریق این
+#  توابع (wallet_credit / wallet_debit / wallet_pay_from_balance) که هم
+#  موجودی را آپدیت می‌کنند و هم ردِ تراکنش را با balance_after می‌سازند.
+
+def get_wallet_balance(user_id: int) -> int:
+    """موجودی کیف پول کاربر به Toman (۰ اگر کاربر/ستون نباشد)."""
+    with _conn() as c:
+        row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return int(row["wallet_balance"]) if row and row["wallet_balance"] is not None else 0
+
+
+def wallet_credit(user_id: int, amount: int, created_by: int,
+                  reason: str = "", tx_type: str = "admin_adjust") -> dict:
+    """شارژِ کیف پول کاربر — فقط OWNER/ADMIN مجازند.
+
+    بازگشت:
+      {"ok": True, "balance": new_balance, "tx_id": N}
+      {"error": "invalid_amount"}     — amount <= 0
+      {"error": "user_not_found"}     — کاربر در DB نیست
+      {"error": "permission_denied"} — سازنده OWNER/ADMIN نیست
+    """
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        return {"error": "invalid_amount"}
+    # نقشِ سازنده را از DB بخوان — اعتماد به callback نیست
+    actor_role = get_role(created_by, OWNER_ID)
+    if actor_role not in (ROLE_OWNER, ROLE_ADMIN):
+        return {"error": "permission_denied"}
+    with _conn_immediate() as c:
+        row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return {"error": "user_not_found"}
+        current = int(row["wallet_balance"] or 0)
+        new_balance = current + amount
+        c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?",
+                  (new_balance, user_id))
+        cur = c.execute(
+            "INSERT INTO wallet_transactions "
+            "(user_id, amount, balance_after, type, reason, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, amount, new_balance, tx_type, reason, created_by, _now()),
+        )
+        tx_id = cur.lastrowid
+    log_action(created_by, "wallet_credit",
+                f"user={user_id}, amount={amount}, reason={reason or '-'}")
+    return {"ok": True, "balance": new_balance, "tx_id": tx_id}
+
+
+def wallet_debit(user_id: int, amount: int, created_by: int,
+                 reason: str = "") -> dict:
+    """کسر دستی از کیف پول کاربر — فقط OWNER/ADMIN (مثلاً برای اصلاح اشتباه).
+
+    اگر موجودی کافی نباشد خطای insufficient_balance برمی‌گرداند و هیچ
+    تغییری در DB داده نمی‌شود.
+    """
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        return {"error": "invalid_amount"}
+    actor_role = get_role(created_by, OWNER_ID)
+    if actor_role not in (ROLE_OWNER, ROLE_ADMIN):
+        return {"error": "permission_denied"}
+    with _conn_immediate() as c:
+        row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return {"error": "user_not_found"}
+        current = int(row["wallet_balance"] or 0)
+        if current < amount:
+            return {"error": "insufficient_balance", "balance": current}
+        new_balance = current - amount
+        c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?",
+                  (new_balance, user_id))
+        cur = c.execute(
+            "INSERT INTO wallet_transactions "
+            "(user_id, amount, balance_after, type, reason, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, -amount, new_balance, "admin_adjust", reason, created_by, _now()),
+        )
+        tx_id = cur.lastrowid
+    log_action(created_by, "wallet_debit",
+                f"user={user_id}, amount={amount}, reason={reason or '-'}")
+    return {"ok": True, "balance": new_balance, "tx_id": tx_id}
+
+
+def wallet_pay_from_balance(user_id: int, amount: int, ref: str = "") -> dict:
+    """پرداخت از کیف پول کاربر — برای خرید سفارش/تمدید اشتراک.
+
+    فرقش با wallet_debit: نیازی به نقش OWNER/ADMIN ندارد (کاربر خودش
+    از موجودی‌اش خرج می‌کند)، و نوع تراکنش 'payment' است با مرجعِ سفارش.
+    """
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        return {"error": "invalid_amount"}
+    with _conn_immediate() as c:
+        row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return {"error": "user_not_found"}
+        current = int(row["wallet_balance"] or 0)
+        if current < amount:
+            return {"error": "insufficient_balance", "balance": current}
+        new_balance = current - amount
+        c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?",
+                  (new_balance, user_id))
+        cur = c.execute(
+            "INSERT INTO wallet_transactions "
+            "(user_id, amount, balance_after, type, ref, reason, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, -amount, new_balance, "payment", ref, "خرج از کیف پول",
+             user_id, _now()),
+        )
+        tx_id = cur.lastrowid
+    log_action(user_id, "wallet_payment",
+                f"amount={amount}, ref={ref or '-'}, new_balance={new_balance}")
+    return {"ok": True, "balance": new_balance, "tx_id": tx_id}
+
+
+def list_wallet_transactions(user_id: int, limit: int = 20) -> list:
+    """آخرین N تراکنشِ کیف پول کاربر — جدیدترین اول."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM wallet_transactions WHERE user_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def list_users_for_reseller(reseller_id: int) -> list:
@@ -2436,6 +2610,86 @@ def create_license(license_type: str, duration_days: int, created_by: int,
     return get_license(code)
 
 
+def create_license_batch(license_type: str, duration_days, created_by: int,
+                         count: int, reseller_user_limit=None) -> dict:
+    """
+    ساخت گروهیِ لایسنس — همان اعتبارسنجیِ create_license، ولی N بار در یک
+    تراکنشِ اتمیک. اگر کدی تصادفاً تکرار شد (احتمال عملاً صفر)، فقط همان
+    ردیف skip می‌شود و بقیه ساخته می‌شوند — ساخت گروهی هرگز با کدِ تأیید-
+    نشده INSERT نمی‌کند.
+
+    ورودی:
+      license_type  — "account" | "reseller" | "admin"
+      duration_days — برای account (مثبت)، None برای reseller/admin
+      created_by    — user_id سازنده (OWNER/ADMIN/RESELLER)
+      count         — تعداد لایسنس (1..BATCH_LICENSE_MAX)
+      reseller_user_limit — فقط برای reseller (مثبت)
+
+    بازگشت:
+      {"ok": True, "licenses": [...], "failed": k}  — k ردیف ناموفق
+      {"error": "..."}                              — خطای ورودی
+    """
+    # اعتبارسنجیِ count — جلوگیری از مقادیر بیمعتنا و DoS
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return {"error": "invalid_count"}
+    if count > BATCH_LICENSE_MAX:
+        return {"error": "too_many"}
+    # همان ماتریس دسترسیِ create_license
+    _LICENSE_ALLOWED = {
+        ROLE_OWNER: {LICENSE_TYPE_ACCOUNT, LICENSE_TYPE_RESELLER, LICENSE_TYPE_ADMIN},
+        ROLE_ADMIN: {LICENSE_TYPE_ACCOUNT, LICENSE_TYPE_RESELLER},
+        ROLE_RESELLER: {LICENSE_TYPE_ACCOUNT},
+    }
+    if license_type not in (LICENSE_TYPE_ACCOUNT, LICENSE_TYPE_RESELLER,
+                            LICENSE_TYPE_ADMIN):
+        return {"error": "invalid_type"}
+    caller_role = get_role(created_by, OWNER_ID)
+    if caller_role not in _LICENSE_ALLOWED or \
+            license_type not in _LICENSE_ALLOWED[caller_role]:
+        return {"error": "permission_denied"}
+    # اعتبارسنجیِ ورودی بر اساس نوع — دقیقاً مثل create_license
+    if license_type == LICENSE_TYPE_ACCOUNT:
+        if not isinstance(duration_days, int) or isinstance(duration_days, bool) \
+                or duration_days <= 0:
+            return {"error": "invalid_duration"}
+        reseller_user_limit = None
+    elif license_type == LICENSE_TYPE_RESELLER:
+        if not isinstance(reseller_user_limit, int) \
+                or isinstance(reseller_user_limit, bool) or reseller_user_limit <= 0:
+            return {"error": "invalid_limit"}
+        duration_days = None
+    else:  # admin
+        if duration_days is not None:
+            return {"error": "invalid_duration"}
+        reseller_user_limit = None
+    licenses = []
+    failed = 0
+    with _conn() as c:
+        for _i in range(count):
+            code = _generate_license_code()
+            unique = False
+            for _ in range(10):
+                exists = c.execute("SELECT 1 FROM licenses WHERE code = ?", (code,)).fetchone()
+                if not exists:
+                    unique = True
+                    break
+                code = _generate_license_code()
+            if not unique:
+                failed += 1
+                continue
+            c.execute(
+                "INSERT INTO licenses (code, license_type, duration_days, max_uses, used_count, "
+                "reseller_user_limit, created_by, created_at, is_active) "
+                "VALUES (?, ?, ?, 1, 0, ?, ?, ?, 1)",
+                (code, license_type, duration_days, reseller_user_limit, created_by, _now()),
+            )
+            row = c.execute("SELECT * FROM licenses WHERE code = ?", (code,)).fetchone()
+            licenses.append(dict(row))
+    log_action(created_by, "create_license_batch",
+                f"type={license_type}, count={count}, ok={len(licenses)}, failed={failed}")
+    return {"ok": True, "licenses": licenses, "failed": failed}
+
+
 def list_licenses(limit: int = 50, created_by: int = None) -> list:
     """
     لیست لایسنس‌های ساخته‌شده (جدیدترین اول) — برای پنل «🎫 لایسنس‌ها».
@@ -2694,6 +2948,29 @@ def _license_result_text(lic) -> str:
             lic["error"], _LICENSE_ERROR_TEXT["unknown_error"]
         )
     return _license_created_text(lic)
+
+
+def _license_batch_result_text(result: dict) -> str:
+    """متنِ نتیجه‌ی ساختِ گروهی — هم موفقیت و هم خطای امنِ Backend.
+    برای ≤۱۰ کد، همه‌ی کدها در یک پیام؛ برای بیشتر، فقط خلاصه را برمی‌گرداند
+    (لیست کامل از طریق فایل ارسال می‌شود — فراخواننده مسئول send_file است)."""
+    if not result or "error" in result:
+        err = result.get("error", "unknown_error") if result else "unknown_error"
+        return "❌ " + _LICENSE_ERROR_TEXT.get(err, _LICENSE_ERROR_TEXT["unknown_error"])
+    licenses = result.get("licenses", [])
+    failed = result.get("failed", 0)
+    if not licenses:
+        return "❌ هیچ لایسنسی ساخته نشد."
+    lines = [f"✅ {len(licenses)} لایسنس ساخته شد"]
+    if failed:
+        lines.append(f"⚠️ {failed} لایسنس به‌دلیل تصادف کد ساخته نشد (دوباره تلاش کن).")
+    lines.append("")
+    if len(licenses) <= 10:
+        for lic in licenses:
+            lines.append(f"`{lic['code']}`")
+    else:
+        lines.append(f"📋 {len(licenses)} کد ساخته شد — لیست کامل را در فایل پیوست ببین.")
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────
@@ -8746,6 +9023,12 @@ WIZ_DB_RESTORE_CONFIRM = "awaiting_db_restore_confirm"
 WIZ_LICENSE_CODE = "awaiting_license_code"
 WIZ_PAYMENT_RECEIPT = "awaiting_payment_receipt"
 WIZ_CL_RESELLER_LIMIT = "cl_reseller_limit"
+WIZ_CL_BATCH_RESELLER_LIMIT = "cl_batch_reseller_limit"
+WIZ_CL_BATCH_QTY = "cl_batch_qty"
+WIZ_WALLET_CREDIT_AMOUNT = "wallet_credit_amount"
+WIZ_WALLET_CREDIT_REASON = "wallet_credit_reason"
+WIZ_WALLET_DEBIT_AMOUNT = "wallet_debit_amount"
+WIZ_WALLET_DEBIT_REASON = "wallet_debit_reason"
 WIZ_OWNER_TICKET_REPLY = "owner_ticket_reply"
 WIZ_SET_CARD = "awaiting_card_info"
 WIZ_SET_CHANNEL = "awaiting_channel"
@@ -9490,6 +9773,7 @@ class SaaSBot:
         # دکمه‌ی سطحِ اول بود و منو را شلوغ می‌کرد.
         items = [
             UI.go("⏳ مدیریت اشتراک", "user_sub_status"),
+            UI.go("💰 کیف پول", "user_wallet"),
             UI.go("🧾 سفارش‌ها", "user_orders"),
             UI.go("🔑 فعالسازی لایسنس", "user_activate_license"),
             UI.go("❤️ دعوت دوستان", "user_referral"),
@@ -9504,6 +9788,126 @@ class SaaSBot:
             UI.screen("👤 حساب کاربری", body=body,
                       subtitle="کارهای مربوط به حساب خودت اینجاست."),
             buttons=buttons,
+        )
+
+    async def _user_show_wallet(self, event):
+        """💰 کیف پولِ کاربر — موجودی + آخرین تراکنش‌ها + دکمه‌ی شارژ (در صورت مجاز بودن)."""
+        uid = event.sender_id
+        balance = get_wallet_balance(uid)
+        txs = list_wallet_transactions(uid, limit=10)
+        body = [
+            f"💳 موجودی فعلی: **{fa_digits(balance)} Toman**",
+            "",
+            "آخرین تراکنش‌ها:" if txs else "(تراکنشی ثبت نشده)",
+        ]
+        if txs:
+            for tx in txs[:10]:
+                amt = int(tx["amount"])
+                sign = "+" if amt > 0 else ""
+                t_short = (tx["created_at"] or "")[:16].replace("T", " ")
+                reason = (tx.get("reason") or tx.get("ref") or "")[:30]
+                body.append(f"{sign}{fa_digits(amt)} · {t_short} · {reason}")
+        text = UI.screen("💰 کیف پول", body=body,
+                        hint="برای شارژ، با پشتیبانی یا OWNER/ADMIN تماس بگیر.")
+        buttons = [
+            [UI.go("🧾 همه‌ی تراکنش‌ها", "user_wallet_tx")],
+            UI.nav_row(),
+        ]
+        await event.edit(text, buttons=buttons)
+
+    async def _user_show_wallet_tx(self, event):
+        """🧾 تاریخچه‌ی کاملِ تراکنش‌های کیف پول کاربر (۲۰ مورد اخیر)."""
+        uid = event.sender_id
+        txs = list_wallet_transactions(uid, limit=20)
+        if not txs:
+            await event.edit(
+                UI.screen("🧾 تراکنش‌ها", body=["(هیچ تراکنشی ثبت نشده.)"],
+                          hint="بازگشت برای بازگشت."),
+                buttons=UI.nav_row(),
+            )
+            return
+        body = []
+        for tx in txs:
+            amt = int(tx["amount"])
+            sign = "+" if amt > 0 else ""
+            t_short = (tx["created_at"] or "")[:16].replace("T", " ")
+            t_type = tx["type"] or ""
+            reason = (tx.get("reason") or tx.get("ref") or "")[:40]
+            body.append(f"`{tx['id']}` {sign}{fa_digits(amt)} · {t_short}")
+            body.append(f"   نوع: {t_type}" + (f" — {reason}" if reason else ""))
+            body.append(f"   موجودی بعد از این: {fa_digits(int(tx['balance_after']))} Toman")
+            body.append("")
+        await event.edit(
+            UI.screen("🧾 تراکنش‌ها", body=body,
+                      hint="۲۰ تراکنش آخر نمایش داده می‌شود."),
+            buttons=UI.nav_row(),
+        )
+
+    async def _admin_show_user_wallet(self, event, target_uid: int):
+        """💰 کیف پول یک کاربر از دید OWNER/ADMIN — موجودی + تراکنش‌ها + شارژ/کسر."""
+        u = get_user(target_uid)
+        if not u:
+            await self._nav_heal(event, "این کاربر پیدا نشد.")
+            return
+        balance = get_wallet_balance(target_uid)
+        txs = list_wallet_transactions(target_uid, limit=10)
+        name = u.get("username") or f"کاربر {target_uid}"
+        body = [
+            f"👤 {name}",
+            f"🆔 `{target_uid}`",
+            f"💳 موجودی: **{fa_digits(balance)} Toman**",
+            "",
+            "آخرین تراکنش‌ها:" if txs else "(تراکنشی ثبت نشده)",
+        ]
+        if txs:
+            for tx in txs[:10]:
+                amt = int(tx["amount"])
+                sign = "+" if amt > 0 else ""
+                t_short = (tx["created_at"] or "")[:16].replace("T", " ")
+                reason = (tx.get("reason") or tx.get("ref") or "")[:30]
+                body.append(f"{sign}{fa_digits(amt)} · {t_short} · {reason}")
+        await event.edit(
+            UI.screen("💰 کیف پول کاربر", body=body,
+                      hint="با دکمه‌های زیر می‌توانی شارژ کنی یا کسر کنی."),
+            buttons=[
+                [UI.go("➕ شارژ", f"user_wallet_credit:{target_uid}", tone="success")],
+                [UI.go("➖ کسر", f"user_wallet_debit:{target_uid}", tone="danger")],
+                UI.nav_row(),
+            ],
+        )
+
+    async def _admin_wallet_credit_start(self, event, target_uid: int):
+        """شروع ویزارد شارژ کیف پول کاربر."""
+        u = get_user(target_uid)
+        if not u:
+            await self._nav_heal(event, "این کاربر پیدا نشد.")
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_WALLET_CREDIT_AMOUNT,
+                                {"target_uid": target_uid})
+        name = u.get("username") or f"کاربر {target_uid}"
+        await event.respond(
+            f"➕ **شارژ کیف پول**\n\n"
+            f"👤 کاربر: {name} (`{target_uid}`)\n"
+            f"💳 موجودی فعلی: {fa_digits(get_wallet_balance(target_uid))} Toman\n\n"
+            f"مبلغ به Toman بفرست (مثبت برای شارژ، منفی برای کسر):"
+        )
+
+    async def _admin_wallet_debit_start(self, event, target_uid: int):
+        """شروع ویزارد کسر دستی از کیف پول کاربر."""
+        u = get_user(target_uid)
+        if not u:
+            await self._nav_heal(event, "این کاربر پیدا نشد.")
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_WALLET_DEBIT_AMOUNT,
+                                {"target_uid": target_uid})
+        name = u.get("username") or f"کاربر {target_uid}"
+        await event.respond(
+            f"➖ **کسر از کیف پول**\n\n"
+            f"👤 کاربر: {name} (`{target_uid}`)\n"
+            f"💳 موجودی فعلی: {fa_digits(get_wallet_balance(target_uid))} Toman\n\n"
+            f"مبلغ کسر به Toman رو بفرست (مثبت):"
         )
 
     async def _show_referral(self, event):
@@ -10648,6 +11052,7 @@ class SaaSBot:
             f"🎭 نقش: {role}",
             f"⭐ پلن: {st['plan'] if st['plan'] else '—'}",
             f"{UI.state_dot(sub_state)} اشتراک: {sub_line}",
+            f"💰 کیف پول: {fa_digits(get_wallet_balance(target_user_id))} Toman",
         ]
         if u.get("reseller_id"):
             body.append(f"👥 زیرمجموعه‌ی نماینده: `{u['reseller_id']}`")
@@ -10680,6 +11085,7 @@ class SaaSBot:
                               f"user_add_bot:{target_user_id}", tone="success")])
         buttons.append([UI.item("⏳ مدیریت اشتراک", sub_state,
                                 f"user_sub_admin:{target_user_id}")])
+        buttons.append([UI.go("💰 کیف پول", f"user_wallet_admin:{target_user_id}", tone="success")])
         buttons.append([UI.go("🧾 سفارش‌ها", f"user_orders_admin:{target_user_id}")])
         if viewer_role == ROLE_RESELLER:
             # نماینده هرگز «حذف کامل» ندارد — فقط جداسازی مشتری از نمایندگی
@@ -11362,6 +11768,10 @@ class SaaSBot:
         pending = info.get("pending_commits") or []
         last_check = info.get("last_check", 0)
         last_update = info.get("last_update_at", 0)
+        # v2.8.1: تشخیص تغییرات محلی (rollback یا replace دستی)
+        has_local_mods = info.get("has_local_mods", False)
+        rolled_back = info.get("rolled_back", False)
+        rolled_back_at = info.get("rolled_back_at", 0)
 
         # فرمت‌سازی تاریخ‌ها به فارسی
         def _fmt_ts(ts: int) -> str:
@@ -11374,7 +11784,10 @@ class SaaSBot:
             except Exception:
                 return str(ts)
 
-        is_up_to_date = (local == remote) or not pending
+        # v2.8.1: شرط «آپ‌تو‌دِیت» اکنون تعدیل شده — اگه فایل‌ها نسبت
+        # به git HEAD تغییر کرده باشند (rollback/replace)، کاربر آپ‌تو‌دِیت
+        # نیست، حتی اگه local == remote باشه. این جلوی bug 3 رو می‌گیره.
+        is_up_to_date = (local == remote) and not pending and not has_local_mods and not rolled_back
         body = [
             f"🏷 ورژن محلی: `{local[:8]}`" if local != "نامشخص" else "🏷 ورژن محلی: نامشخص",
             f"🌐 آخرین ورژن remote: `{remote[:8]}`" if remote != "نامشخص" else "🌐 ورژن remote: نامشخص",
@@ -11382,18 +11795,32 @@ class SaaSBot:
         if is_up_to_date:
             body.append(f"{UI.GREEN} ✅ آپ‌تو‌دِیت هستی")
         else:
-            body.append(f"{UI.AMBER} 📥 {fa_digits(len(pending))} commit جدید منتظر apply")
-            for line in pending[:5]:
-                body.append(f"   `{line[:8]}` {line[9:60]}")
-            if len(pending) > 5:
-                body.append(f"   {UI.GRAY}… و {fa_digits(len(pending) - 5)} commit دیگر")
+            if pending:
+                body.append(f"{UI.AMBER} 📥 {fa_digits(len(pending))} commit جدید منتظر apply")
+                for line in pending[:5]:
+                    body.append(f"   `{line[:8]}` {line[9:60]}")
+                if len(pending) > 5:
+                    body.append(f"   {UI.GRAY}… و {fa_digits(len(pending) - 5)} commit دیگر")
+            if rolled_back:
+                # v2.8.1: کاربر rollback کرده — پیام واضح نشون بده
+                body.append(f"{UI.AMBER} ↩️ به نسخه‌ی قدیمی rollback شده")
+                if rolled_back_at:
+                    body.append(f"{UI.GRAY} زمان rollback: {_fmt_ts(int(rolled_back_at))}")
+            elif has_local_mods:
+                # v2.8.1: فایل‌ها دستی replace شده — پیام نشون بده
+                body.append(f"{UI.AMBER} ⚠️ فایل‌های محلی با git HEAD هم‌خوانی ندارند")
+                body.append(f"{UI.GRAY} (ممکن است rollback یا replace دستی انجام شده باشد)")
         body.append("")
         body.append(f"{UI.GRAY} آخرین چک: {_fmt_ts(last_check)}")
         body.append(f"{UI.GRAY} آخرین آپدیت: {_fmt_ts(last_update)}")
 
         buttons = []
         if not is_up_to_date:
-            buttons.append([UI.confirm("📥 اعمال آپدیت", "owner_update_apply")])
+            # v2.8.1: دکمه‌ی «اعمال آپدیت» حالا همیشه نشون داده می‌شه —
+            # چه commit جدید باشه، چه rollback شده باشیم، چه فایل‌ها
+            # دستی replace شده باشند. در همه‌ی این موارد، apply_update
+            # کار درستی انجام می‌ده: git fetch + reset --hard به origin/main.
+            buttons.append([UI.confirm("📥 اعمال آپدیت از git", "owner_update_apply")])
         buttons.append([UI.go("🔄 چک آپدیت", "owner_update_check")])
         buttons.append([UI.go("↩️ لیست نسخه‌های قابل rollback", "owner_rollback_list")])
         # PATCH (v2.3.0): auto-update toggle
@@ -11598,9 +12025,23 @@ class SaaSBot:
             )
             return
 
-        shown = candidates[:10]
+        # v2.8.1: pagination — ۱۰ نسخه در هر صفحه + دکمه‌های «صفحه‌ی قبل/بعد».
+        # قبلاً فقط candidates[:10] نشون داده می‌شد و بقیه مخفی می‌موندن.
+        # حالا با page number از callback data می‌آد.
+        page = 1
+        # اگه از pagination callback اومده، page رو از data بگیر
+        if hasattr(event, "_rollback_page"):
+            page = max(1, int(getattr(event, "_rollback_page", 1)))
+        per_page = 10
+        total = len(candidates)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+        start = (page - 1) * per_page
+        shown = candidates[start:start + per_page]
         body = [
-            f"📦 {fa_digits(len(candidates))} نسخه‌ی قابل rollback موجود:",
+            f"📦 {fa_digits(total)} نسخه‌ی قابل rollback موجود:",
+            f"{UI.GRAY} صفحه‌ی {fa_digits(page)} از {fa_digits(total_pages)}",
             "",
         ]
         buttons = []
@@ -11610,14 +12051,22 @@ class SaaSBot:
             import urllib.parse as _up
             encoded = _up.quote(name, safe="")
             buttons.append([UI.danger(f"↩️ {name}", f"owner_rollback_go:{encoded}")])
-        if len(candidates) > 10:
-            body.append(f"{UI.GRAY} … و {fa_digits(len(candidates) - 10)} مورد دیگر")
+        # دکمه‌های pagination
+        nav_btns = []
+        if page > 1:
+            nav_btns.append(UI.neutral(f"« صفحه‌ی {fa_digits(page - 1)}",
+                                       f"owner_rollback_page:{page - 1}"))
+        if page < total_pages:
+            nav_btns.append(UI.neutral(f"صفحه‌ی {fa_digits(page + 1)} »",
+                                       f"owner_rollback_page:{page + 1}"))
+        if nav_btns:
+            buttons.append(nav_btns)
         buttons.append(UI.nav_row())
 
         await event.edit(
             UI.screen("↩️ Rollback به نسخه",
                       body=body,
-                      subtitle="روی هر کدام بزن تا main.py جایگزین شود.",
+                      subtitle=f"روی هر کدام بزن تا main.py جایگزین شود. — صفحه {fa_digits(page)}/{fa_digits(total_pages)}",
                       hint="⚠️ قبل از rollback، main.py فعلی به‌صورت خودکار backup می‌شود."),
             buttons=buttons,
         )
@@ -11686,6 +12135,15 @@ class SaaSBot:
         # جایگزینی
         try:
             _shutil.copy2(src_path, main_py)
+            # v2.8.1: بعد از rollback موفق، flag «rolled_back» را در state ست کن
+            # و .last_seen_commit را پاک کن تا آپدیتر بعد از restart بدونه
+            # باید re-detect کنه (bug 3 fix).
+            try:
+                updater_mod, _ = self._import_updater_safe()
+                if updater_mod is not None:
+                    updater_mod.mark_rolled_back()
+            except Exception as _re:
+                print(f"⚠️ [rollback] mark_rolled_back failed: {_re}")
         except Exception as e:
             try:
                 _shutil.copy2(backup_path, main_py)
@@ -12413,6 +12871,7 @@ class SaaSBot:
         lines = ["🎫 **لایسنس و دسترسی‌ها**\n\nاز اینجا لایسنس بساز و نقش‌ها را مدیریت کن:"]
         items = [
             UI.go("➕ ساخت لایسنس", b"owner_create_license", tone="success"),
+            UI.go("📦 ساخت گروهی", b"owner_create_license_batch", tone="success"),
             UI.go("📋 لایسنس‌های ساخته‌شده", b"license_access_list", tone="success"),
         ]
         if self._role(event.sender_id) == ROLE_OWNER:
@@ -13402,6 +13861,137 @@ class SaaSBot:
             )
             self.wizards.pop(event.sender_id, None)
             await event.respond(_license_result_text(lic))
+            return True
+
+        if state == WIZ_CL_BATCH_RESELLER_LIMIT:
+            try:
+                limit = int(text)
+                assert limit > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد صحیح مثبت بفرست (سقف مشتری):")
+                return True
+            wiz["data"]["reseller_user_limit"] = limit
+            wiz["state"] = WIZ_CL_BATCH_QTY
+            await event.respond(
+                "🔢 حالا تعداد لایسنس‌ها رو بفرست (۱ تا ۱۰۰):",
+            )
+            return True
+
+        if state == WIZ_CL_BATCH_QTY:
+            try:
+                qty = int(text)
+                assert 1 <= qty <= BATCH_LICENSE_MAX
+            except (ValueError, AssertionError):
+                await event.respond(
+                    f"❌ یه عدد صحیح بین ۱ و {BATCH_LICENSE_MAX} بفرست:"
+                )
+                return True
+            ltype = wiz["data"].get("license_type", LICENSE_TYPE_ACCOUNT)
+            duration = wiz["data"].get("duration_days")
+            reseller_limit = wiz["data"].get("reseller_user_limit")
+            self.wizards.pop(event.sender_id, None)
+            result = create_license_batch(
+                license_type=ltype,
+                duration_days=duration,
+                created_by=event.sender_id,
+                count=qty,
+                reseller_user_limit=reseller_limit,
+            )
+            summary = _license_batch_result_text(result)
+            await event.respond(summary)
+            # اگر بیش از ۱۰ کد ساخته شد، لیست کامل را در یک فایل متنی بفرست
+            # تا کاربر راحت کپی کند — پیام تلگرام محدودیت ۴۰۹۶ کاراکتر دارد.
+            if isinstance(result, dict) and result.get("ok") and len(result.get("licenses", [])) > 10:
+                try:
+                    import io
+                    lines = []
+                    for lic in result["licenses"]:
+                        lines.append(lic["code"])
+                    file_body = "\n".join(lines)
+                    buf = io.BytesIO(file_body.encode("utf-8"))
+                    buf.name = "licenses.txt"
+                    await event.respond(file=buf, force_document=True)
+                except Exception as _e:
+                    print(f"⚠️ [batch_license] send_file failed: {_e}")
+            return True
+
+        if state == WIZ_WALLET_CREDIT_AMOUNT:
+            target_uid = wiz["data"].get("target_uid")
+            try:
+                amount = int(text)
+                assert amount != 0  # 0 Toman بی‌معنی است
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد صحیح بفرست (مثبت برای شارژ، منفی برای کسر):")
+                return True
+            wiz["data"]["amount"] = amount
+            wiz["state"] = WIZ_WALLET_CREDIT_REASON
+            await event.respond("📝 دلیل/توضیح این تراکنش رو بفرست (یا '-' بزن بدون توضیح):")
+            return True
+
+        if state == WIZ_WALLET_CREDIT_REASON:
+            target_uid = wiz["data"].get("target_uid")
+            amount = wiz["data"].get("amount", 0)
+            reason = text if text.strip() and text.strip() != "-" else ""
+            self.wizards.pop(event.sender_id, None)
+            if amount > 0:
+                r = wallet_credit(target_uid, amount, event.sender_id, reason=reason)
+            else:
+                r = wallet_debit(target_uid, -amount, event.sender_id, reason=reason)
+            if r.get("ok"):
+                sign = "+" if amount > 0 else ""
+                await event.respond(
+                    f"✅ تراکنش ثبت شد\n"
+                    f"👤 کاربر: `{target_uid}`\n"
+                    f"💰 مبلغ: {sign}{fa_digits(abs(amount))} Toman\n"
+                    f"💳 موجودی جدید: {fa_digits(r['balance'])} Toman\n"
+                    + (f"📝 دلیل: {reason}" if reason else "")
+                )
+            else:
+                err_map = {
+                    "permission_denied": "⛔ شما مجاز به این عمل نیستید.",
+                    "user_not_found": "❌ کاربر پیدا نشد.",
+                    "invalid_amount": "❌ مبلغ نامعتبر.",
+                    "insufficient_balance": "❌ موجودی کاربر کافی نیست.",
+                }
+                await event.respond(err_map.get(r.get("error"), "❌ خطای ناشناخته."))
+            return True
+
+        #debit wizard is similar but uses dedicated states for clarity
+        if state == WIZ_WALLET_DEBIT_AMOUNT:
+            target_uid = wiz["data"].get("target_uid")
+            try:
+                amount = int(text)
+                assert amount > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد صحیح مثبت بفرست (مبلغ کسر به Toman):")
+                return True
+            wiz["data"]["amount"] = amount
+            wiz["state"] = WIZ_WALLET_DEBIT_REASON
+            await event.respond("📝 دلیل این کسر رو بفرست (یا '-' بدون توضیح):")
+            return True
+
+        if state == WIZ_WALLET_DEBIT_REASON:
+            target_uid = wiz["data"].get("target_uid")
+            amount = wiz["data"].get("amount", 0)
+            reason = text if text.strip() and text.strip() != "-" else ""
+            self.wizards.pop(event.sender_id, None)
+            r = wallet_debit(target_uid, amount, event.sender_id, reason=reason)
+            if r.get("ok"):
+                await event.respond(
+                    f"✅ کسر ثبت شد\n"
+                    f"👤 کاربر: `{target_uid}`\n"
+                    f"💰 مبلغ: -{fa_digits(amount)} Toman\n"
+                    f"💳 موجودی جدید: {fa_digits(r['balance'])} Toman\n"
+                    + (f"📝 دلیل: {reason}" if reason else "")
+                )
+            else:
+                err_map = {
+                    "permission_denied": "⛔ شما مجاز نیستید.",
+                    "user_not_found": "❌ کاربر پیدا نشد.",
+                    "invalid_amount": "❌ مبلغ نامعتبر.",
+                    "insufficient_balance": "❌ موجودی کاربر کافی نیست.",
+                }
+                await event.respond(err_map.get(r.get("error"), "❌ خطای ناشناخته."))
             return True
 
         if state == WIZ_SET_CARD:
@@ -14570,6 +15160,16 @@ class SaaSBot:
                 if data == "owner_rollback_list" and role == ROLE_OWNER:
                     await self._owner_show_rollback_list(event)
                     return
+                # v2.8.1: pagination برای rollback list
+                if data.startswith("owner_rollback_page:") and role == ROLE_OWNER:
+                    try:
+                        page = int(data.split(":", 1)[1])
+                    except (ValueError, IndexError):
+                        page = 1
+                    # page را به event تخصیص می‌دهیم تا _owner_show_rollback_list بخواندش
+                    event._rollback_page = page
+                    await self._owner_show_rollback_list(event)
+                    return
                 if data.startswith("owner_rollback_go:") and role == ROLE_OWNER:
                     # فرمت: owner_rollback_go:{urlencoded_name}
                     encoded_name = data[len("owner_rollback_go:"):]
@@ -15108,6 +15708,92 @@ class SaaSBot:
                     lic = create_license(ltype, duration_days=duration, created_by=event.sender_id)
                     await event.edit(_license_result_text(lic),
                                      buttons=[UI.nav_row()])
+                    return
+                # ──────── ساخت گروهی لایسنس (v2.7.0) ────────
+                if data == "owner_create_license_batch" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
+                    await self._clear_admin_panel_wizard(event.sender_id)
+                    self._start_own_wizard(event.sender_id, "cl_batch_pending_type", {})
+                    type_buttons = [
+                        UI.go("👤 اشتراک کاربر", b"cl_batch_type:account"),
+                    ]
+                    if role in (ROLE_OWNER, ROLE_ADMIN):
+                        type_buttons.append(UI.go("🤝 نمایندگی", b"cl_batch_type:reseller"))
+                    if role == ROLE_OWNER:
+                        type_buttons.append(UI.go("🛡 ادمین", b"cl_batch_type:admin"))
+                    await event.edit(
+                        "📦 **ساخت گروهی لایسنس**\n\n"
+                        "نوع دسترسی رو انتخاب کن — همه‌ی لایسنس‌ها از همین نوع خواهند بود:",
+                        buttons=self._pair_buttons(type_buttons)
+                                + [[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                    )
+                    return
+                if data.startswith("cl_batch_type:"):
+                    ltype = data.split(":", 1)[1]
+                    wiz = self.wizards.get(event.sender_id)
+                    if wiz is None or wiz["state"] != "cl_batch_pending_type":
+                        return
+                    wiz["data"]["license_type"] = ltype
+                    if ltype == LICENSE_TYPE_ADMIN:
+                        if role != ROLE_OWNER:
+                            await event.answer("⛔ فقط OWNER می‌تواند لایسنس ادمین بسازد.", alert=True)
+                            return
+                        # ادمین: مستقیم به سؤال تعداد
+                        wiz["state"] = WIZ_CL_BATCH_QTY
+                        await event.edit(
+                            "🔢 **تعداد لایسنس ادمین** رو بفرست (۱ تا ۱۰۰):",
+                            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                        )
+                        return
+                    if ltype == LICENSE_TYPE_RESELLER:
+                        # نمایندگی: اول سقف مشتری، بعد تعداد
+                        wiz["state"] = WIZ_CL_BATCH_RESELLER_LIMIT
+                        await event.edit(
+                            "👥 **لایسنس نمایندگی گروهی**\n\n"
+                            "سقف مشتری‌های هر نماینده رو بفرست (یه عدد مثبت):",
+                            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                        )
+                        return
+                    # account → انتخاب مدت
+                    wiz["state"] = "cl_batch_pending_duration"
+                    await event.edit(
+                        "⏳ **مدت اعتبارِ همه‌ی لایسنس‌ها** رو انتخاب کن:",
+                        buttons=[
+                            [UI.go("۳۰ روز", b"cl_batch_dur:30"), UI.go("۹۰ روز", b"cl_batch_dur:90")],
+                            [UI.go("۱۸۰ روز", b"cl_batch_dur:180"), UI.go("۳۶۵ روز", b"cl_batch_dur:365")],
+                            [UI.neutral(UI.L_CANCEL, NAV_BACK)],
+                        ],
+                    )
+                    return
+                if data.startswith("cl_batch_dur:"):
+                    wiz = self.wizards.get(event.sender_id)
+                    if wiz is None or wiz["state"] != "cl_batch_pending_duration":
+                        return
+                    duration = int(data.split(":", 1)[1])
+                    wiz["data"]["duration_days"] = duration
+                    wiz["state"] = WIZ_CL_BATCH_QTY
+                    await event.edit(
+                        "🔢 **تعداد لایسنس** رو بفرست (۱ تا ۱۰۰):",
+                        buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                    )
+                    return
+                # ──────── کیف پول کاربر (v2.8.0) ────────
+                if data == "user_wallet":
+                    await self._user_show_wallet(event)
+                    return
+                if data == "user_wallet_tx":
+                    await self._user_show_wallet_tx(event)
+                    return
+                if data.startswith("user_wallet_admin:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    target_uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._admin_show_user_wallet(event, target_uid)
+                    return
+                if data.startswith("user_wallet_credit:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    target_uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._admin_wallet_credit_start(event, target_uid)
+                    return
+                if data.startswith("user_wallet_debit:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                    target_uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._admin_wallet_debit_start(event, target_uid)
                     return
                 if data == "reseller_create_license" and role == ROLE_RESELLER:
                     await self._reseller_start_create_license(event)
@@ -22377,6 +23063,7 @@ async def main():
     # ستون‌های رفرال — روی نصب‌های موجود هم بی‌خطر اضافه می‌شوند
     try:
         ensure_referral_schema()
+        ensure_wallet_schema()
     except Exception as e:
         print(f"⚠️ مهاجرت ستون‌های رفرال ناموفق: {type(e).__name__}: {e}")
     _migrate_provision_sources()
