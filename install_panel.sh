@@ -224,27 +224,39 @@ if ! grep -q "PANEL_ADMIN_PASS_HASH" "$ENV_FILE" 2>/dev/null; then
     done
 
     # Generate bcrypt hash با passlib
+    # PATCH (v2.1.4): به‌دلیل set -e در ابتدای اسکریپت، اگه $PYTHON_BIN شکست
+    # بخوره (مثلاً bcrypt C extension نصب نباشه)، کل اسکریپت بدون پیام خطا
+    # متوقف می‌شد. حالا یا || true اضافه می‌کنیم یا set +e موقتاً غیرفعال.
+    set +e
     PANEL_PASS_HASH=$($PYTHON_BIN -c "
 from passlib.hash import bcrypt
 print(bcrypt.encrypt('$PANEL_PASS'))
 " 2>/dev/null)
+    set -e
     if [ -z "$PANEL_PASS_HASH" ]; then
         # fallback با هش ساده‌تر (sha256) — بهتر از هیچ
-        echo -e "${YELLOW}   ⚠️  passlib نصب نیست — استفاده از sha256 (کم‌امن‌تر)${NC}"
+        echo -e "${YELLOW}   ⚠️  passlib/bcrypt در venv کار نکرد — استفاده از sha256 (کم‌امن‌تر)${NC}"
+        echo -e "${YELLOW}   برای استفاده از bcrypt بعد از نصب:${NC}"
+        echo -e "${YELLOW}   $PYTHON_BIN -m pip install --upgrade 'passlib[bcrypt]'${NC}"
         PANEL_PASS_HASH="sha256:"$(echo -n "$PANEL_PASS" | sha256sum | awk '{print $1}')
     fi
 
     # تنظیم PANEL_ADMIN_USER اگه نباشه
     if ! grep -q "PANEL_ADMIN_USER" "$ENV_FILE" 2>/dev/null; then
+        # PATCH (v2.1.4): در حالت non-interactive یا stdin pipe شده،
+        # read -p می‌تونه بدون ورودی هم ادامه بده و empty پاس بده. اگر
+        # PANEL_USER empty شد، default کن.
+        set +e
         read -p "   Username (default: admin): " PANEL_USER
+        set -e
         PANEL_USER="${PANEL_USER:-admin}"
         echo "PANEL_ADMIN_USER=$PANEL_USER" >> "$ENV_FILE"
     fi
     echo "PANEL_ADMIN_PASS_HASH=$PANEL_PASS_HASH" >> "$ENV_FILE"
     # Session secret
-    SESSION_SECRET=$($PYTHON_BIN -c "import secrets; print(secrets.token_hex(32))")
+    SESSION_SECRET=$($PYTHON_BIN -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || openssl rand -hex 32)
     echo "PANEL_SESSION_SECRET=$SESSION_SECRET" >> "$ENV_FILE"
-    echo -e "${GREEN}✅ پسورد تنظیم شد${NC}"
+    echo -e "${GREEN}✅ پسورد تنظیم شد (hash type: ${PANEL_PASS_HASH%%:*})${NC}"
 else
     echo -e "${GREEN}✅ پسورد از قبل تنظیم شده${NC}"
 fi
