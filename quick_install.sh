@@ -46,6 +46,7 @@ echo ""
 if [ ! -d "$INSTALL_DIR/.git" ]; then
     echo -e "${YELLOW}۱. Clone پروژه...${NC}"
     git clone https://github.com/DLSDT/CiaNet.ir.git "$INSTALL_DIR" 2>&1 | tail -3
+    git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 else
     echo -e "${GREEN}۱. پروژه از قبل وجود داره — pull...${NC}"
     cd "$INSTALL_DIR"
@@ -152,6 +153,8 @@ cat > /etc/systemd/system/selfbot.service <<EOF
 Description=CiaNet Telegram Selfbot
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -162,8 +165,6 @@ EnvironmentFile=/etc/selfbot.env
 ExecStart=$VENV_PY main.py all
 Restart=always
 RestartSec=10
-StartLimitBurst=10
-StartLimitIntervalSec=300
 
 StandardOutput=journal
 StandardError=journal

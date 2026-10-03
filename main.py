@@ -76,6 +76,13 @@ def _project_dir() -> str:
     return os.getcwd()
 
 
+# PATCH (v2.5.5 CRITICAL): اضافه‌کردن مسیر پروژه به sys.path تا import
+# cianet_updater (و هر ماژول دیگر در همین دایرکتوری) کار کنه.
+# قبلاً این خط نبود → در systemd که sys.path شامل WorkingDirectory نیست،
+# import cianet_updater با ModuleNotFoundError شکست می‌خورد.
+sys.path.insert(0, _project_dir())
+
+
 def _data_dir() -> str:
     """
     دایرکتوری داده‌ی این نمونه (DB اصلی / bot_data / config.json / sessions):
@@ -15539,7 +15546,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.5.0-stable"
+BUILD_VERSION = "2026-10-03-v2.5.5"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)

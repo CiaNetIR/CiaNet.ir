@@ -106,6 +106,8 @@ cat > "$SERVICE_FILE" <<EOF
 Description=Telegram Selfbot SaaS Panel
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -116,8 +118,6 @@ EnvironmentFile=$ENV_FILE
 ExecStart=$PYTHON_BIN main.py all
 Restart=always
 RestartSec=10
-StartLimitBurst=10
-StartLimitIntervalSec=300
 
 StandardOutput=journal
 StandardError=journal
