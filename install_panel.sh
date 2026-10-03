@@ -194,20 +194,32 @@ fi
 # ─── Generate password hash if not set ───
 if ! grep -q "PANEL_ADMIN_PASS_HASH" "$ENV_FILE" 2>/dev/null; then
     echo ""
-    echo -e "${YELLOW}🔐 تنظیم پسورد ورود به پنل وب:${NC}"
+    echo -e "${YELLOW}🔐 تنظیم پسورد ورود به پنل وب${NC}"
+    echo -e "${YELLOW}   (نکته: کاراکترها موقع تایپ نشون داده نمی‌شن — عمداً برای امنیت)${NC}"
+    echo ""
     while true; do
-        read -s -p "   Password (حداقل ۸ کاراکتر): " PANEL_PASS
+        # بدون -s هم نشون داده نمی‌شه چون terminal suppressed است.
+        # ولی اگه کاربر هرچی تایپ کرد رو ببینه بهتر از اینه که فکر کنه چیزی وارد نشده.
+        # پس از -s استفاده می‌کنیم ولی قبلش به کاربر می‌گیم.
+        printf "   Password (حداقل ۸ کاراکتر): "
+        read -s PANEL_PASS
         echo ""
-        if [ -z "$PANEL_PASS" ] || [ ${#PANEL_PASS} -lt 8 ]; then
-            echo -e "${RED}   ❌ Password باید حداقل ۸ کاراکتر باشه${NC}"
+        if [ -z "$PANEL_PASS" ]; then
+            echo -e "${RED}   ❌ Password خالی است — دوباره وارد کن${NC}"
             continue
         fi
-        read -s -p "   Confirm password: " PANEL_PASS_CONFIRM
+        if [ ${#PANEL_PASS} -lt 8 ]; then
+            echo -e "${RED}   ❌ Password باید حداقل ۸ کاراکتر باشه (شما ${#PANEL_PASS} کاراکتر وارد کردی)${NC}"
+            continue
+        fi
+        printf "   Confirm password: "
+        read -s PANEL_PASS_CONFIRM
         echo ""
         if [ "$PANEL_PASS" != "$PANEL_PASS_CONFIRM" ]; then
-            echo -e "${RED}   ❌ Passwords مطابقت ندارند${NC}"
+            echo -e "${RED}   ❌ Passwords مطابقت ندارند — دوباره امتحان کن${NC}"
             continue
         fi
+        echo -e "${GREEN}   ✓ Password پذیرفته شد (طول: ${#PANEL_PASS} کاراکتر)${NC}"
         break
     done
 
