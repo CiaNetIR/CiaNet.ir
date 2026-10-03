@@ -149,8 +149,27 @@ def require_auth(request: Request):
 
 # ─── Password verification (bcrypt) ──────────────────────────────────
 def _verify_password(plain: str, hashed: str) -> bool:
+    """
+    Verify password against hash. Supports:
+      - bcrypt (default): $2b$... hash format from passlib
+      - sha256 fallback: "sha256:hexdigest" format from install_panel.sh
+        when passlib/bcrypt C extension fails to install
+    """
     if not hashed:
         return False
+    # PATCH (v2.1.4): support sha256 fallback از install_panel.sh
+    if hashed.startswith("sha256:"):
+        try:
+            import hashlib
+            expected = hashed[len("sha256:"):]
+            actual = hashlib.sha256(plain.encode("utf-8")).hexdigest()
+            # constant-time comparison
+            if len(expected) != len(actual):
+                return False
+            return all(a == b for a, b in zip(expected, actual))
+        except Exception:
+            return False
+    # default: bcrypt
     try:
         from passlib.hash import bcrypt
         return bcrypt.verify(plain, hashed)
