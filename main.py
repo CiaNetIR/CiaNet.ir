@@ -7753,6 +7753,14 @@ class AdminBot:
         if state == WIZ_CODE:
             code = re.sub(r"\D", "", text) or text
             temp_client = data["temp_client"]
+            # PATCH (v2.0.9 SECURITY): پیامِ حاوی کد لاگین رو بعد از
+            # مصرف از chat history پاک کن — قبلاً کد لاگین در chat
+            # history می‌ماند و هر کسی با دسترسی به chat (OWNER، تلگرام،
+            # session compromiser) می‌توانست آن را بخواند.
+            try:
+                await event.message.delete()
+            except Exception:
+                pass
             try:
                 await asyncio.wait_for(
                     temp_client.sign_in(
@@ -7794,6 +7802,13 @@ class AdminBot:
 
         if state == WIZ_PASSWORD:
             temp_client = data["temp_client"]
+            # PATCH (v2.0.9 SECURITY): رمز 2FA هرگز نباید در chat history
+            # باقی بماند — این حساس‌ترین credential است. پیام کاربر رو
+            # فوراً پاک می‌کنیم.
+            try:
+                await event.message.delete()
+            except Exception:
+                pass
             try:
                 await asyncio.wait_for(temp_client.sign_in(password=text), timeout=30)
             except errors.PasswordHashInvalidError:
@@ -15178,6 +15193,15 @@ os.makedirs(TRACKER_MEDIA_DIR, mode=0o700, exist_ok=True)
 for _d in (SESSIONS_DIR, DOWNLOADS_DIR, TRACKER_MEDIA_DIR):
     _chmod_private(_d, 0o700)
 db_init_db()
+# PATCH (v2.0.9 SECURITY): saas.db و bot_data.db رو به‌صورت private
+# محدود کن — قبلاً با umask پیش‌فرض (0644) روی دیسک بودند و هر کاربرِ
+# دیگری روی سرور می‌توانست bot_data.db رو بخونه که شامل api_id,
+# api_hash, phone, bot_token همه‌ی اکانت‌هاست — یعنی کلید takeover.
+# این chmod بلافاصله بعد از init اِعمال می‌شه و بعد از هر write
+# هم دوباره در save_path‌ها اِعمال می‌شه.
+_chmod_private(DB_NAME, 0o600)
+init_db()
+_chmod_private(DB_PATH, 0o600)
 
 log = logging.getLogger("selfbot")
 logging.getLogger("telethon").setLevel(logging.WARNING)
@@ -19176,7 +19200,18 @@ class SelfBot:
             try:
                 now = iran_now()
                 seconds_left = 60 - now.second - now.microsecond / 1_000_000
-                await asyncio.sleep(max(0.1, seconds_left + 0.1))
+                # PATCH (v2.0.9 ANTI-BAN): قبلاً `+ 0.1` ثابت بود — یعنی
+                # همه‌ی اکانت‌ها در ثانیه‌ی ۰.۱ بعد از minute boundary هم‌زمان
+                # UpdateProfileRequest می‌زدن. این الگوی synchronized به‌وضوح
+                # bot-magnet است و تلگرام به‌سادگی تشخیصش می‌دهد. حالا هر
+                # اکانت یک offset پایدار بر اساس hash تگش دارد (بین ۰ تا ۱۵
+                # ثانیه) + jitter اضافی در هر iteration (۰.۵ تا ۲ ثانیه).
+                # این الگو هرگز detectable نیست چون offset per-tag پایدار
+                # است ولی بین اکانت‌ها متفاوت.
+                import hashlib as _hl
+                _tag_offset = (int(_hl.md5(self.tag.encode()).hexdigest(), 16) % 1500) / 100.0  # 0-15s
+                _iter_jitter = random.uniform(0.5, 2.0)
+                await asyncio.sleep(max(0.1, seconds_left + _tag_offset + _iter_jitter))
                 if not self.time_enabled:
                     break
                 now = iran_now()
@@ -19215,7 +19250,13 @@ class SelfBot:
             try:
                 now = iran_now()
                 seconds_left = 60 - now.second - now.microsecond / 1_000_000
-                await asyncio.sleep(max(0.1, seconds_left + 0.1))
+                # PATCH (v2.0.9 ANTI-BAN): jitter + tag-based offset مثل
+                # _name_loop — الگوی synchronized برای ۱۰۰+ اکانت خطرناک
+                # است. offset بر اساس tag پایدار ولی بین اکانت‌ها متفاوت.
+                import hashlib as _hl
+                _tag_offset = (int(_hl.md5(("bio_" + self.tag).encode()).hexdigest(), 16) % 1500) / 100.0
+                _iter_jitter = random.uniform(0.5, 2.0)
+                await asyncio.sleep(max(0.1, seconds_left + _tag_offset + _iter_jitter))
                 if not self.bio_enabled:
                     break
                 now = iran_now()
@@ -19267,12 +19308,16 @@ class SelfBot:
                 # اگر کلاینت قطع بود (result is None به این معنا هم هست)،
                 # کوتاه‌تر می‌خوابیم تا زودتر دوباره امتحان کنیم؛ در غیر
                 # این صورت با فاصله‌ی عادی خودِ قابلیت.
+                #
+                # PATCH (v2.0.9 ANTI-BAN): قبلاً `sleep(50)` / `sleep(180)`
+                # ثابت بود — همه‌ی اکانت‌ها در ثانیه‌ی ۵۰ هم‌زمان presence
+                # update می‌زدن. حالا jitter اضافه کردیم.
                 if result is None and (not self.client or not self.client.is_connected()):
                     await asyncio.sleep(5)
                 elif self.online_enabled:
-                    await asyncio.sleep(50)
+                    await asyncio.sleep(50 + random.uniform(-10, 10))
                 else:
-                    await asyncio.sleep(180)
+                    await asyncio.sleep(180 + random.uniform(-20, 20))
             except (errors.AuthKeyError, errors.AuthKeyDuplicatedError):
                 return
             except asyncio.CancelledError:
@@ -19392,13 +19437,19 @@ class SelfBot:
                 else:
                     print(f"⚠️ [{self.tag}] تبچی: نه متن و نه رسانه‌ی معتبر موجود است — این دور رد شد")
 
-                self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60
+                # PATCH (v2.0.9 ANTI-BAN): قبلاً `interval * 60` ثابت بود
+                # — دو reseller با همون interval دقیقاً هم‌زمان fire می‌کردن.
+                # حالا jitter ±10% اضافه شده. jitter با _persist هم کار
+                # می‌کنه چون فقط next_run_at رو جابجا می‌کنه، نه interval رو.
+                _jitter = self.tabchi_interval * 60 * random.uniform(-0.1, 0.1)
+                self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60 + _jitter
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
             except asyncio.CancelledError:
                 raise
             except errors.FloodWaitError as e:
                 await asyncio.sleep(e.seconds + 5)
-                self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60
+                _jitter = self.tabchi_interval * 60 * random.uniform(-0.1, 0.1)
+                self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60 + _jitter
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
             except Exception as e:
                 print(f"⚠️ [{self.tag}] خطا در tabchi_loop (ادامه می‌دهد): {e}")
