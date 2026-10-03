@@ -10517,9 +10517,20 @@ class SaaSBot:
 
     async def _show_user_acc(self, event, target_user_id: int, tag: str):
         """
-        ⚙️ مدیریت یک SelfBot از داخل مدیریت کاربر — دقیقاً همان هاب اکانت
-        (قابلیت‌ها/ظاهر/ابزارها/اتصال/وضعیت). «بازگشت» به لیست SelfBotهای
-        همان کاربر برمی‌گردد چون پشته‌ی ناوبری مسیر واقعی را نگه داشته.
+        ⚙️ مدیریت یک SelfBot از داخل مدیریت کاربر — برای OWNER یک «صفحه‌ی
+        اکشن‌های سریع» مخصوص نشان داده می‌شود که در یک نگاه همه‌ی عملیاتِ
+        مهم (قابلیت‌ها / اتصال و پروکسی / وضعیت / ارسال پیام / فعال‌سازی /
+        توقف / حذف) را در دسترس دارد، بدون اینکه اول وارد هاب اکانت بشود
+        و بعد زیر-دکمه‌ها را کلیک کند.
+
+        PATCH (v2.0.7 UX): قبلاً کلیک روی یک SelfBot از داخل پنل مدیریت
+        کاربر، مستقیم به admin_panel._show_account_detail می‌رفت — یعنی OWNER
+        باید اول وارد هاب اکانت می‌شد، بعد «🌐 اتصال و پروکسی» را باز می‌کرد،
+        بعد تنظیم می‌کرد، بعد برگشت و «⚡ قابلیت‌ها» را باز می‌کرد، و الی
+        آخر. حالا برای OWNER یک صفحه‌ی «اکشن‌های سریع» نشان داده می‌شود که
+        مستقیماً از همین نقطه، هر کدام از آن زیر-صفحه‌ها را با یک کلیک باز
+        می‌کند. مسیرِ بازگشت هم همان جایی است که از آن آمده‌ایم (پشته‌ی
+        ناوبری)، پس هیچ پیچیدگی اضافه نشده.
 
         مالکیت دوباره چک می‌شود: tag باید متعلق به target_user_id باشد و
         فقط OWNER/ADMIN یا نماینده‌ی مالکِ آن کاربر می‌تواند وارد شود
@@ -10530,9 +10541,98 @@ class SaaSBot:
         if not account_belongs_to(acc, tag, target_user_id):
             await self._nav_heal(event, "این اکانت متعلق به این کاربر نیست.")
             return
-        # مسیرِ بازگشت از پشته می‌آید — دیگر لازم نیست مقصد را اینجا
-        # بسازیم و در callback_data جاسازی کنیم.
-        await self.admin_panel._show_account_detail(event, tag)
+
+        viewer_role = self._role(event.sender_id)
+        # PATCH (v2.0.7): برای OWNER و ADMIN صفحه‌ی «اکشن‌های سریع» اختصاصی
+        # نشان داده می‌شود؛ برای RESELLER همان هاب اکانت قبلی. (نماینده‌ها
+        # نیازی به bulk fast-access ندارند چون معمولاً فقط ۱-۲ کاربرِ
+        # محدود دارند و کل آن‌ها را پشت یک کلیک دیده می‌شوند.)
+        if viewer_role in (ROLE_OWNER, ROLE_ADMIN):
+            await self._show_user_acc_quick_actions(event, target_user_id, tag)
+        else:
+            # مسیرِ بازگشت از پشته می‌آید — دیگر لازم نیست مقصد را اینجا
+            # بسازیم و در callback_data جاسازی کنیم.
+            await self.admin_panel._show_account_detail(event, tag)
+
+    async def _show_user_acc_quick_actions(self, event, target_user_id: int, tag: str):
+        """
+        🚀 اکشن‌های سریع برای یک SelfBot از داخل پنلِ OWNER/ADMIN — همه‌ی
+        عملیاتِ مهم در یک صفحه، بدون نیاز به ورود به هاب اکانت و بعد
+        باز کردن زیر-دکمه‌ها.
+
+        دکمه‌ها:
+          ردیف ۱: ⚡ قابلیت‌ها  |  🎨 ظاهر
+          ردیف ۲: 🌐 اتصال/پروکسی  |  📊 وضعیت
+          ردیف ۳: 📨 ارسال پیام  |  🔒 دستگاه‌ها/2FA
+          ردیف ۴: 🟢 فعال‌سازی / ⏸ توقف موقت
+          ردیف ۵: ❌ حذف کامل
+          ردیف ۶: 🔙 بازگشت
+
+        هر دکمه به همان callbackهای ازپیش‌موجود در AdminBot هدایت می‌شود،
+        ولی از طریق prefix `uacc_act:{action}:{user_id}:{tag}` تا ROLE و
+        ownership دوباره در dispatch چک شود (دفاع در عمق).
+        """
+        cfg = self.sb.load_config()
+        acc = cfg.get(tag, {})
+        entry = self.sb.ACCOUNTS.get(tag)
+        disabled = bool(acc.get("disabled"))
+        state, status_text = _acc_ui_state(acc, tag)
+        proxy_cfg = acc.get("proxy")
+        on_count = sum(1 for f, _ in FEATURE_LABELS if entry and getattr(entry.bot, f, False))
+        total_feats = len(FEATURE_LABELS)
+
+        # شماره‌ی تلفن فقط برای OWNER/ADMIN (دارنده‌ی خودِ حساب هم آن را
+        # می‌بیند در _show_account_detail، ولی اینجا در پنلِ مدیریت کاربر
+        # فقط OWNER/ADMIN این صفحه را می‌بیند).
+        phone = acc.get("phone") or "—"
+
+        body = [
+            f"🏷 تگ: `{tag}`",
+            f"{UI.state_dot(state)} وضعیت: {status_text}",
+            f"{UI.GRAY} نوع: {acc.get('type', 'user')} · شماره: `{phone}`",
+            f"{UI.dot(bool(proxy_cfg))} پروکسی: {'تنظیم‌شده' if proxy_cfg else 'ندارد'}",
+            f"{UI.dot(on_count > 0)} قابلیت‌های روشن: {fa_digits(on_count)} از {fa_digits(total_feats)}",
+        ]
+
+        # callback format: uacc_act:{action}:{user_id}:{tag}
+        # action یکی از: feat, appear, conn, status, send, sess, tfa, enable, disable, del
+        def _act(action: str) -> str:
+            return f"uacc_act:{action}:{target_user_id}:{tag}"
+
+        buttons = [
+            [
+                UI.go(f"⚡ قابلیت‌ها ({fa_digits(on_count)})", _act("feat")),
+                UI.go("🎨 ظاهر", _act("appear")),
+            ],
+            [
+                UI.go("🌐 اتصال و پروکسی", _act("conn")),
+                UI.go("📊 وضعیت", _act("status")),
+            ],
+            [
+                UI.go("📨 ارسال پیام", _act("send")),
+                UI.go("🔒 دستگاه‌ها/2FA", _act("sess")),
+            ],
+        ]
+        # عملیات حالت‌دار: سبز برای فعال‌سازی (اگر disabled)، خاکستری برای
+        # توقف موقت (اگر enabled).
+        if disabled:
+            buttons.append([UI.confirm("🟢 فعال‌سازی اکانت", _act("enable"))])
+        else:
+            buttons.append([UI.neutral("⏸ توقف موقت SelfBot", _act("disable"))])
+        # حذف کامل — قرمز، جدا از بقیه
+        buttons.append([UI.danger("❌ حذف کامل اکانت", _act("del"))])
+        # بازگشت از پشته‌ی ناوبری
+        buttons.append(UI.nav_row())
+
+        await event.edit(
+            UI.screen(
+                f"🚀 اکشن‌های سریع — {tag}",
+                body=body,
+                subtitle="یک کلیک تا هر عملیات — بدون ورود به هاب.",
+                hint="🔒 برای تنظیمات حساس (دستگاه‌ها/2FA) رو «🔒 دستگاه‌ها/2FA» بزن.",
+            ),
+            buttons=buttons,
+        )
 
     async def _start_user_add_bot(self, event, target_user_id: int, back_data: bytes):
         """➕ افزودن SelfBot برای یک کاربر خاص — ویزارد لاگین را با مالکِ از
@@ -13631,6 +13731,58 @@ class SaaSBot:
                         await self._show_user_acc(event, target_id, tag)
                     else:
                         await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                if data.startswith("uacc_act:"):
+                    # PATCH (v2.0.7): اکشن‌های سریعِ SelfBot از داخل پنل
+                    # مدیریت کاربر. فرمت: uacc_act:{action}:{user_id}:{tag}
+                    # این callback فقط برای OWNER/ADMIN است. قبل از اجرای
+                    # هر action، مالکیت دوباره چک می‌شود (دفاع در عمق).
+                    parts_cb = data.split(":", 3)
+                    if len(parts_cb) < 4:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    action = parts_cb[1]
+                    target_id = safe_callback_int(parts_cb[2])
+                    tag = parts_cb[3]
+                    if target_id is None or not tag:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    # مالکیتِ تگ به target_id دوباره چک می‌شود
+                    cfg = self.sb.load_config()
+                    acc = cfg.get(tag)
+                    if not account_belongs_to(acc, tag, target_id):
+                        await event.answer("❌ این اکانت متعلق به این کاربر نیست.", alert=True)
+                        return
+                    # each action maps to an existing AdminBot handler.
+                    # we use the same tag-based callback paths the AdminBot
+                    # already understands (feat: / appear: / conn: / etc.).
+                    # this avoids duplicating handlers and keeps everything
+                    # in sync with the account hub.
+                    action_to_route = {
+                        "feat":   f"feat:{tag}",
+                        "appear": f"appear:{tag}",
+                        "conn":   f"conn:{tag}",
+                        "status": f"status:{tag}",
+                        "send":   f"send_msg:{tag}",
+                        "sess":   f"sessions:{tag}",
+                        "tfa":    f"tfa:{tag}",
+                        "enable": f"enable:{tag}",
+                        "disable": f"disable:{tag}",
+                        "del":    f"del_confirm:{tag}",
+                    }
+                    route = action_to_route.get(action)
+                    if not route:
+                        await event.answer("❌ اکشن نامعتبر است.", alert=True)
+                        return
+                    # نباید خود event.data را دستکاری کنیم — telethon آن را
+                    # read-only نگه می‌دارد. به‌جایش admin_panel.handle_callback
+                    # را با data override صدا می‌زنیم.
+                    async with self._panel_lock:
+                        self._sync_admin_panel_scope(event.sender_id)
+                        await self.admin_panel.handle_callback(event, data=route)
                     return
                 # «سلف من» برای *همه‌ی* نقش‌هاست: مدیر و نماینده هم می‌توانند سلفِ
                 # شخصیِ خودشان را داشته باشند. قبلاً به ROLE_USER محدود بود و
