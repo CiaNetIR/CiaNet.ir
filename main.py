@@ -13803,7 +13803,11 @@ class SaaSBot:
                         c.execute(
                             "DELETE FROM logs WHERE created_at < datetime('now', '-90 days')"
                         )
-                        c.connection.commit()
+                        # PATCH (v2.5.1): c.connection.commit() نادرست بود.
+                        # در _conn() context manager، c خودش sqlite3.Connection
+                        # است — متد commit() مستقیماً رویش callable است.
+                        # c.connection یک attribute نیست → AttributeError.
+                        c.commit()
                 except Exception as e:
                     print(f"⚠️ [saas_bot] trim logs ناموفق (بی‌ضرر): {e}")
             except asyncio.CancelledError:
