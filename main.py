@@ -20116,7 +20116,7 @@ async def run_bot(tag, config, interactive=False):
                 consecutive_failures = 0
                 # فقط بعد از موفقیت کامل start: ثبت در ACCOUNTS + سیگنال
                 # آماده‌شدن به منتظران.
-                register_account(tag, bot, asyncio.current_task(), cfg.get(tag, {}))
+                register_account(tag, bot, asyncio.current_task(), load_config().get(tag, {}))
                 if not pending.done():
                     pending.set_result(True)
                 await bot.run()
