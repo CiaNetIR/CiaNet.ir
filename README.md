@@ -357,6 +357,52 @@ DEBUG=1 sudo systemctl restart cianet
 
 ---
 
+## 🗑️ Uninstall / حذف کامل
+
+برای حذف کامل CiaNet از سرور:
+
+```bash
+# ۱. توقف سرویس‌ها
+sudo systemctl stop selfbot cianet-panel cianet-tunnel 2>/dev/null
+
+# ۲. غیرفعال‌سازی سرویس‌ها
+sudo systemctl disable selfbot cianet-panel cianet-tunnel 2>/dev/null
+
+# ۳. حذف فایل‌های systemd
+sudo rm -f /etc/systemd/system/selfbot.service
+sudo rm -f /etc/systemd/system/cianet-panel.service
+sudo rm -f /etc/systemd/system/cianet-tunnel.service
+sudo systemctl daemon-reload
+
+# ۴. حذف nginx config (اگه تنظیم کردی)
+sudo rm -f /etc/nginx/sites-enabled/cianet-panel
+sudo rm -f /etc/nginx/sites-available/cianet-panel
+sudo systemctl reload nginx 2>/dev/null
+
+# ۵. حذف فایل env (شامل credentials)
+sudo rm -f /etc/cianet.env /etc/selfbot.env
+
+# ۶. حذف دایرکتوری پروژه
+sudo rm -rf /opt/cianet
+
+# ۷. (اختیاری) حذف کاربر cianet
+sudo userdel cianet 2>/dev/null
+
+# ۸. (اختیاری) حذف cloudflared
+sudo apt remove -y cloudflared 2>/dev/null
+sudo rm -f /usr/local/bin/cloudflared
+
+# ۹. (اختیاری) حذف nginx config بکاپ
+sudo rm -f /etc/nginx/sites-available/cianet-panel*
+
+# ۱۰. تأیید حذف
+systemctl status selfbot 2>&1 | head -3
+systemctl status cianet-panel 2>&1 | head -3
+ls /opt/cianet 2>&1
+```
+
+---
+
 ## 📜 License
 
 MIT License — see [LICENSE](LICENSE) file.
