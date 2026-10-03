@@ -52,3 +52,23 @@ htmlcov/
 # Build
 build/
 dist/
+
+# Web panel (Next.js)
+web/node_modules/
+web/.next/
+web/out/
+web/build/
+web/.env*
+web/next-env.d.ts
+
+# Cianet env (secrets)
+cianet.env
+*.env.local
+data/api_creds.json
+data/.updater_state.json
+data/account_delete_journal.json
+config.json.bak
+
+# Versions backups (auto-generated)
+versions/main.py.pre-auto-update.*
+versions/main.py.pre-rollback.*

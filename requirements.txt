@@ -8,6 +8,13 @@ telethon>=1.36.0      # Telegram client library
 # Required if you want to use SOCKS5/SOCKS4/HTTP proxies
 python_socks>=2.0.0   # for proxy in userbot login
 
+# === Web Panel (optional — only if you run web_panel.py) ===
+fastapi>=0.100.0      # Web Panel backend
+uvicorn[standard]>=0.23.0  # ASGI server
+pydantic>=2.0.0      # validation
+passlib[bcrypt]>=1.7.4  # password hashing for panel login
+python-multipart>=0.0.6  # form data (login)
+
 # === Standard library only for everything else ===
 # - asyncio, sqlite3, urllib, json, hashlib, secrets
 # - All HTTP requests use urllib.request (stdlib)
