@@ -6982,7 +6982,7 @@ class AdminBot:
                 await event.answer("قابلیت ناشناخته.", alert=True)
                 return
         except Exception as e:
-            await event.answer(f"❌ خطا: {str(e)[:150]}", alert=True)
+            await event.answer(_friendly_error(e, "feature_toggle"), alert=True)
             return
 
         await self._show_features(event, tag)
@@ -7271,7 +7271,7 @@ class AdminBot:
                 f"بهتر است یوزرنیم (مثلاً @username) استفاده کنی."
             )
         except Exception as e:
-            await event.respond(f"❌ ارسال ناموفق بود: {str(e)[:150]}")
+            await event.respond(_friendly_error(e, "send_msg"))
 
     # ─────────────────────────────────────────────────────
     #  مدیریت ادمین‌ها (فقط در حالت standalone معنا دارد)
@@ -7619,7 +7619,7 @@ class AdminBot:
             note = ""
             if proxy_cfg is None:
                 note = "\n💡 اگه فکر می‌کنی IP این سرور برای تلگرام فیلتره، دوباره «افزودن اکانت» رو بزن و این‌بار پروکسی رو انتخاب کن."
-            await event.respond(f"❌ خطا در اتصال/ارسال کد: {str(e)[:150]}{note}\nویزارد لغو شد.")
+            await event.respond(_friendly_error(e, "send_code") + f"{note}\nویزارد لغو شد.")
             try:
                 await temp_client.disconnect()
             except Exception:
@@ -7837,7 +7837,7 @@ class AdminBot:
                 await self._cancel_wizard(event.sender_id)
                 return
             except Exception as e:
-                await event.respond(f"❌ خطا: {str(e)[:150]}\nویزارد لغو شد.")
+                await event.respond(_friendly_error(e, "wizard_code") + "\nویزارد لغو شد.")
                 await self._cancel_wizard(event.sender_id)
                 return
 
@@ -7859,7 +7859,7 @@ class AdminBot:
                 await event.respond("❌ رمز اشتباه است. دوباره بفرست:")
                 return
             except Exception as e:
-                await event.respond(f"❌ خطا: {str(e)[:150]}\nویزارد لغو شد.")
+                await event.respond(_friendly_error(e, "wizard_code") + "\nویزارد لغو شد.")
                 await self._cancel_wizard(event.sender_id)
                 return
 
@@ -7894,7 +7894,7 @@ class AdminBot:
             temp_client.session.save()
             temp_client.session.close()
         except Exception as e:
-            await event.respond(f"❌ خطا در نهایی‌سازی لاگین: {str(e)[:150]}")
+            await event.respond(_friendly_error(e, "finish_login"))
             self.wizards.pop(event.sender_id, None)
             return
 
@@ -8081,7 +8081,7 @@ class AdminBot:
                 await self._handle_wizard_input(event, wiz)
             except Exception as e:
                 print(f"⚠️ [admin_bot] خطا در پردازش ویزارد: {e}")
-                await event.respond(f"❌ خطای غیرمنتظره: {str(e)[:150]}\nویزارد لغو شد.")
+                await event.respond(_friendly_error(e, "wizard") + "\nویزارد لغو شد.")
                 await self._cancel_wizard(event.sender_id)
 
     async def handle_callback(self, event, data: str = None) -> bool:
@@ -12658,7 +12658,7 @@ class SaaSBot:
             await dl(file=tmp)
         except Exception as e:
             self.wizards.pop(sender, None)
-            await event.respond(f"❌ دانلود فایل ناموفق: {str(e)[:60]}")
+            await event.respond(_friendly_error(e, "download"))
             try:
                 os.remove(tmp)
             except Exception:
@@ -14041,7 +14041,7 @@ class SaaSBot:
                 except Exception as e:
                     print(f"⚠️ [saas_bot] خطا در ویزارد: {e}")
                     self.wizards.pop(event.sender_id, None)
-                    await event.respond(f"❌ خطای غیرمنتظره: {str(e)[:150]}")
+                    await event.respond(_friendly_error(e, "callback"))
                     return
 
             # اگر ویزاردِ ما این پیام را نخواست، آن را به پنل مدیریت
@@ -15535,7 +15535,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.4.0"
+BUILD_VERSION = "2026-10-03-v2.5.0-stable"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -16382,14 +16382,17 @@ async def _auto_update_loop_wrapper() -> None:
                     f"🔄 آپدیت خودکار شروع شد!\n\n"
                     f"📥 {count} commit جدید پیدا شد.\n"
                     f"⏱️ اعمال آپدیت در حال انجام است — سرویس restart خواهد شد.\n\n"
-                    f"🔗 remote: `{update_info.get('remote', '?')[:8]}`"
+                    f"🔗 remote: `{(update_info.get('remote') or '?')[:8]}`"
                 )
             except Exception:
                 pass
             # ۲ ثانیه صبر کن تا notify ارسال بشه
             await asyncio.sleep(2)
-            # apply
-            success, msg = apply_update()
+            # apply — PATCH (v2.5.0 H1 FIX): در thread executor اجرا کن
+            # تا event loop block نشه. قبلاً sync apply_update() مستقیم
+            # صدا زده می‌شد که ~۱۰۰s event loop رو block می‌کرد.
+            loop = asyncio.get_event_loop()
+            success, msg = await loop.run_in_executor(None, apply_update)
             print(f"🔄 [auto-update] apply_update: {msg}")
             if success:
                 # قبل از restart یه notify دیگه بفرست
