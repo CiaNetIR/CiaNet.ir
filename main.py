@@ -5515,6 +5515,12 @@ class AdminBot:
         self.sb = selfbot_module
         self.client: TelegramClient = None
         self.wizards: dict = {}
+        # PATCH (v2.0.12): wizard TTL. هر wizard یک timestamp ست می‌شه و
+        # وقتی از ۳۰ دقیقه بگذره، خودکار پاک می‌شه (و temp_client disconnect).
+        # این از نشتِ TCP socket و session file lock در wizardهای رها‌شده
+        # جلوگیری می‌کنه.
+        self._WIZARD_TTL_SEC = 30 * 60
+        self._last_wizard_gc = 0.0
         self.admin_ids: set = set()
         self._backup_task = None
         # انتخابِ چنددستگاهیِ نشست‌ها: {(sender_id, tag): set(hash)}. با سقفِ
@@ -7460,6 +7466,33 @@ class AdminBot:
             except Exception:
                 pass
 
+    async def _cleanup_stale_wizards(self):
+        """
+        PATCH (v2.0.12): پاکسازیِ دوره‌ایِ wizardهای قدیمی. هر بار که
+        message handler صدا زده می‌شه، این متد (با فاصله‌ی حداقل ۵ دقیقه)
+        wizardهایی که بیشتر از ۳۰ دقیقه از آخرین activity شون گذشته رو
+        پاک می‌کنه و temp_client اونها رو disconnect می‌کنه.
+
+        این متد idempotent است و در صورت concurrent invocation مشکل
+        ایجاد نمی‌کنه (pop روی کلیدِ حذف‌شده هیچ‌کاری نمی‌کنه).
+        """
+        import time as _time
+        now = _time.time()
+        # هر ۵ دقیقه بیشتر از این فراخوانی نشه (حتی اگه message هربار صدا زده بشه)
+        if now - self._last_wizard_gc < 300:
+            return
+        self._last_wizard_gc = now
+        if not self.wizards:
+            return
+        expired_uids = [
+            uid for uid, wiz in self.wizards.items()
+            if (now - wiz.get("_ts", now)) > self._WIZARD_TTL_SEC
+        ]
+        for uid in expired_uids:
+            wiz = self.wizards.pop(uid, None)
+            await self._cleanup_wizard_temp_client(wiz)
+            print(f"🧹 [wizard TTL] wizard کاربر {uid} به‌دلیل عدم فعالیت ۳۰ دقیقه پاک شد")
+
     async def _cancel_wizard(self, uid: int, notify_event=None, chat=None):
         wiz = self.wizards.pop(uid, None)
         await self._cleanup_wizard_temp_client(wiz)
@@ -8036,8 +8069,13 @@ class AdminBot:
             return
         if self.standalone and not self._is_admin(event.sender_id):
             return
+        # PATCH (v2.0.12): پاکسازیِ دوره‌ایِ wizardهای قدیمی
+        await self._cleanup_stale_wizards()
         wiz = self.wizards.get(event.sender_id)
         if wiz:
+            # به‌روزرسانی timestamp آخرین activity
+            import time as _t
+            wiz["_ts"] = _t.time()
             try:
                 await self._handle_wizard_input(event, wiz)
             except Exception as e:
@@ -8594,6 +8632,12 @@ class SaaSBot:
         # در دیگری پاک‌سازی شود (وگرنه یک temp_client باز می‌تواند نشت
         # کند) — این کار را _start_own_wizard انجام می‌دهد.
         self.wizards: dict = {}
+        # PATCH (v2.0.12): wizard TTL. هر wizard یک timestamp ست می‌شه و
+        # وقتی از ۳۰ دقیقه بگذره، خودکار پاک می‌شه (و temp_client disconnect).
+        # این از نشتِ TCP socket و session file lock در wizardهای رها‌شده
+        # جلوگیری می‌کنه.
+        self._WIZARD_TTL_SEC = 30 * 60
+        self._last_wizard_gc = 0.0
         # پشته‌ی ناوبریِ مشترکِ کلِ ربات — جایگزینِ self._uacc_back قبلی.
         # همان نمونه به admin_panel هم داده می‌شود تا تاریخچه بین دو پنل
         # پیوسته بماند: کاربری که از «کاربران → کاربر X → SelfBotها →
@@ -13558,6 +13602,19 @@ class SaaSBot:
                         )
                     except Exception:
                         pass
+
+                # PATCH (v2.0.12): trim جدولِ logs هر ۲۴ ساعت. قبلاً این
+                # جدول فقط نوشته می‌شد و هرگز خونده یا trim نمی‌شد → در ۱ سال
+                # ۱۰۰M رکورد قابل تصور بود. حالا رکوردهای قدیمی‌تر از ۹۰ روز
+                # هر ساعت چک و حذف می‌شن (یه round ساده).
+                try:
+                    with _conn() as c:
+                        c.execute(
+                            "DELETE FROM logs WHERE created_at < datetime('now', '-90 days')"
+                        )
+                        c.connection.commit()
+                except Exception as e:
+                    print(f"⚠️ [saas_bot] trim logs ناموفق (بی‌ضرر): {e}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
