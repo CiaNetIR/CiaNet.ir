@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ورود — CiaNet Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-box">
+      <h1>🌐 CiaNet Panel</h1>
+      <p>ورود مدیر</p>
+      <form id="loginForm">
+        <label>نام کاربری</label>
+        <input id="username" type="text" class="input" value="admin" required autofocus>
+        <label>رمز عبور</label>
+        <input id="password" type="password" class="input" required>
+        <button type="submit" class="btn btn-primary">ورود</button>
+        <div id="error" class="error" style="display: none;"></div>
+      </form>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+  <script>
+    document.getElementById("loginForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      try {
+        await login(username, password);
+      } catch (err) {
+        const d = document.getElementById("error");
+        d.textContent = err.message;
+        d.style.display = "block";
+      }
+    });
+  </script>
+</body>
+</html>

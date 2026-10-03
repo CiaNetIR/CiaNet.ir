@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تنظیمات — CiaNet Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app"><div class="loading">در حال بارگذاری…</div></div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+  <script>
+    (async () => {
+      const user = await checkAuth();
+      if (!user) { location.href = "login.html"; return; }
+
+      const s = await api("/api/settings");
+      document.getElementById("app").innerHTML = layout(`
+        <div class="header"><h1>تنظیمات سیستم</h1></div>
+        <div class="card mb-4">
+          <h2>حالت نگهداری (Maintenance Mode)</h2>
+          <div class="flex gap-2">
+            <button class="btn ${s.maintenance_mode ? "btn-danger" : "btn-primary"}" onclick="toggleMaint()">
+              ${s.maintenance_mode ? "🟡 فعال" : "🟢 غیرفعال"}
+            </button>
+            <span class="text-muted text-sm">وقتی فعال باشد، استارت‌های جدید رد می‌شوند.</span>
+          </div>
+        </div>
+        <div class="card">
+          <h2>اطلاعات سیستم</h2>
+          <table>
+            <tr><td class="text-muted">panel user</td><td class="font-mono">${s.panel_user}</td></tr>
+            <tr><td class="text-muted">owner_id (main)</td><td class="font-mono">${s.owner_id}</td></tr>
+            <tr><td class="text-muted">owner_ids</td><td class="font-mono">${(s.owner_ids || []).join(", ")}</td></tr>
+            <tr><td class="text-muted">channel_username</td><td class="font-mono">${s.channel_username || "—"}</td></tr>
+            <tr><td class="text-muted">wallet USDT</td><td class="font-mono text-sm">${s.wallet_address_usdt || "—"}</td></tr>
+            <tr><td class="text-muted">min_commit_hash</td><td class="font-mono text-sm">${s.min_commit_hash || "—"}</td></tr>
+          </table>
+        </div>
+      `);
+      window.maintState = s.maintenance_mode;
+    })();
+
+    async function toggleMaint() {
+      try {
+        await api("/api/settings", {
+          method: "PATCH",
+          body: JSON.stringify({ maintenance_mode: !window.maintState })
+        });
+        showToast("تغییر یافت ✓");
+        location.reload();
+      } catch (e) { showToast(e.message, true); }
+    }
+  </script>
+</body>
+</html>

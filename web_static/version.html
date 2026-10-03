@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>نسخه — CiaNet Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app"><div class="loading">در حال بارگذاری…</div></div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+  <script>
+    (async () => {
+      const user = await checkAuth();
+      if (!user) { location.href = "login.html"; return; }
+
+      const info = await api("/api/version");
+      document.getElementById("app").innerHTML = layout(`
+        <div class="header"><h1>مدیریت نسخه</h1></div>
+        <div class="card mb-4">
+          <h2>اطلاعات نسخه</h2>
+          <div class="flex gap-4">
+            <div><span class="text-muted text-sm">local: </span><code>${short(info.local_commit)}</code></div>
+            <div><span class="text-muted text-sm">remote: </span><code>${short(info.remote_commit)}</code></div>
+          </div>
+          <div class="mt-4">
+            ${info.is_up_to_date ?
+              '<span class="badge badge-green">✅ آپ‌تو‌دِیت هستی</span>' :
+              `<span class="badge badge-yellow">📥 ${fmt(info.pending_commits?.length || 0)} commit جدید</span>
+               <button class="btn btn-primary mt-2" onclick="applyUpdate()">اعمال آپدیت</button>`
+            }
+          </div>
+        </div>
+        <div class="card">
+          <h2>↩️ نسخه‌های قابل rollback</h2>
+          ${(info.rollback_files || []).map(f => `
+            <div class="flex-between mb-2" style="padding: 0.5rem; border: 1px solid var(--border); border-radius: 0.35rem;">
+              <code class="text-sm">${f}</code>
+              <button class="btn btn-danger" onclick="rollback('${f}')">rollback</button>
+            </div>
+          `).join("") || '<div class="text-muted">هیچ نسخه‌ی پشتیبانی موجود نیست</div>'}
+        </div>
+      `);
+    })();
+
+    async function applyUpdate() {
+      if (!confirm("اعمال آپدیت؟ سرویس restart می‌شه.")) return;
+      try {
+        const r = await api("/api/version/apply-update", { method: "POST" });
+        showToast(r.message || r.note || "OK");
+        setTimeout(() => location.reload(), 2000);
+      } catch (e) { showToast(e.message, true); }
+    }
+    async function rollback(f) {
+      if (!confirm("Rollback به " + f + "؟")) return;
+      try {
+        const r = await api("/api/version/rollback", {
+          method: "POST", body: JSON.stringify({ filename: f })
+        });
+        showToast("Rollback شد ✓");
+        setTimeout(() => location.reload(), 2000);
+      } catch (e) { showToast(e.message, true); }
+    }
+  </script>
+</body>
+</html>

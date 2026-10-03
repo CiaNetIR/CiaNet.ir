@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>سلف‌بات‌ها — CiaNet Panel</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app"><div class="loading">در حال بارگذاری…</div></div>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+  <script>
+    (async () => {
+      const user = await checkAuth();
+      if (!user) { location.href = "login.html"; return; }
+
+      async function load(q = "") {
+        const params = new URLSearchParams({ q, page: "1", page_size: "100" });
+        const r = await api(`/api/accounts?${params}`);
+        const rows = (r.items || []).map(a => `
+          <tr>
+            <td class="font-mono">${a.tag}</td>
+            <td class="text-sm">${a.phone || "—"}</td>
+            <td class="font-mono text-sm">${a.owner_user_id || "—"}</td>
+            <td>${a.disabled ?
+              '<span class="badge badge-red">غیرفعال</span>' :
+              a.running ? '<span class="badge badge-green">در حال اجرا</span>' :
+              '<span class="badge badge-yellow">متوقف</span>'}</td>
+            <td>${a.proxy_set ? "✓" : "—"}</td>
+            <td class="text-sm">${a.provision_source || "—"}</td>
+            <td>
+              <button class="btn" onclick="toggleAccount('${a.tag}', ${a.disabled})">${a.disabled ? "🟢" : "⏸"}</button>
+              <button class="btn btn-danger" onclick="deleteAccount('${a.tag}')">🗑</button>
+            </td>
+          </tr>
+        `).join("");
+        document.getElementById("app").innerHTML = layout(`
+          <div class="header"><h1>سلف‌بات‌ها</h1><span class="text-muted text-sm">مجموع: ${fmt(r.total || 0)}</span></div>
+          <input class="input mb-4" placeholder="جستجو با تگ یا شماره…" onkeyup="searchAccounts(this.value)">
+          <div class="card">
+            <table>
+              <thead><tr>
+                <th>تگ</th><th>شماره</th><th>owner_id</th><th>وضعیت</th><th>پروکسی</th><th>منبع</th><th>عملیات</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `);
+      }
+
+      window.searchAccounts = (q) => load(q);
+      window.toggleAccount = async (tag, disabled) => {
+        try {
+          await api(`/api/accounts/${tag}/${disabled ? "enable" : "disable"}`, { method: "POST" });
+          showToast("تغییر وضعیت شد ✓");
+          load();
+        } catch (e) { showToast(e.message, true); }
+      };
+      window.deleteAccount = async (tag) => {
+        if (!confirm(`حذف اکانت ${tag}؟ فایل سشن هم پاک می‌شه.`)) return;
+        try {
+          await api(`/api/accounts/${tag}`, { method: "DELETE" });
+          showToast("حذف شد ✓");
+          load();
+        } catch (e) { showToast(e.message, true); }
+      };
+
+      load();
+    })();
+  </script>
+</body>
+</html>

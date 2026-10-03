@@ -9443,6 +9443,11 @@ class SaaSBot:
         ]
         if role == ROLE_OWNER:
             sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
+            # PATCH (v2.1.5): دکمه‌ی «🌐 پنل وب» برای دسترسی به web panel.
+            # URL از env var PANEL_URL خوانده می‌شه (مثلاً https://panel.cianet.ir
+            # یا http://localhost:8000). اگه تنظیم نشه، یه message راهنما نشون
+            # داده می‌شه.
+            sec4.append(UI.go("🌐 پنل وب", "owner_web_panel", primary=True, tone="success"))
         # Ⅴ امنیت (فقط OWNER)
         sec5 = []
         if role == ROLE_OWNER:
@@ -11013,6 +11018,85 @@ class SaaSBot:
             return cianet_updater, None
         except Exception as e:
             return None, f"❌ cianet_updater import نشد: {type(e).__name__}: {e}"
+
+    async def _show_owner_web_panel(self, event):
+        """
+        🌐 پنل وب — نشون‌دادن لینک به web panel و وضعیت service.
+
+        URL از env var PANEL_URL خوانده می‌شه (مثلاً https://panel.cianet.ir
+        یا http://localhost:8000). اگه تنظیم نشه، یه صفحه‌ی راهنما نشون
+        داده می‌شه که چطور فعال کنه.
+
+        همچنین وضعیت systemd service `cianet-panel` رو چک می‌کنه (اگه روی
+        همون سرور باشیم) و اگه running بود به کاربر می‌گه.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+
+        # URL از env
+        panel_url = os.environ.get("PANEL_URL", "").strip().rstrip("/")
+        # اگه تنظیم نباشه، یه حدس از PORT پیشنهاد می‌دیم
+        # backend روی port 8000، frontend روی port 3000
+        backend_url = os.environ.get("PANEL_BACKEND_URL", "http://localhost:8000").strip()
+        frontend_url = os.environ.get("PANEL_FRONTEND_URL", "http://localhost:3000").strip()
+
+        # وضعیت service cianet-panel (اگه هست)
+        panel_status = "نامشخص"
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["systemctl", "is-active", "cianet-panel"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0:
+                panel_status = "✅ در حال اجرا" if r.stdout.strip() == "active" else f"⚠️ {r.stdout.strip()}"
+            else:
+                # اگه service نیست، inactive یا failed
+                panel_status = "❌ نصب نشده"
+        except Exception:
+            panel_status = "❓ (امکان بررسی نبود)"
+
+        body = []
+        if panel_url:
+            body.append(f"🌐 آدرس پنل:")
+            body.append(f"   {panel_url}/login")
+            body.append("")
+            body.append(f"{UI.GRAY} برای ورود از همون username/password که در")
+            body.append(f"{UI.GRAY} نصب تنظیم کردی استفاده کن.")
+        else:
+            body.append(f"{UI.AMBER} ⚠️  PANEL_URL تنظیم نشده")
+            body.append("")
+            body.append(f"{UI.GRAY} پنل روی این port‌ها اجرا می‌شه:")
+            body.append(f"   📊 Backend API:  {backend_url}/api/docs")
+            body.append(f"   🌐 Frontend:    {frontend_url}/login")
+            body.append("")
+            body.append(f"{UI.GRAY} برای دسترسی از بیرون سرور، در فایل env:")
+            body.append(f"{UI.GRAY} PANEL_URL=https://panel.your-domain.ir")
+            body.append(f"{UI.GRAY} بعد از تنظیم، cianet-panel رو restart کن.")
+
+        body.append("")
+        body.append(f"📊 وضعیت cianet-panel: {panel_status}")
+        body.append(f"{UI.GRAY} user: {os.environ.get('PANEL_ADMIN_USER', 'admin')}")
+
+        # دکمه‌ها
+        from telethon import Button as _Button
+        buttons = []
+        if panel_url:
+            # clickable URL button
+            buttons.append([_Button.url("🌐 باز کردن پنل", f"{panel_url}/login")])
+        buttons.append([_Button.url("📊 Swagger UI (API docs)", f"{backend_url}/api/docs")])
+        # اگه frontend بالا باشه
+        buttons.append([_Button.url("🌐 Frontend", f"{frontend_url}/login")])
+        buttons.append(UI.nav_row())
+
+        await event.edit(
+            UI.screen("🌐 پنل وب CiaNet",
+                      body=body,
+                      subtitle="مدیریت کاملِ سلف‌بات‌ها از مرورگر",
+                      hint="اگه پنل بالا نیست: sudo systemctl restart cianet-panel"),
+            buttons=buttons,
+        )
 
     async def _show_owner_update(self, event):
         """
@@ -14157,6 +14241,10 @@ class SaaSBot:
                     # فرمت: owner_rollback_go:{urlencoded_name}
                     encoded_name = data[len("owner_rollback_go:"):]
                     await self._owner_rollback_go(event, encoded_name)
+                    return
+                # PATCH (v2.1.5): دکمه‌ی «🌐 پنل وب» برای OWNER
+                if data == "owner_web_panel" and role == ROLE_OWNER:
+                    await self._show_owner_web_panel(event)
                     return
                 if data == "owner_users" and role in (ROLE_OWNER, ROLE_ADMIN):
                     await self._owner_show_users(event)

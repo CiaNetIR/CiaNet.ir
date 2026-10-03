@@ -413,36 +413,44 @@ else
     echo -e "${YELLOW}⚠️  nginx نصب نیست — پنل روی port 8000 مستقیم در دسترس خواهد بود${NC}"
 fi
 
-# ─── Build frontend (Next.js) ───
+# ─── Frontend: static web_static/ رو پیشنهاد می‌دهیم (no npm needed) ───
 echo ""
+if [ -d "$SCRIPT_DIR/web_static" ]; then
+    echo -e "${GREEN}✅ frontend استاتیک (web_static/) آماده است — نیاز به npm build نیست${NC}"
+    echo -e "${GREEN}   پنل در http://localhost:8000/app/login.html در دسترس است${NC}"
+fi
+
+# ─── Build frontend Next.js (اختیاری — فقط اگه خواستی) ───
 if [ -f "$SCRIPT_DIR/web/package.json" ]; then
-    echo -e "${YELLOW}🔨 build frontend Next.js...${NC}"
-    cd "$SCRIPT_DIR/web"
-    if ! command -v npm >/dev/null 2>&1; then
-        echo -e "${YELLOW}📦 نصب Node.js 20...${NC}"
-        if command -v apt-get >/dev/null 2>&1; then
-            curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
-            apt-get install -y nodejs 2>&1 | tail -3
-        elif command -v yum >/dev/null 2>&1; then
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
-            yum install -y nodejs 2>&1 | tail -3
+    echo ""
+    echo -e "${YELLOW}📦 Next.js frontend هم موجود است (اختیاری)${NC}"
+    read -p "   Next.js build رو اجرا کنم؟ (y/N): " BUILD_NEXT
+    if [ "$BUILD_NEXT" = "y" ] || [ "$BUILD_NEXT" = "Y" ]; then
+        cd "$SCRIPT_DIR/web"
+        if ! command -v npm >/dev/null 2>&1; then
+            echo -e "${YELLOW}📦 نصب Node.js 20...${NC}"
+            if command -v apt-get >/dev/null 2>&1; then
+                curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
+                apt-get install -y nodejs 2>&1 | tail -3
+            elif command -v yum >/dev/null 2>&1; then
+                curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
+                yum install -y nodejs 2>&1 | tail -3
+            fi
         fi
-    fi
-    if command -v npm >/dev/null 2>&1; then
-        npm install --silent 2>&1 | tail -5 || {
-            echo -e "${RED}❌ npm install شکست خورد${NC}"
-            echo -e "${YELLOW}   پنل backend بدون frontend هم کار می‌کنه — می‌تونی بعداً build کنی${NC}"
-        }
-        npm run build 2>&1 | tail -5 || {
-            echo -e "${YELLOW}⚠️  build ناموفق بود — می‌تونی به‌صورت dev اجرا کنی:${NC}"
-            echo "   cd $SCRIPT_DIR/web && npm run dev"
-        }
-        cd "$SCRIPT_DIR"
+        if command -v npm >/dev/null 2>&1; then
+            npm install --silent 2>&1 | tail -5 || {
+                echo -e "${YELLOW}⚠️  npm install ناموفق${NC}"
+            }
+            npm run build 2>&1 | tail -5 || {
+                echo -e "${YELLOW}⚠️  build ناموفق${NC}"
+            }
+            cd "$SCRIPT_DIR"
+        else
+            echo -e "${YELLOW}⚠️  npm در دسترس نیست${NC}"
+        fi
     else
-        echo -e "${RED}❌ npm در دسترس نیست — frontend رو بعداً build کن${NC}"
+        echo -e "${GREEN}   skip شد (frontend استاتیک در web_static/ کافیه)${NC}"
     fi
-else
-    echo -e "${YELLOW}⚠️  web/ پیدا نشد — frontend رو جدا نصب کن${NC}"
 fi
 
 # ─── Start services ───
@@ -491,14 +499,14 @@ echo ""
 echo -e "${BLUE}🌐 دسترسی:${NC}"
 if [ -f "$NGINX_LINK" ]; then
     DOMAIN=$(grep -m1 server_name "$NGINX_CONF" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
-    echo "   Panel URL:        http://$DOMAIN/login"
+    echo "   Panel URL:        http://$DOMAIN/app/login.html"
 else
-    echo "   Backend API:      http://localhost:8000/api/docs"
-    echo "   Frontend (dev):   http://localhost:3000/login"
+    echo "   Frontend:         http://localhost:8000/app/login.html"
+    echo "   Backend API docs: http://localhost:8000/api/docs"
     echo ""
     echo -e "${YELLOW}💡 برای دسترسی از بیرون:${NC}"
-    echo "   ۱. nginx یا caddy نصب کن و port 3000 + 8000 رو proxy کن"
-    echo "   ۲. یا فایروال رو روی port 8000 باز کن و مستقیم به /api/docs برو"
+    echo "   ۱. nginx یا caddy نصب کن و port 8000 رو proxy کن (443 → 8000)"
+    echo "   ۲. یا فایروال رو روی port 8000 باز کن و مستقیم به /app/login.html برو"
 fi
 echo ""
 echo -e "${BLUE}📋 ورود:${NC}"
