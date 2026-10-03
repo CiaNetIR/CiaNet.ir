@@ -10235,15 +10235,19 @@ class SaaSBot:
         # تنظیمات مالی (کارت/USDT/قیمت‌ها) فقط از «💰 مالی» — اینجا تکرار
         # نمی‌شوند تا مسیر تکراری/گیج‌کننده نماند (بخش ۱۸ اسپک).
         ch = get_setting("required_channel")
+        # PATCH (v2.4.0): language toggle button
+        lang_label = "🌐 زبان: فارسی" if CIANET_LANG == "fa" else "🌐 Language: English"
         buttons = [
             [UI.item("📢 کانال اجباری عضویت", "active" if ch else "none", "owner_channel")],
+            [UI.go(lang_label, "owner_toggle_lang")],
             UI.nav_row(),
         ]
         await event.edit(
             UI.screen(
                 "⚙️ تنظیمات سیستم",
                 body=[f"{UI.dot(bool(ch))} کانال اجباری: "
-                      + (f"`{ch}`" if ch else "غیرفعال (همه می‌توانند وارد شوند)")],
+                      + (f"`{ch}`" if ch else "غیرفعال (همه می‌توانند وارد شوند)"),
+                      f"🌐 زبان فعلی: {'فارسی' if CIANET_LANG == 'fa' else 'English'}"],
                 subtitle="تنظیمات غیرمالی — کارت/تتر/قیمت‌ها در «💰 مالی» هستند.",
             ),
             buttons=buttons,
@@ -14341,6 +14345,38 @@ class SaaSBot:
                 if data == "owner_toggle_auto_update" and role == ROLE_OWNER:
                     await self._owner_toggle_auto_update(event)
                     return
+                # PATCH (v2.4.0): language toggle
+                if data == "owner_toggle_lang" and role == ROLE_OWNER:
+                    new_lang = "en" if CIANET_LANG == "fa" else "fa"
+                    _set_lang(new_lang)
+                    # ذخیره در env file
+                    try:
+                        _proj_dir = os.path.dirname(os.path.abspath(__file__))
+                        _env_file = None
+                        for _cand in ["/etc/cianet.env", "/etc/selfbot.env",
+                                       os.path.join(_proj_dir, ".env")]:
+                            if os.path.exists(_cand):
+                                _env_file = _cand
+                                break
+                        if _env_file:
+                            import re as _re
+                            with open(_env_file, "r", encoding="utf-8") as _f:
+                                _content = _f.read()
+                            if _re.search(r"^CIANET_LANG=", _content, _re.MULTILINE):
+                                _content = _re.sub(r"^CIANET_LANG=.*$", f"CIANET_LANG={new_lang}", _content, flags=_re.MULTILINE)
+                            else:
+                                _content = _content.rstrip() + f"\nCIANET_LANG={new_lang}\n"
+                            with open(_env_file, "w", encoding="utf-8") as _f:
+                                _f.write(_content)
+                    except Exception:
+                        pass
+                    lang_name = "فارسی" if new_lang == "fa" else "English"
+                    try:
+                        await event.answer(f"🌐 زبان: {lang_name}", alert=True)
+                    except Exception:
+                        pass
+                    await self._admin_show_settings_hub(event)
+                    return
                 if data == "owner_rollback_list" and role == ROLE_OWNER:
                     await self._owner_show_rollback_list(event)
                     return
@@ -15499,7 +15535,186 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.3.0"
+BUILD_VERSION = "2026-10-03-v2.4.0"
+
+# ══════════════════════════════════════════════════════════════════
+#  PATCH (v2.4.0): سیستم چندزبانه (i18n)
+#  ─────────────────────────────────────────────────────────────────
+#  دو زبان پشتیبانی می‌شه: fa (فارسی، پیش‌فرض) و en (انگلیسی).
+#  زبان از env var CIANET_LANG خوانده می‌شه. هر رشته‌ی کاربرپسند
+#  با _T("key") ترجمه می‌شه. اگه key موجود نبود، خود key برمی‌گرده
+#  (graceful fallback).
+# ══════════════════════════════════════════════════════════════════
+
+# زبان فعلی — از env یا پیش‌فرض فارسی
+CIANET_LANG = os.environ.get("CIANET_LANG", "fa").strip().lower()
+if CIANET_LANG not in ("fa", "en"):
+    CIANET_LANG = "fa"
+
+# ─── Strings Dictionary ─────────────────────────────────────────────
+# Format: {"fa": "...", "en": "..."}
+# همه‌ی رشته‌های کاربرپسند که در پنل نمایش داده می‌شن.
+# برای اضافه‌کردن زبان جدید، فقط یه key جدید اضافه کن.
+_STRINGS: dict = {
+    # ── Common ──
+    "ok": {"fa": "✅ انجام شد", "en": "✅ Done"},
+    "cancel": {"fa": "لغو شد", "en": "Cancelled"},
+    "error_generic": {"fa": "❌ خطایی رخ داد. دوباره تلاش کن.", "en": "❌ An error occurred. Try again."},
+    "error_db": {"fa": "❌ خطای دیتابیس. بعداً تلاش کن.", "en": "❌ Database error. Try later."},
+    "error_network": {"fa": "❌ خطای شبکه. اتصال اینترنت را بررسی کن.", "en": "❌ Network error. Check your connection."},
+    "error_telegram_flood": {"fa": "⏳ تلگرام درخواست زیادی از تو دریافت کرده. کمی صبر کن.", "en": "⏳ Telegram rate-limited you. Please wait."},
+    "error_telegram_banned": {"fa": "🛑 این اکانت توسط تلگرام محدود شده.", "en": "🛑 This account is restricted by Telegram."},
+    "error_session_corrupt": {"fa": "❌ فایل سشن خراب است. دوباره لاگین کن.", "en": "❌ Session file corrupted. Please re-login."},
+    "error_phone_invalid": {"fa": "❌ شماره نامعتبر است.", "en": "❌ Invalid phone number."},
+    "error_code_invalid": {"fa": "❌ کد اشتباه است.", "en": "❌ Invalid code."},
+    "error_code_expired": {"fa": "❌ کد منقضی شده. دوباره درخواست بده.", "en": "❌ Code expired. Request a new one."},
+    "error_password_invalid": {"fa": "❌ رمز اشتباه است.", "en": "❌ Invalid password."},
+    "error_2fa_needed": {"fa": "🔐 این اکانت رمز دو مرحله‌ای دارد.", "en": "🔐 This account has 2FA enabled."},
+    "error_phone_banned": {"fa": "❌ این شماره توسط تلگرام مسدود شده.", "en": "❌ This phone number is banned by Telegram."},
+    "error_phone_unoccupied": {"fa": "❌ این شماره هنوز در تلگرام ثبت‌نام نشده.", "en": "❌ This phone number is not registered on Telegram."},
+    "error_auth_key": {"fa": "❌ api_id/api_hash نامعتبر است.", "en": "❌ Invalid api_id/api_hash."},
+    "error_proxy": {"fa": "❌ اتصال پروکسی ناموفق بود.", "en": "❌ Proxy connection failed."},
+    "error_timeout": {"fa": "⏱️ درخواست بیش از حد طول کشید. دوباره تلاش کن.", "en": "⏱️ Request timed out. Try again."},
+    "error_permission": {"fa": "⛔ دسترسی نداری.", "en": "⛔ Access denied."},
+    "error_not_found": {"fa": "❌ پیدا نشد.", "en": "❌ Not found."},
+    "error_already_exists": {"fa": "❌ از قبل وجود دارد.", "en": "❌ Already exists."},
+    "error_lock": {"fa": "⏳ یک عملیات دیگر در حال اجراست. صبر کن.", "en": "⏳ Another operation in progress. Wait."},
+    "error_wizard_timeout": {"fa": "❌ زمان ویزارد تمام شد. دوباره شروع کن.", "en": "❌ Wizard timed out. Start over."},
+    "error_phone_duplicate": {"fa": "❌ این شماره قبلاً ثبت شده.", "en": "❌ This phone number is already registered."},
+    # ── UI labels ──
+    "login_title": {"fa": "🌐 CiaNet Panel", "en": "🌐 CiaNet Panel"},
+    "login_subtitle": {"fa": "ورود مدیر", "en": "Admin Login"},
+    "dashboard_title": {"fa": "داشبورد", "en": "Dashboard"},
+    "users_title": {"fa": "کاربران", "en": "Users"},
+    "accounts_title": {"fa": "سلف‌بات‌ها", "en": "Selfbots"},
+    "finance_title": {"fa": "امور مالی", "en": "Finance"},
+    "tickets_title": {"fa": "تیکت‌ها", "en": "Tickets"},
+    "audit_title": {"fa": "Audit Log", "en": "Audit Log"},
+    "version_title": {"fa": "نسخه", "en": "Version"},
+    "settings_title": {"fa": "تنظیمات", "en": "Settings"},
+    "back": {"fa": "🔙 بازگشت", "en": "🔙 Back"},
+    "refresh": {"fa": "🔄_refresh", "en": "🔄 Refresh"},
+    "search": {"fa": "🔍 جستجو", "en": "🔍 Search"},
+    "enable": {"fa": "🟢 فعال‌سازی", "en": "🟢 Enable"},
+    "disable": {"fa": "⏸ توقف", "en": "⏸ Disable"},
+    "delete": {"fa": "🗑 حذف", "en": "🗑 Delete"},
+    "extend": {"fa": "📅 تمدید", "en": "📅 Extend"},
+    "approve": {"fa": "✓ تأیید", "en": "✓ Approve"},
+    "reject": {"fa": "✗ رد", "en": "✗ Reject"},
+    "apply_update": {"fa": "📥 اعمال آپدیت", "en": "📥 Apply Update"},
+    "check_update": {"fa": "🔄 چک آپدیت", "en": "🔄 Check Update"},
+    "rollback": {"fa": "↩️ بازگشت", "en": "↩️ Rollback"},
+    # ── Status ──
+    "status_active": {"fa": "✅ فعال", "en": "✅ Active"},
+    "status_disabled": {"fa": "⏸ غیرفعال", "en": "⏸ Disabled"},
+    "status_running": {"fa": "🟢 در حال اجرا", "en": "🟢 Running"},
+    "status_stopped": {"fa": "🟡 متوقف", "en": "🟡 Stopped"},
+    "status_error": {"fa": "❌ خطا", "en": "❌ Error"},
+    "status_up_to_date": {"fa": "✅ آپ‌تو‌دِیت هستی", "en": "✅ Up to date"},
+    "status_pending": {"fa": "📥 آپدیت جدید موجود است", "en": "📥 New update available"},
+}
+
+
+def _T(key: str, lang: str = None) -> str:
+    """
+    ترجمه‌ی یه string key به زبان فعلی (یا مشخص‌شده).
+
+    اگه key در _STRINGS موجود نباشه، خود key برمی‌گرده (graceful
+    fallback) تا هیچوقت صفحه‌ی خالی یا کرش نشه.
+
+    Examples:
+        _T("ok")               → "✅ انجام شد"     (fa)
+        _T("ok", "en")          → "✅ Done"
+        _T("nonexistent_key")  → "nonexistent_key"
+    """
+    if lang is None:
+        lang = CIANET_LANG
+    entry = _STRINGS.get(key)
+    if entry is None:
+        return key  # graceful fallback
+    return entry.get(lang, entry.get("fa", key))
+
+
+def _set_lang(lang: str) -> None:
+    """تغییر زبان در runtime (برای toggle دکمه‌ی زبان)."""
+    global CIANET_LANG
+    lang = (lang or "fa").strip().lower()
+    if lang in ("fa", "en"):
+        CIANET_LANG = lang
+        os.environ["CIANET_LANG"] = lang
+
+
+# ─── Friendly Error Mapper ───────────────────────────────────────────
+# PATCH (v2.4.0): تبدیل exception‌های فنی به پیام‌های کاربرپسند.
+# قبلاً ۳۰+ جا در کد str(e)[:80] یا str(e)[:150] به کاربر نشون داده
+# می‌شد — پیام‌های فنی مثل "TypeError: 'NoneType' object is not
+# subscriptable" که برای کاربر بی‌معنی و ترسناک هستند.
+# حالا _friendly_error(e, context) این‌ها رو به پیام‌های فارسی/انگلیسی
+# قابل فهم تبدیل می‌کنه.
+
+_ERROR_MAP = {
+    # Telegram errors
+    "FloodWaitError": "error_telegram_flood",
+    "PhoneNumberBannedError": "error_phone_banned",
+    "PhoneNumberUnoccupiedError": "error_phone_unoccupied",
+    "AuthKeyError": "error_auth_key",
+    "AuthKeyDuplicatedError": "error_auth_key",
+    "PhoneCodeInvalidError": "error_code_invalid",
+    "PhoneCodeExpiredError": "error_code_expired",
+    "PasswordHashInvalidError": "error_password_invalid",
+    "SessionPasswordNeededError": "error_2fa_needed",
+    "ChatForbiddenError": "error_permission",
+    "UserBannedInChannelError": "error_permission",
+    # SQLite errors
+    "OperationalError": "error_db",
+    "DatabaseError": "error_db",
+    "IntegrityError": "error_already_exists",
+    # Async errors
+    "TimeoutError": "error_timeout",
+    "asyncio.exceptions.TimeoutError": "error_timeout",
+    # Network
+    "ConnectionError": "error_network",
+    "OSError": "error_network",
+    # Permission
+    "PermissionError": "error_permission",
+}
+
+
+def _friendly_error(e: Exception, context: str = "") -> str:
+    """
+    تبدیل exception به پیام کاربرپسند.
+
+    Args:
+        e: exception object
+        context: توضیح کوتاهِ زمینه (مثلاً "login", "send_code", "fetch_accounts")
+
+    Returns:
+        پیام کاربرپسند به زبان فعلی. اگه exception type شناخته نشه،
+        یه پیام generic برمی‌گرده و جزئیات فنی فقط در لاگ سرور می‌مونه.
+
+    Example:
+        try:
+            await client.send_code_request(phone)
+        except errors.PhoneNumberBannedError as e:
+            await event.respond(_friendly_error(e, "send_code"))
+            # → "❌ این شماره توسط تلگرام مسدود شده."
+    """
+    exc_type_name = type(e).__name__
+    # exception‌های Telethon رو با full path چک کن
+    # چون errors.PhoneNumberBannedError ممکنه در type(e).__name__ فقط
+    # "PhoneNumberBannedError" باشه
+    error_key = _ERROR_MAP.get(exc_type_name)
+    if not error_key:
+        # fallback: در string repr جستجو کن
+        for pattern, key in _ERROR_MAP.items():
+            if pattern in exc_type_name:
+                error_key = key
+                break
+    if error_key:
+        return _T(error_key)
+    # fallback generic
+    return _T("error_generic")
+
 
 # ══════════════════════════════════════════════════════════
 #  مسیرها و فایل‌های تنظیمات
