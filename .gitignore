@@ -73,7 +73,6 @@ data/.updater_state.json
 data/account_delete_journal.json
 config.json.bak
 
-# Versions backups (auto-generated — keep dir, ignore backups)
+# Versions backups (auto-generated)
 versions/main.py.pre-auto-update.*
 versions/main.py.pre-rollback.*
-!versions/.gitkeep
