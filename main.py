@@ -22071,8 +22071,20 @@ async def main():
         )
         sys.exit(1)
     if not cfg:
-        await add_account()
-        cfg = load_config()
+        # PATCH (v2.5.2 CRITICAL): در حالت systemd (argv = "all")،
+        # add_account() را صدا نزن — چون interactive است و در systemd
+        # stdin بسته است، فقط خطای "API ID must be a number" چاپ
+        # می‌کنه و گیج‌کننده است. به‌جاش، فقط بگو «هیچ اکانتی نیست»
+        # و منتظر بمون — OWNER از پنل وب یا ربات اکانت اضافه می‌کنه.
+        if len(sys.argv) > 1 and sys.argv[1] == "all":
+            print(
+                "ℹ️ هیچ اکانتی در config.json نیست. "
+                "برای اضافه‌کردن اکانت: از پنل وب (port 8000) یا ربات تلگرام استفاده کن."
+            )
+        else:
+            # در حالت interactive (CLI مستقیم)، wizard رو نشان بده
+            await add_account()
+            cfg = load_config()
 
     if len(sys.argv) > 1:
         arg = sys.argv[1]
