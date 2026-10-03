@@ -97,7 +97,7 @@ echo "  existing service: $EXISTING_SERVICE"
 echo "  install dir:     $SCRIPT_DIR"
 echo ""
 
-# ─── Install web panel Python deps ───
+# ─── Install web panel Python deps (in venv) ───────────────
 echo -e "${YELLOW}📦 نصب dependencies پنل وب...${NC}"
 cd "$SCRIPT_DIR"
 PYTHON_BIN=$(which python3)
@@ -110,18 +110,62 @@ for p in python3.12 python3.11 python3.10 python3; do
 done
 echo "  using: $PYTHON_BIN"
 
-# نصب در system (با --break-system-packages در اگه PEP 668 فعال باشه)
-PIP_FLAGS=""
-if $PYTHON_BIN -m pip install --help 2>&1 | grep -q -- "--break-system-packages"; then
-    PIP_FLAGS="--break-system-packages"
+# PATCH (v2.1.2): استفاده از venv به‌جای نصب در system Python.
+# این مشکل "Cannot uninstall typing_extensions 4.10.0, RECORD file not
+# found" رو حل می‌کنه — وقتی پایتون سیستمی پکیج‌ها رو با apt نصب کرده،
+# pip نمی‌تونه uninstall شون کنه. venv هم ایزوله‌تر و امن‌تره.
+VENV_DIR="$SCRIPT_DIR/.venv"
+echo -e "${YELLOW}🐍 ساخت virtualenv در $VENV_DIR...${NC}"
+if [ ! -d "$VENV_DIR" ]; then
+    $PYTHON_BIN -m venv "$VENV_DIR" 2>&1 | tail -3 || {
+        echo -e "${RED}❌ venv creation شکست خورد${NC}"
+        echo -e "${YELLOW}   احتمالاً python3-venv نصب نیست. نصب کن:${NC}"
+        echo "   sudo apt install -y python3-venv python3.12-venv"
+        exit 1
+    }
 fi
-$PYTHON_BIN -m pip install $PIP_FLAGS fastapi "uvicorn[standard]" pydantic "passlib[bcrypt]" python-multipart 2>&1 | tail -3 || {
+VENV_PYTHON="$VENV_DIR/bin/python"
+VENV_PIP="$VENV_DIR/bin/pip"
+
+# Upgrade pip در venv (بدون مشکل uninstall)
+echo "  upgrading pip in venv..."
+$VENV_PYTHON -m pip install --upgrade pip --quiet 2>&1 | tail -2 || true
+
+# نصب requirements کامل (شامل telethon هم) در venv
+echo "  installing requirements..."
+$VENV_PIP install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>&1 | tail -5 || {
     echo -e "${RED}❌ pip install شکست خورد!${NC}"
-    echo -e "${YELLOW}   سعی کن با virtualenv نصب کن:${NC}"
-    echo "   $PYTHON_BIN -m venv /opt/cianet/.venv"
-    echo "   /opt/cianet/.venv/bin/pip install -r requirements.txt"
+    echo -e "${YELLOW}   لگ کامل:${NC}"
+    $VENV_PIP install -r "$SCRIPT_DIR/requirements.txt" 2>&1 | tail -30
     exit 1
 }
+
+# اگر telethon از قبل در system نصب بوده و در venv هم لازمه، نصب کن
+# (مثلاً main.py telethon رو import می‌کنه)
+if ! $VENV_PYTHON -c "import telethon" 2>/dev/null; then
+    echo "  installing telethon..."
+    $VENV_PIP install "telethon>=1.36.0" --quiet 2>&1 | tail -2 || true
+fi
+
+echo -e "${GREEN}✅ venv آماده${NC}"
+echo "  venv python: $VENV_PYTHON"
+$VENV_PYTHON --version
+
+# مالکیت venv رو به service user تغییر بده (اگه non-root)
+if [ "$SERVICE_USER" != "root" ]; then
+    chown -R "$SERVICE_USER:$SERVICE_USER" "$VENV_DIR" 2>/dev/null || true
+fi
+
+# اگه service user != root، باید venv رو برای اون قابل خواندن باشه
+# (system venv با root ساخته می‌شه ولی service ممکنه با omid اجرا بشه)
+# در این مورد، یه venv جدید برای اون user می‌سازیم
+if [ "$SERVICE_USER" != "root" ]; then
+    echo -e "${YELLOW}👤 venv برای service user ($SERVICE_USER) ساخته شد${NC}"
+    # chown قبلی این رو حل می‌کنه
+fi
+
+# از این به بعد، PYTHON_BIN به venv python اشاره می‌کنه
+PYTHON_BIN="$VENV_PYTHON"
 
 # ─── Find env file ───────────────────────────────────────
 # چندین مسیر ممکن برای env file
@@ -394,10 +438,15 @@ else
     echo -e "${YELLOW}نکته‌های عیب‌یابی:${NC}"
     echo "  ۱. اگه خطا 'Permission denied' روی data/ هست:"
     echo "     sudo chown -R $SERVICE_USER:$SERVICE_USER $SCRIPT_DIR/data"
-    echo "  ۲. اگه خطا 'PANEL_ADMIN_PASS_HASH not set' هست:"
+    echo "  ۲. اگه خطا 'No module named telethon' یا 'No module named fastapi' هست:"
+    echo "     venv خراب شده. دوباره بساز:"
+    echo "     sudo rm -rf $VENV_DIR && sudo bash install_panel.sh"
+    echo "  ۳. اگه خطا 'PANEL_ADMIN_PASS_HASH not set' هست:"
     echo "     echo \"PANEL_ADMIN_PASS_HASH=\$(python3 -c 'from passlib.hash import bcrypt; print(bcrypt.encrypt(\"PASS\"))')\" >> /etc/cianet.env"
-    echo "  ۳. اگه خطا 'Address already in use' روی port 8000:"
+    echo "  ۴. اگه خطا 'Address already in use' روی port 8000:"
     echo "     sudo lsof -i :8000  # چه پروسه‌ای داره اشغال می‌کنه"
+    echo "  ۵. اگه خطا 'Permission denied' روی .venv/:"
+    echo "     sudo chown -R $SERVICE_USER:$SERVICE_USER $VENV_DIR"
     exit 1
 fi
 

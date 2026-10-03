@@ -61,6 +61,10 @@ web/build/
 web/.env*
 web/next-env.d.ts
 
+# Python venv (used by install_panel.sh)
+.venv/
+venv/
+
 # Cianet env (secrets)
 cianet.env
 *.env.local
