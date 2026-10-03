@@ -115,7 +115,7 @@ User=cianet
 Group=cianet
 WorkingDirectory=$SCRIPT_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$PYTHON_BIN main.py all
+ExecStart=$PYTHON_BIN -u main.py all
 Restart=always
 RestartSec=10
 
@@ -123,6 +123,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=selfbot
 
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONFAULTHANDLER=1
 LimitNOFILE=65535
 OOMScoreAdjust=-100
 
@@ -136,7 +138,9 @@ EOF
 if [ ! -f "$SCRIPT_DIR/config.json" ]; then
     echo '{}' > "$SCRIPT_DIR/config.json"
 fi
-chown -R cianet:cianet "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
+# PATCH (v2.5.6): versions/ dir برای rollback
+mkdir -p "$SCRIPT_DIR/versions"
+chown -R cianet:cianet "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" "$SCRIPT_DIR/versions" "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
 chmod 700 "$SCRIPT_DIR/sessions" "$SCRIPT_DIR/downloads" "$SCRIPT_DIR/tracker_media" 2>/dev/null || true
 chmod 600 "$SCRIPT_DIR/bot_data.db" "$SCRIPT_DIR/saas.db" "$SCRIPT_DIR/config.json" 2>/dev/null || true
 
