@@ -71,8 +71,16 @@ cianet.env
 data/api_creds.json
 data/.updater_state.json
 data/account_delete_journal.json
+
+# Cianet config (per-instance — هرگز در git نباید باشد)
+# این فایل شامل اطلاعات اکانت‌های تلگرام کاربران است و commit‌ شدنش
+# باعث overwrite شدن با git reset می‌شود (که فاجعه‌بار است).
+config.json
 config.json.bak
+.last_seen_commit
+.gitconfig
 
 # Versions backups (auto-generated)
 versions/main.py.pre-auto-update.*
 versions/main.py.pre-rollback.*
+versions/main.py.pre-update.*
