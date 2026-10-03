@@ -139,6 +139,54 @@ def _invalidate_session(request: Request) -> None:
         _sessions.pop(token, None)
 
 
+# ─── License-based user auth (separate from admin) ─────────────
+# برای GitHub Pages site: کاربر با کد لایسنس لاگین می‌کنه (نه یوزر/پسورد).
+# این session جداست از admin session تا تداخل نداشته باشند.
+_user_sessions: Dict[str, dict] = {}  # token -> {user_id, created_at}
+USER_SESSION_TTL_SEC = 24 * 3600  # 24 hours
+
+def _create_user_session(user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    _user_sessions[token] = {"user_id": user_id, "created_at": time.time()}
+    return token
+
+def _valid_user_session(request: Request) -> bool:
+    token = request.cookies.get("cianet_user_session")
+    if not token:
+        return False
+    s = _user_sessions.get(token)
+    if not s:
+        return False
+    if time.time() - s["created_at"] > USER_SESSION_TTL_SEC:
+        _user_sessions.pop(token, None)
+        return False
+    return True
+
+def _get_user_id_from_session(request: Request) -> Optional[int]:
+    token = request.cookies.get("cianet_user_session")
+    if not token:
+        return None
+    s = _user_sessions.get(token)
+    if not s or time.time() - s["created_at"] > USER_SESSION_TTL_SEC:
+        return None
+    return s["user_id"]
+
+def _invalidate_user_session(request: Request) -> None:
+    token = request.cookies.get("cianet_user_session")
+    if token:
+        _user_sessions.pop(token, None)
+
+def require_user_auth(request: Request) -> int:
+    """Returns user_id if authenticated, else raises 401."""
+    uid = _get_user_id_from_session(request)
+    if uid is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized — user login required",
+        )
+    return uid
+
+
 def require_auth(request: Request):
     if not _valid_session(request):
         raise HTTPException(
@@ -220,6 +268,23 @@ class SettingsUpdate(BaseModel):
     channel_username: Optional[str] = None
     wallet_address_usdt: Optional[str] = None
     min_commit_hash: Optional[str] = None
+
+
+# ─── v2.8.0: License auth + wallet request models ─────────────
+class LicenseLoginRequest(BaseModel):
+    license_code: str
+
+class WalletCreditRequest(BaseModel):
+    amount: int
+    reason: Optional[str] = ""
+
+class WalletDebitRequest(BaseModel):
+    amount: int
+    reason: Optional[str] = ""
+
+class WalletPayRequest(BaseModel):
+    amount: int
+    ref: Optional[str] = ""
 
 
 # ─── FastAPI app ─────────────────────────────────────────────────────
@@ -1150,6 +1215,236 @@ async def tools_api_creds_rotate(request: Request, _: None = Depends(require_aut
             rotated += 1
     m.save_config(cfg)
     return {"ok": True, "rotated_count": rotated, "pool_size": len(pool)}
+
+
+# ─── User License-Auth API (for GitHub Pages site) ────────────────
+# این endpoint‌ها با cookie جدا (cianet_user_session) کار می‌کنند
+# تا با session ادمین تداخل نداشته باشند. کاربر با کد لایسنس لاگین
+# می‌کند — فقط لایسنس‌های فعال‌شده (که user_id دارند) پذیرفته می‌شوند.
+
+@app.post("/api/user/login")
+async def user_license_login(req: LicenseLoginRequest, response: Response):
+    """ورود با کد لایسنس — فقط لایسنس‌های فعال‌شده قابل‌استفاده.
+
+    اگر لایسنس قبلاً فعال‌شده (در جدول subscriptions با status='active'
+    یا 'expired')، user_id صاحب‌اش پیدا می‌شود و session ساخته می‌شود.
+    اگر لایسنس هنوز فعال‌نشده (used_count=0) یا منقضی شده/is_active=0،
+    ورود رد می‌شود.
+    """
+    m = _main()
+    code = (req.license_code or "").strip().upper()
+    if not code:
+        raise HTTPException(400, "کد لایسنس خالی است")
+    with m._conn() as c:
+        lic = c.execute("SELECT * FROM licenses WHERE code = ?", (code,)).fetchone()
+        if lic is None:
+            raise HTTPException(404, "چنین لایسنسی وجود ندارد")
+        lic = dict(lic)
+        if not lic.get("is_active"):
+            raise HTTPException(403, "این لایسنس غیرفعال است")
+        if lic.get("used_count", 0) < 1:
+            raise HTTPException(403, "این لایسنس هنوز فعال نشده — اول در ربات /start بزن و فعالش کن")
+        # user_id از طریق subscriptions پیدا می‌شود (آخرین اشتراکِ ساخته‌شده با این license_id)
+        sub = c.execute(
+            "SELECT user_id FROM subscriptions WHERE license_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (lic["id"],),
+        ).fetchone()
+        if sub is None:
+            raise HTTPException(403, "این لایسنس فعال شده ولی کاربرش پیدا نشد — با پشتیبانی تماس بگیر")
+        user_id = int(sub["user_id"])
+    token = _create_user_session(user_id)
+    response.set_cookie(
+        key="cianet_user_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=USER_SESSION_TTL_SEC,
+        secure=False,  # در production روی True
+    )
+    return {"ok": True, "user_id": user_id}
+
+
+@app.post("/api/user/logout")
+async def user_logout(request: Request, response: Response):
+    _invalidate_user_session(request)
+    response.delete_cookie("cianet_user_session")
+    return {"ok": True}
+
+
+@app.get("/api/user/me")
+async def user_me(request: Request):
+    """اطلاعات کاربر فعلی — موجودی، اشتراک فعال، تعداد سلف‌بات‌ها."""
+    uid = require_user_auth(request)
+    m = _main()
+    u = m.get_user(uid)
+    if not u:
+        raise HTTPException(404, "کاربر پیدا نشد")
+    balance = m.get_wallet_balance(uid)
+    sub_st = m.SaaSBot._user_sub_status_static(uid) if hasattr(m.SaaSBot, "_user_sub_status_static") else {"active": False, "days": 0, "plan": None}
+    cfg = m.load_config()
+    n_bots = len(m.accounts_of_user(cfg, uid))
+    return {
+        "user_id": uid,
+        "username": u.get("username"),
+        "first_name": u.get("first_name"),
+        "role": m.get_role(uid, m.OWNER_ID),
+        "wallet_balance": balance,
+        "subscription": {
+            "active": sub_st.get("active", False),
+            "days_left": sub_st.get("days", 0),
+            "plan": sub_st.get("plan"),
+        },
+        "n_selfbots": n_bots,
+    }
+
+
+@app.get("/api/user/wallet")
+async def user_wallet(request: Request):
+    """موجودی + ۱۰ تراکنش آخر کاربر."""
+    uid = require_user_auth(request)
+    m = _main()
+    balance = m.get_wallet_balance(uid)
+    txs = m.list_wallet_transactions(uid, limit=10)
+    return {
+        "balance": balance,
+        "transactions": [
+            {
+                "id": t["id"],
+                "amount": int(t["amount"]),
+                "balance_after": int(t["balance_after"]),
+                "type": t["type"],
+                "reason": t.get("reason") or t.get("ref") or "",
+                "created_at": t["created_at"],
+            }
+            for t in txs
+        ],
+    }
+
+
+@app.get("/api/user/wallet/transactions")
+async def user_wallet_transactions(request: Request, limit: int = 50):
+    """تاریخچه‌ی کامل‌تر — تا ۱۰۰ تراکنش آخر."""
+    uid = require_user_auth(request)
+    if limit > 100:
+        limit = 100
+    m = _main()
+    txs = m.list_wallet_transactions(uid, limit=limit)
+    return {
+        "transactions": [
+            {
+                "id": t["id"],
+                "amount": int(t["amount"]),
+                "balance_after": int(t["balance_after"]),
+                "type": t["type"],
+                "reason": t.get("reason") or t.get("ref") or "",
+                "created_at": t["created_at"],
+            }
+            for t in txs
+        ],
+    }
+
+
+@app.post("/api/user/pay-from-wallet")
+async def user_pay_from_wallet(req: WalletPayRequest, request: Request):
+    """پرداخت از کیف پول — برای تکمیل سفارش.
+
+    این endpoint پول را از کیف پول کاربر کم می‌کند و در audit log ثبت
+    می‌کند، ولی سفارش را خودش تأیید نمی‌کند (owner باید بعد از webhook
+    سفارش را به‌صورت دستی تأیید کند). در نسخه‌ی بعدی می‌توان آن را به
+    یک webhook داخلی وصل کرد که سفارش را همزمان تأیید کند.
+    """
+    uid = require_user_auth(request)
+    m = _main()
+    if req.amount <= 0:
+        raise HTTPException(400, "مبلغ باید مثبت باشد")
+    r = m.wallet_pay_from_balance(uid, req.amount, ref=req.ref or "")
+    if r.get("ok"):
+        return {"ok": True, "balance": r["balance"], "tx_id": r["tx_id"]}
+    err_map = {
+        "insufficient_balance": (400, f"موجودی کافی نیست — موجودی فعلی: {r.get('balance', 0)} Toman"),
+        "user_not_found": (404, "کاربر پیدا نشد"),
+        "invalid_amount": (400, "مبلغ نامعتبر"),
+    }
+    code, msg = err_map.get(r.get("error"), (500, "خطای ناشناخته"))
+    raise HTTPException(code, msg)
+
+
+# ─── Admin wallet endpoints (added to admin API) ─────────────────
+
+@app.get("/api/users/{user_id}/wallet")
+async def admin_get_user_wallet(user_id: int, request: Request, _: None = Depends(require_auth)):
+    """موجودی + ۲۰ تراکنش آخر یک کاربر — فقط برای ادمین."""
+    m = _main()
+    u = m.get_user(user_id)
+    if not u:
+        raise HTTPException(404, "کاربر پیدا نشد")
+    balance = m.get_wallet_balance(user_id)
+    txs = m.list_wallet_transactions(user_id, limit=20)
+    return {
+        "user_id": user_id,
+        "username": u.get("username"),
+        "balance": balance,
+        "transactions": [
+            {
+                "id": t["id"],
+                "amount": int(t["amount"]),
+                "balance_after": int(t["balance_after"]),
+                "type": t["type"],
+                "reason": t.get("reason") or t.get("ref") or "",
+                "created_by": t.get("created_by"),
+                "created_at": t["created_at"],
+            }
+            for t in txs
+        ],
+    }
+
+
+@app.post("/api/users/{user_id}/wallet/credit")
+async def admin_credit_user_wallet(user_id: int, req: WalletCreditRequest,
+                                  request: Request, _: None = Depends(require_auth)):
+    """شارژ کیف پول کاربر — فقط OWNER/ADMIN.
+
+    توجه: این endpoint از session ادمین استفاده می‌کند، ولی نقش
+    سازنده در main.py از DB خوانده می‌شود تا اعتماد به claim سمت
+    کلاینت کافی نباشد. اگر session ادمین معتبر باشد ولی نقش او در
+    DB تغییر کرده باشد (مثلاً از ADMIN به RESELLER)، این endpoint
+    permission_denied برمی‌گرداند.
+    """
+    m = _main()
+    # actor_id را از session می‌گیریم — ولی نقش را از DB می‌خوانیم.
+    # session ادمین همیشه OWNER است در حال حاضر (single-admin panel).
+    # در آینده‌ی multi-admin، باید actor_id واقعی از session استخراج شود.
+    actor_id = m.OWNER_ID  # single-admin فرض می‌شود
+    r = m.wallet_credit(user_id, req.amount, actor_id, reason=req.reason or "")
+    if r.get("ok"):
+        return {"ok": True, "balance": r["balance"], "tx_id": r["tx_id"]}
+    err_map = {
+        "permission_denied": (403, "شما مجاز به این عمل نیستید"),
+        "user_not_found": (404, "کاربر پیدا نشد"),
+        "invalid_amount": (400, "مبلغ نامعتبر"),
+    }
+    code, msg = err_map.get(r.get("error"), (500, "خطای ناشناخته"))
+    raise HTTPException(code, msg)
+
+
+@app.post("/api/users/{user_id}/wallet/debit")
+async def admin_debit_user_wallet(user_id: int, req: WalletDebitRequest,
+                                  request: Request, _: None = Depends(require_auth)):
+    """کسر از کیف پول کاربر — فقط OWNER/ADMIN."""
+    m = _main()
+    actor_id = m.OWNER_ID
+    r = m.wallet_debit(user_id, req.amount, actor_id, reason=req.reason or "")
+    if r.get("ok"):
+        return {"ok": True, "balance": r["balance"], "tx_id": r["tx_id"]}
+    err_map = {
+        "permission_denied": (403, "شما مجاز به این عمل نیستید"),
+        "user_not_found": (404, "کاربر پیدا نشد"),
+        "invalid_amount": (400, "مبلغ نامعتبر"),
+        "insufficient_balance": (400, f"موجودی کاربر کافی نیست — موجودی فعلی: {r.get('balance', 0)} Toman"),
+    }
+    code, msg = err_map.get(r.get("error"), (500, "خطای ناشناخته"))
+    raise HTTPException(code, msg)
 
 
 # ─── Health check (public) ───────────────────────────────────────────

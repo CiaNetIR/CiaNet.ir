@@ -41,7 +41,7 @@ def _read_state() -> dict:
             return json.loads(STATE_FILE.read_text())
     except Exception:
         pass
-    return {"last_check": 0, "last_commit": "", "last_update_at": 0, "pending_propagation": False}
+    return {"last_check": 0, "last_commit": "", "last_update_at": 0, "pending_propagation": False, "rolled_back": False, "rolled_back_at": 0}
 
 
 def _write_state(state: dict) -> None:
@@ -106,6 +106,45 @@ def get_pending_commits(repo_dir: str = None) -> list:
     except Exception as e:
         log.warning("get_pending_commits failed: %s", e)
     return []
+
+
+def has_local_modifications(repo_dir: str = None) -> bool:
+    """v2.8.1: چک کن آیا main.py یا web_panel.py نسبت به git HEAD
+    تغییر کرده — مثلاً بعد از rollback یا replace دستی.
+
+    این تابع `git diff HEAD -- main.py web_panel.py` را اجرا می‌کند.
+    اگه خروجی غیر خالی باشد، یعنی فایل‌های نصب‌شده با git HEAD یکسان
+    نیستند — کاربر یا rollback کرده یا فایل‌ها را دستی replace کرده.
+    """
+    if repo_dir is None:
+        repo_dir = INSTALL_DIR
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD", "--", "main.py", "web_panel.py"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+    except Exception as e:
+        log.warning("has_local_modifications failed: %s", e)
+    return False
+
+
+def mark_rolled_back() -> None:
+    """v2.8.1: بعد از rollback، این تابع رو صدا بزن تا state flag
+    ست بشه و آپدیتر بدونه که بعد از restart باید update check
+    رو فوراً انجام بده."""
+    state = _read_state()
+    state["rolled_back"] = True
+    state["rolled_back_at"] = time.time()
+    _write_state(state)
+    # پاک کردن .last_seen_commit تا check_for_update بدونه باید
+    # فوراً re-detect کنه
+    try:
+        if LOCAL_COMMIT_FILE.exists():
+            LOCAL_COMMIT_FILE.unlink()
+    except Exception:
+        pass
 
 
 def _acquire_lock(timeout: int = 30) -> bool:
@@ -355,6 +394,8 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         state["last_commit"] = new_commit
         state["last_update_at"] = time.time()
         state["pending_propagation"] = True  # وقتی restart شد propagate می‌کنه
+        state["rolled_back"] = False  # v2.8.1: بعد از آپدیت موفق، flag rollback پاک می‌شه
+        state["rolled_back_at"] = 0
         _write_state(state)
 
         msg = f"✅ آپدیت شد به {new_commit[:8]}"
@@ -542,10 +583,14 @@ async def auto_update_loop(interval: int = 300, admin_notify_func=None):
 
 def get_version_info() -> dict:
     """اطلاعات برای نمایش در پنل ادمین."""
+    state = _read_state()
     return {
         "local_commit": get_local_commit(),
         "remote_commit": get_remote_commit(),
         "pending_commits": get_pending_commits(),
-        "last_check": _read_state().get("last_check", 0),
-        "last_update_at": _read_state().get("last_update_at", 0),
+        "has_local_mods": has_local_modifications(),
+        "rolled_back": state.get("rolled_back", False),
+        "rolled_back_at": state.get("rolled_back_at", 0),
+        "last_check": state.get("last_check", 0),
+        "last_update_at": state.get("last_update_at", 0),
     }
