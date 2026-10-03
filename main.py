@@ -4870,8 +4870,18 @@ ADMIN_LIST_FILE = os.path.join(DATA_DIR, "admin_bot_admins.json")
 # ساعات پشتیبان‌گیری خودکار روزانه (به وقت ایران).
 # پیش‌فرض: ۰۰:۰۰ (نیمه‌شب) و ۱۲:۰۰ (ظهر). برای تغییر، این لیست را
 # ویرایش کنید (مثلاً فقط [4] برای یک بکاپ روزانه در ساعت ۴ بامداد).
-BACKUP_HOURS_IRAN = [0, 12]  # [ساعت ۱, ساعت ۲, ...] — به وقت ایران
-BACKUP_HOUR_IRAN = BACKUP_HOURS_IRAN[0]  # backward-compat با کدهای قدیمی
+# PATCH (v2.3.0): قابلیت override با env var CIANET_BACKUP_HOURS
+# مثلاً CIANET_BACKUP_HOURS="0,12" یا CIANET_BACKUP_HOURS="3"
+_backup_hours_env = os.environ.get("CIANET_BACKUP_HOURS", "").strip()
+if _backup_hours_env:
+    try:
+        BACKUP_HOURS_IRAN = [int(h.strip()) for h in _backup_hours_env.split(",") if h.strip().isdigit() and 0 <= int(h.strip()) < 24]
+        if not BACKUP_HOURS_IRAN:
+            BACKUP_HOURS_IRAN = [0, 12]
+    except Exception:
+        BACKUP_HOURS_IRAN = [0, 12]
+else:
+    BACKUP_HOURS_IRAN = [0, 12]  # [ساعت ۱, ساعت ۲, ...] — به وقت ایران
 
 # مراحل ویزارد «افزودن اکانت»
 WIZ_TAG = "awaiting_tag"
@@ -10240,6 +10250,17 @@ class SaaSBot:
         )
 
     async def _admin_show_backup_hub(self, event):
+        # PATCH (v2.3.0): نمایش وضعیت scheduled backup
+        backup_hours_str = ", ".join(str(h) for h in BACKUP_HOURS_IRAN)
+        body = [
+            f"{UI.GREEN} **Backup** — یک فایل ZIP کامل از دیتابیس‌ها، "
+            f"تنظیمات و سشن‌ها می‌سازد. کاملاً بی‌خطر.",
+            f"{UI.RED} **Restore** — وضعیت فعلی را با محتوای فایل "
+            f"جایگزین می‌کند. قبلش یک Backup اضطراری خودکار گرفته می‌شود.",
+            "",
+            f"⏰ **بکاپ خودکار**: روزانه در ساعت‌های {backup_hours_str} (وقت ایران)",
+            f"{UI.GRAY} برای تغییر، در فایل env: CIANET_BACKUP_HOURS=\"0,12\"",
+        ]
         buttons = [
             [UI.confirm("گرفتن Backup", "owner_backup")],
             [UI.danger("بازیابی از Backup", "owner_db_restore")],
@@ -10248,12 +10269,7 @@ class SaaSBot:
         await event.edit(
             UI.screen(
                 "💾 Backup و Restore",
-                body=[
-                    f"{UI.GREEN} **Backup** — یک فایل ZIP کامل از دیتابیس‌ها، "
-                    f"تنظیمات و سشن‌ها می‌سازد. کاملاً بی‌خطر.",
-                    f"{UI.RED} **Restore** — وضعیت فعلی را با محتوای فایل "
-                    f"جایگزین می‌کند. قبلش یک Backup اضطراری خودکار گرفته می‌شود.",
-                ],
+                body=body,
                 subtitle="پشتیبان‌گیری و بازیابیِ کلِ سیستم.",
                 hint="قبل از هر Restore، حتماً یک Backup تازه بگیر.",
             ),
@@ -11190,6 +11206,12 @@ class SaaSBot:
             buttons.append([UI.confirm("📥 اعمال آپدیت", "owner_update_apply")])
         buttons.append([UI.go("🔄 چک آپدیت", "owner_update_check")])
         buttons.append([UI.go("↩️ لیست نسخه‌های قابل rollback", "owner_rollback_list")])
+        # PATCH (v2.3.0): auto-update toggle
+        auto_enabled = os.environ.get("CIANET_AUTO_UPDATE", "0").strip() in ("1", "true", "yes")
+        if auto_enabled:
+            buttons.append([UI.go("🟢 آپدیت خودکار: فعال", "owner_toggle_auto_update")])
+        else:
+            buttons.append([UI.go("⚫ آپدیت خودکار: خاموش", "owner_toggle_auto_update")])
         buttons.append(UI.nav_row())
 
         await event.edit(
@@ -11263,6 +11285,60 @@ class SaaSBot:
                 f"❌ آپدیت ناموفق بود:\n\n{msg}",
                 buttons=[UI.go("🔄 بازگشت", "owner_update"), UI.nav_row()],
             )
+
+    async def _owner_toggle_auto_update(self, event):
+        """
+        🔄 روشن/خاموش‌کردنِ آپدیت خودکار (هر ۶ ساعت).
+
+        PATCH (v2.3.0): با toggle این دکمه، متغیر CIANET_AUTO_UPDATE در
+        فایل env file ست/پاک می‌شه. برای اعمال، cianet restart لازمه.
+
+        اگه فعال باشه، _auto_update_loop (که در _run_all_accounts صدا
+        زده می‌شه) هر ۶ ساعت یک‌بار check_for_update می‌کنه و اگه آپدیت
+        جدیدی باشه، apply_update اجرا می‌شه (با notify به OWNER قبل از
+        restart).
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+
+        # پیدا کردن env file
+        env_file = None
+        _proj_dir = os.path.dirname(os.path.abspath(__file__))
+        for candidate in ["/etc/cianet.env", "/etc/selfbot.env",
+                          os.path.join(_proj_dir, ".env"),
+                          os.path.join(_proj_dir, "cianet.env")]:
+            if os.path.exists(candidate):
+                env_file = candidate
+                break
+        if env_file is None:
+            await event.answer("❌ فایل env پیدا نشد — دستی در env تنظیم کن: CIANET_AUTO_UPDATE=1", alert=True)
+            return
+
+        # مقدار فعلی
+        auto_enabled = os.environ.get("CIANET_AUTO_UPDATE", "0").strip() in ("1", "true", "yes")
+        # toggle
+        new_value = "0" if auto_enabled else "1"
+
+        # ست کردن در env file (اضافه یا replace)
+        import re
+        with open(env_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        if re.search(r"^CIANET_AUTO_UPDATE=", content, re.MULTILINE):
+            content = re.sub(r"^CIANET_AUTO_UPDATE=.*$", f"CIANET_AUTO_UPDATE={new_value}", content, flags=re.MULTILINE)
+        else:
+            content = content.rstrip() + f"\nCIANET_AUTO_UPDATE={new_value}\n"
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        # also update in-process env
+        os.environ["CIANET_AUTO_UPDATE"] = new_value
+
+        msg = "🟢 آپدیت خودکار فعال شد" if new_value == "1" else "⚫ آپدیت خودکار خاموش شد"
+        msg += "\n\n⚠️ برای فعال‌شدن loop، cianet رو restart کن:\nsudo systemctl restart cianet"
+        await event.answer(msg, alert=True)
+        # refresh صفحه
+        await self._show_owner_update(event)
 
     async def _owner_show_rollback_list(self, event):
         """
@@ -14261,6 +14337,10 @@ class SaaSBot:
                 if data == "owner_update_apply" and role == ROLE_OWNER:
                     await self._owner_apply_update(event)
                     return
+                # PATCH (v2.3.0): auto-update toggle
+                if data == "owner_toggle_auto_update" and role == ROLE_OWNER:
+                    await self._owner_toggle_auto_update(event)
+                    return
                 if data == "owner_rollback_list" and role == ROLE_OWNER:
                     await self._owner_show_rollback_list(event)
                     return
@@ -15419,7 +15499,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.2.0"
+BUILD_VERSION = "2026-10-03-v2.3.0"
 
 # ══════════════════════════════════════════════════════════
 #  مسیرها و فایل‌های تنظیمات
@@ -16043,6 +16123,76 @@ async def _disable_all_accounts_for_update() -> None:
                 print(f"⚠️ [{tag}] stop قبل از update ناموفق (continue): {e}")
     except Exception as e:
         print(f"⚠️ [update] _disable_all_accounts_for_update ناموفق: {e}")
+
+
+# PATCH (v2.3.0): auto-update loop wrapper — این تابع در _run_all_accounts
+# به‌عنوان background task schedule می‌شه. هر ۶ ساعت check_for_update
+# می‌کنه و اگه آپدیت جدیدی باشه، apply_update اجرا می‌شه.
+#
+# قبل از restart، یه notification به OWNER می‌فرسته با setTimeout ۵s
+# تا پیام واقعاً ارسال بشه قبل از kill شدن پروسه.
+#
+# محدودیت‌ها:
+# - اگه CIANET_AUTO_UPDATE تنظیم نباشه، loop فقط sleep می‌کنه (no-op).
+# - اگه apply_update به‌دلیل supply chain check رد بشه، loop دوباره در
+#   ۶ ساعت بعد تلاش می‌کنه (که اگه owner دستی min_commit رو درست کرده
+#   باشه، موفق می‌شه).
+async def _auto_update_loop_wrapper() -> None:
+    """
+    Wrapper که در _run_all_accounts به‌عنوان background task schedule
+    می‌شه. از cianet_updater.auto_update_loop استفاده می‌کنه ولی با
+    notify تابع محلی _owner_notify_async به‌جای admin_notify_func
+    قبلی.
+    """
+    INTERVAL_SEC = 6 * 3600  # ۶ ساعت
+    while True:
+        try:
+            await asyncio.sleep(INTERVAL_SEC)
+            # اگه env در runtime عوض شده باشه، آن را چک کن
+            if os.environ.get("CIANET_AUTO_UPDATE", "0").strip() not in ("1", "true", "yes"):
+                continue
+            try:
+                from cianet_updater import check_for_update, apply_update
+            except ImportError:
+                # cianet_updater موجود نیست — skip
+                continue
+            update_info = await check_for_update()
+            if not update_info:
+                continue  # اپدیتی نیست
+            count = update_info.get("count", 0)
+            print(f"🔄 [auto-update] {count} commit جدید پیدا شد — applying...")
+            # notify OWNER قبل از update
+            try:
+                await _owner_notify_async(
+                    f"🔄 آپدیت خودکار شروع شد!\n\n"
+                    f"📥 {count} commit جدید پیدا شد.\n"
+                    f"⏱️ اعمال آپدیت در حال انجام است — سرویس restart خواهد شد.\n\n"
+                    f"🔗 remote: `{update_info.get('remote', '?')[:8]}`"
+                )
+            except Exception:
+                pass
+            # ۲ ثانیه صبر کن تا notify ارسال بشه
+            await asyncio.sleep(2)
+            # apply
+            success, msg = apply_update()
+            print(f"🔄 [auto-update] apply_update: {msg}")
+            if success:
+                # قبل از restart یه notify دیگه بفرست
+                try:
+                    await _owner_notify_async(f"✅ آپدیت خودکار اعمال شد.\n\n{msg}")
+                except Exception:
+                    pass
+                await asyncio.sleep(3)  # بذار notify ارسال بشه
+            else:
+                try:
+                    await _owner_notify_async(f"❌ آپدیت خودکار ناموفق:\n\n{msg}")
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"⚠️ [auto-update] loop error: {e}")
+            await asyncio.sleep(60)  # قبل از تلاش مجدد صبر کن
 
 
 async def _reenable_all_accounts_after_update() -> str:
@@ -21558,6 +21708,18 @@ async def _run_all_accounts(cfg: dict) -> None:
     # شروع شود.
     helper_task = _spawn_bg(run_helper_bot_forever(), "helper")
 
+    # PATCH (v2.3.0): auto-update loop — اگه CIANET_AUTO_UPDATE=1 در env
+    # تنظیم شده باشه، یه background task هر ۶ ساعت check می‌کنه و اگه
+    # آپدیت جدیدی باشه، apply می‌کنه (با notify به OWNER). قبل از restart
+    # هم یه پیام به OWNER می‌فرسته.
+    auto_update_task = None
+    if os.environ.get("CIANET_AUTO_UPDATE", "0").strip() in ("1", "true", "yes"):
+        try:
+            auto_update_task = _spawn_bg(_auto_update_loop_wrapper(), "auto-update")
+            print("🔄 [auto-update] loop شروع شد (هر ۶ ساعت چک می‌کنه)")
+        except Exception as e:
+            print(f"⚠️ [auto-update] loop شروع نشد: {e}")
+
     # استارت SelfBotها — همه از Runtime Manager مرکزی (ensure_started) تا برای
     # هر tag فقط یک Runtime ساخته شود.
     start_tasks = []
@@ -21618,6 +21780,9 @@ async def _run_all_accounts(cfg: dict) -> None:
     # بدون pid-file و بدون ریسکِ زیرپروسسِ یتیم.
     if helper_task is not None:
         leftover.append(helper_task)
+    # PATCH (v2.3.0): auto-update task هم در shutdown cancel می‌شه
+    if auto_update_task is not None:
+        leftover.append(auto_update_task)
     for t in leftover:
         if t and not t.done():
             t.cancel()
