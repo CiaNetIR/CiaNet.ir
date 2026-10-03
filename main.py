@@ -5840,13 +5840,25 @@ class AdminBot:
             body.append(f"🔤 فونت فعلی: `{getattr(entry.bot, 'current_font', '—')}`")
         else:
             body.append(f"{UI.PAUSED} اکانت روشن نیست — مقادیر فعلی در دسترس نیست.")
-        buttons = [
-            [
-                UI.go("✏️ تغییر اسم", f"edit_name:{tag}"),
-                UI.go("🔤 تغییر فونت", f"font_menu:{tag}"),
-            ],
-            UI.nav_row(),
-        ]
+        # PATCH (audit-7): قبلاً دکمه‌های «✏️ تغییر اسم» و «🔤 تغییر فونت»
+        # همیشه نشان داده می‌شدند، حتی وقتی اکانت روشن نبود. کلیک روی آن‌ها
+        # در حالتِ non-running با `entry is None` در handler سایلنت fail
+        # می‌کرد یا به صفحه‌ی مرده می‌رسید. حالا اگر اکانت non-running
+        # است، دکمه‌ی «روشن کن» نشان داده می‌شود (mirror از _show_features).
+        if entry:
+            buttons = [
+                [
+                    UI.go("✏️ تغییر اسم", f"edit_name:{tag}"),
+                    UI.go("🔤 تغییر فونت", f"font_menu:{tag}"),
+                ],
+                UI.nav_row(),
+            ]
+        else:
+            # اکانت در حال حاضر اجرا نمی‌شود — فقط دکمه‌ی enable.
+            buttons = [
+                [UI.go("🟢 روشن کن", f"enable:{tag}", primary=True, tone="success")],
+                UI.nav_row(),
+            ]
         await event.edit(
             UI.screen(f"🎨 ظاهر و پروفایل «{tag}»", body=body,
                       subtitle="ظاهر پیام‌ها و پروفایل این اکانت."),
@@ -6056,7 +6068,11 @@ class AdminBot:
             # اکانت ممکن است هنوز در حال start باشد یا fail شده باشد
             cfg = self.sb.load_config()
             if tag in cfg:
-                status = _RUNTIME_STATUS.get(tag, "unknown")
+                # NOTE: قبلاً `_RUNTIME_STATUS` استفاده می‌شد که در کل ماژول تعریف
+                # نشده بود → NameError در callback و هندلر با swallow در WARNING
+                # بی‌صدا از بین می‌رفت (همان «اسپینر سپس هیچی»). رجیستریِ واقعی
+                # `BOT_STATUS` است (موجودیتِ per-tag وضعیت runtime).
+                status = _status_human(BOT_STATUS.get(tag, "unknown"))
                 await event.answer(
                     f"اکانت «{tag}» هنوز آماده نیست (وضعیت: {status}). "
                     f"چند ثانیه صبر کن و دوباره تلاش کن.", alert=True)
@@ -6181,7 +6197,7 @@ class AdminBot:
         page = idx // self._SESS_PAGE_SIZE
         await self._show_sessions(event, tag, page=page)
 
-    async def _kill_selected_sessions(self, event, tag: str):
+    async def _kill_selected_sessions(self, event, tag: str, skip_antiban: bool = False):
         """دستگاه‌های تیک‌خورده را می‌بندد، بعد فهرستِ تازه را نشان می‌دهد."""
         allowed, _r = await self._authorize_security(event, tag)
         if not allowed:
@@ -6194,15 +6210,22 @@ class AdminBot:
         if not sel:
             await self._show_sessions(event, tag, flash="هیچ دستگاهی انتخاب نشده بود.")
             return
-        # Anti-Ban: اکانت شماره خارج/مجازی → تأیید اضافه لازم است
-        guard_ok, guard_info = antiban_guarded_action(
-            event.sender_id, entry.acc, "sesskill"
-        )
-        if not guard_ok:
-            token = guard_info[2] if len(guard_info) > 2 else ""
-            await self._show_antiban_warning(event, tag, token, "sesskill",
-                                            phone_country_hint(entry.acc.get("phone")))
-            return
+        # Anti-Ban: اکانت شماره خارج/مجازی → تأیید اضافه لازم است.
+        # PATCH (antiban-loop): قبلاً وقتی از مسیرِ _handle_antiban_confirm
+        # فراخوانی می‌شد، دوباره antiban_guarded_action را صدا می‌زد و چون
+        # کاربر مالکِ غیرِ owner است و اکانت dangerous است، یک token تازه
+        # می‌ساخت و هشدار را دوباره نمایش می‌داد → حلقه‌ی بی‌نهایتِ
+        # «تأیید → هشدار → تأیید → هشدار». حالا skip_antiban=True از مسیرِ
+        # تأیید پاس داده می‌شود تا همان یک بارِ تأییدشده کافی باشد.
+        if not skip_antiban:
+            guard_ok, guard_info = antiban_guarded_action(
+                event.sender_id, entry.acc, "sesskill"
+            )
+            if not guard_ok:
+                token = guard_info[2] if len(guard_info) > 2 else ""
+                await self._show_antiban_warning(event, tag, token, "sesskill",
+                                                phone_country_hint(entry.acc.get("phone")))
+                return
         # قفلِ هم‌زمانی: دوبار کلیکِ پشتِ سرهم نباید دو بار بستن را اجرا کند.
         lock = self._sec_lock(tag)
         if lock.locked():
@@ -6314,15 +6337,22 @@ class AdminBot:
             new_data = f"sesskill:{tag}"  # عملیات sesskill به لیست انتخاب نیاز دارد
         # برای سادگی، فقط به صفحه‌ی مربوطه هدایت می‌کنیم و پیام می‌دهیم
         # که تأیید ثبت شد.
+        # عملیات تأیید شد → اجرای عملیات اصلی. PATCH (antiban-loop): تا
+        # قبلش، این متدها دوباره antiban_guarded_action را صدا می‌زدند و
+        # چون کاربر non-owner است و اکانت dangerous است، یک token تازه
+        # می‌ساختند و هشدار را دوباره نشان می‌دادند → حلقه‌ی بی‌نهایتِ
+        # «تأیید → هشدار → تأیید». حالا skip_antiban=True پاس داده می‌شود
+        # تا همان یک بارِ تأییدِ کاربر کافی باشد. (تأییدِ کاربر در
+        # antiban_consume بالا مصرف شد؛ اینجا دیگر نیاز به token نیست.)
         if action == "sessterm":
             await event.answer("تأیید شد — در حال بستن...")
-            await self._terminate_sessions(event, tag)
+            await self._terminate_sessions(event, tag, skip_antiban=True)
         elif action == "sesskill":
             await event.answer("تأیید شد — در حال بستن sessionهای انتخابی...")
-            await self._kill_selected_sessions(event, tag)
+            await self._kill_selected_sessions(event, tag, skip_antiban=True)
         elif action == "tfago":
             await event.answer("تأیید شد — در حال ارسال درخواست...")
-            await self._do_2fa_reset(event, tag)
+            await self._do_2fa_reset(event, tag, skip_antiban=True)
         else:
             await event.edit(
                 f"{UI.GREEN} تأیید شد. دوباره عملیات را از منو انجام بده.",
@@ -6362,7 +6392,7 @@ class AdminBot:
             ],
         )
 
-    async def _terminate_sessions(self, event, tag: str):
+    async def _terminate_sessions(self, event, tag: str, skip_antiban: bool = False):
         """همه‌ی نشست‌های دیگر را می‌بندد، بعد فهرستِ تازه را نشان می‌دهد."""
         allowed, _r = await self._authorize_security(event, tag)
         if not allowed:
@@ -6373,15 +6403,18 @@ class AdminBot:
             return
         # Anti-Ban: «خروج از همه» روی شماره‌ی خارج/مجازی بسیار خطرناک است —
         # تلگرام معمولاً بعد از آن ایمیل و دسترسی اکانت را قطع می‌کند.
-        guard_ok, guard_info = antiban_guarded_action(
-            event.sender_id, entry.acc, "sessterm"
-        )
-        if not guard_ok:
-            token = guard_info[2] if len(guard_info) > 2 else ""
-            await self._show_antiban_warning(event, tag, token, "sessterm",
-                                            phone_country_hint(entry.acc.get("phone")),
-                                            level="critical")
-            return
+        # PATCH (antiban-loop): skip_antiban=True از مسیرِ _handle_antiban_confirm
+        # پاس داده می‌شود تا حلقه‌ی بی‌نهایتِ «تأیید → هشدار» نشود.
+        if not skip_antiban:
+            guard_ok, guard_info = antiban_guarded_action(
+                event.sender_id, entry.acc, "sessterm"
+            )
+            if not guard_ok:
+                token = guard_info[2] if len(guard_info) > 2 else ""
+                await self._show_antiban_warning(event, tag, token, "sessterm",
+                                                phone_country_hint(entry.acc.get("phone")),
+                                                level="critical")
+                return
         # قفلِ هم‌زمانی در برابر کلیکِ دوباره.
         lock = self._sec_lock(tag)
         if lock.locked():
@@ -6611,22 +6644,25 @@ class AdminBot:
             ],
         )
 
-    async def _do_2fa_reset(self, event, tag: str):
+    async def _do_2fa_reset(self, event, tag: str, skip_antiban: bool = False):
         """اجرای درخواست بازنشانی، بازخوانیِ وضعیت از تلگرام، و گزارش."""
         entry, ok = await self._sess_guard(event, tag)
         if not entry:
             return
         # Anti-Ban: بازنشانی ۲FA روی شماره‌ی خارج می‌تواند منجر به قطع
         # دسترسی اکانت توسط تلگرام شود.
-        guard_ok, guard_info = antiban_guarded_action(
-            event.sender_id, entry.acc, "tfago"
-        )
-        if not guard_ok:
-            token = guard_info[2] if len(guard_info) > 2 else ""
-            await self._show_antiban_warning(event, tag, token, "tfago",
-                                            phone_country_hint(entry.acc.get("phone")),
-                                            level="critical")
-            return
+        # PATCH (antiban-loop): skip_antiban=True از مسیرِ _handle_antiban_confirm
+        # پاس داده می‌شود تا حلقه‌ی بی‌نهایتِ «تأیید → هشدار» نشود.
+        if not skip_antiban:
+            guard_ok, guard_info = antiban_guarded_action(
+                event.sender_id, entry.acc, "tfago"
+            )
+            if not guard_ok:
+                token = guard_info[2] if len(guard_info) > 2 else ""
+                await self._show_antiban_warning(event, tag, token, "tfago",
+                                                phone_country_hint(entry.acc.get("phone")),
+                                                level="critical")
+                return
         # قفلِ هم‌زمانی: دو کلیکِ پشتِ سرهم نباید دو درخواست بسازد.
         lock = self._sec_lock(tag)
         if lock.locked():
@@ -7494,6 +7530,47 @@ class AdminBot:
         try:
             await asyncio.wait_for(temp_client.connect(), timeout=30)
             sent = await asyncio.wait_for(temp_client.send_code_request(phone), timeout=30)
+        except errors.PhoneNumberBannedError:
+            # PATCH (audit-5): شماره‌ی بلاک‌شده توسط تلگرام — پیام کاربرپسند،
+            # نه خطای فنی. ویزارد لغو می‌شود چون هیچ retryای اینجا کمک
+            # نمی‌کند.
+            await event.respond(
+                "❌ این شماره توسط تلگرام مسدود شده و نمی‌توان با آن لاگین کرد. "
+                "ویزارد لغو شد."
+            )
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            self.wizards.pop(event.sender_id, None)
+            return
+        except errors.PhoneNumberUnoccupiedError:
+            # PATCH (audit-5): شماره‌ای که هیچ اکانت تلگرامی روی‌اش نیست
+            # (مثلاً شماره‌ی جدید بدون ثبت‌نام). کاربر باید اول در اپ تلگرام
+            # اکانت بسازد.
+            await event.respond(
+                "❌ این شماره هنوز در تلگرام ثبت‌نام نشده است. اول در اپ "
+                "تلگرام اکانت بساز و دوباره بیا. ویزارد لغو شد."
+            )
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            self.wizards.pop(event.sender_id, None)
+            return
+        except errors.AuthKeyError:
+            # PATCH (audit-5): کلیدِ احراز هویتِ معتبر نیست — معمولاً
+            # api_id/api_hash خراب یا مسدود.
+            await event.respond(
+                "❌ api_id/api_hash معتبر نیست (شاید توسط تلگرام مسدود شده). "
+                "با پشتیبانی تماس بگیر. ویزارد لغو شد."
+            )
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
+            self.wizards.pop(event.sender_id, None)
+            return
         except Exception as e:
             note = ""
             if proxy_cfg is None:
@@ -7643,6 +7720,23 @@ class AdminBot:
             if not re.fullmatch(r"\+\d{7,15}", text):
                 await event.respond("❌ فرمت شماره درست نیست. با + و کد کشور بفرست (مثلاً +989123456789):")
                 return
+            # PATCH (audit-5): جلوگیری از لاگینِ دو اکانت با همان شماره
+            # تلگرام. قبلاً این چک نبود و کاربر می‌توانست همین شماره را
+            # با دو تگِ مختلف لاگین کند → دو کلاینت روی یک سشن فیزیکی
+            # تلگرام (نه فایل سشن) → تداخل، دوبار پردازش، ریسک ban.
+            # حالا قبل از قبولِ شماره، در config.json همه‌ی اکانت‌ها رو
+            # چک می‌کنیم. اگر شماره تکراری بود، از کاربر می‌خواهیم یا
+            # تگِ قبلی رو حذف کنه یا با شماره‌ی دیگه بیاد.
+            cfg = self.sb.load_config()
+            for existing_tag, existing_acc in cfg.items():
+                if isinstance(existing_acc, dict) and existing_acc.get("phone") == text:
+                    await event.respond(
+                        f"❌ این شماره قبلاً با تگِ `{existing_tag}` لاگین شده. "
+                        f"اگر می‌خواهی همان را دوباره استفاده کنی، اول اکانتِ قبلی رو "
+                        f"از پنل پاک کن. وگرنه یه شماره‌ی دیگه بفرست:",
+                        buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                    )
+                    return
             data["phone"] = text
             wiz["state"] = None
             await event.respond(
@@ -7674,8 +7768,21 @@ class AdminBot:
                     buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
                 )
                 return
-            except (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError):
-                await event.respond("❌ کد اشتباه یا منقضی‌شده است. دوباره بفرست:")
+            except errors.PhoneCodeInvalidError:
+                # PATCH (audit-5): کد اشتباه → اجازه‌ی retry با همین
+                # phone_code_hash. کاربر می‌تواند دوباره کد بفرستد.
+                await event.respond("❌ کد اشتباه است. دوباره بفرست:")
+                return
+            except errors.PhoneCodeExpiredError:
+                # PATCH (audit-5): کد منقضی شده → phone_code_hash دیگر
+                # بی‌اعتبار است و هر retry هم دوباره Expired می‌دهد →
+                # حلقه‌ی بی‌نهایت. ویزارد رو می‌بندیم و از کاربر می‌خواهیم
+                # از نو شروع کنه تا کد تازه ارسال شود.
+                await event.respond(
+                    "❌ کد منقضی شده است. ویزارد لغو شد — دوباره «افزودن اکانت» "
+                    "رو بزن تا کد تازه ارسال بشه."
+                )
+                await self._cancel_wizard(event.sender_id)
                 return
             except Exception as e:
                 await event.respond(f"❌ خطا: {str(e)[:150]}\nویزارد لغو شد.")
@@ -9220,15 +9327,18 @@ class SaaSBot:
             UI.go("🔎 جستجوی کاربر", "user_search_start"),
         ]
         # Ⅲ پشتیبانی
+        # PATCH (audit-7): دکمه‌های «💬 پاسخ‌های آماده» و «📊 آمار تیکت‌ها»
+        # بدون handler بودند (کلیک = no-op + nav-stack pollution). تا زمانی
+        # که handler ننویسیم، آن‌ها را از UI حذف می‌کنیم تا کاربر فریب
+        # نخورد. پیاده‌سازیِ کاملِ آن‌ها در v2.1 + آمار تیکت‌ها.
         sec3 = [
             UI.go(f"📨 تیکت‌های باز{badge(open_tk)}", "admin_tickets", primary=True),
-            UI.go("💬 پاسخ‌های آماده", "admin_ticket_templates"),
-            UI.go("📊 آمار تیکت‌ها", "admin_ticket_stats"),
         ]
         # Ⅳ سیستم
+        # PATCH (audit-7): «💼 کیف پول USDT» handler نداشت؛ حذف شد تا وقتی
+        # که `owner_set_wallet` به‌عنوان alias پیاده‌سازی شود.
         sec4 = [
             UI.go("📢 کانال عضویت", "owner_channel_set", primary=True),
-            UI.go("💼 کیف پول USDT", "admin_wallet"),
             UI.go("💾 بکاپ و بازیابی", "admin_backup"),
         ]
         # Ⅴ امنیت (فقط OWNER)
@@ -9556,16 +9666,16 @@ class SaaSBot:
             ]
             title, subtitle = "👥 کاربران", "3 بخش جدا برای دسترسی سریع‌تر"
         elif tab == "support":
+            # PATCH (audit-7): «📊 آمار تیکت‌ها» و «💬 پاسخ‌های آماده»
+            # بدون handler بودند → حذف شدند. پیاده‌سازی در v2.1.
             items = [
                 UI.go("📨 تیکت‌های باز", "admin_tickets", primary=True),
-                UI.go("📊 آمار تیکت‌ها", "admin_ticket_stats"),
-                UI.go("💬 پاسخ‌های آماده", "admin_ticket_templates"),
             ]
             title, subtitle = "📨 پشتیبانی", "تیکت‌های دریافتی"
         elif tab == "settings":
+            # PATCH (audit-7): «💼 کیف پول USDT» بدون handler بود → حذف شد.
             items = [
                 UI.go("📢 تنظیم کانال عضویت", "owner_channel_set", primary=True),
-                UI.go("💼 کیف پول USDT", "admin_wallet"),
             ]
             if role == ROLE_OWNER:
                 items.extend([
@@ -10450,8 +10560,14 @@ class SaaSBot:
                 body.append(f"{UI.state_dot(state)} `{tag}` — {note}")
                 buttons.append([UI.item(tag, state, f"my_acc:{tag}")])
         has_sub = self._user_sub_status(uid)["active"]
-        # افزودن SelfBot جدید فقط با اشتراک فعال — هم نمایش، هم چک Backend
-        if has_sub:
+        # افزودن SelfBot جدید با اشتراک فعال یا نقشِ admin/owner.
+        # PATCH (admin/owner login): قبلاً فقط با اشتراک فعال، این دکمه
+        # نمایش داده می‌شد — یعنی ADMIN/OWNER که اشتراک ندارند هیچ‌وقت
+        # نمی‌توانستند از این مسیر اکانت اضافه کنند. حالا اگه نقش admin/
+        # owner است، این دکمه هم نشان داده می‌شود و handler هم از gate
+        # عبور می‌دهد.
+        is_privileged = self._role(uid) in (ROLE_OWNER, ROLE_ADMIN)
+        if has_sub or is_privileged:
             buttons.append([UI.go("➕ افزودن SelfBot", "user_my_add_bot", primary=True, tone="success")])
         buttons.append(UI.nav_row())
         text = UI.screen(
@@ -10487,9 +10603,13 @@ class SaaSBot:
             await self.admin_panel._show_account_detail(event, tag)
 
     async def _user_my_add_bot(self, event):
-        """➕ افزودن SelfBot توسط خودِ کاربر — Backend: فقط با اشتراک فعال.
-        (حذف دکمه از UI کافی نیست؛ callback دستی هم باید رد شود.)"""
-        if not self._user_sub_status(event.sender_id)["active"]:
+        """➕ افزودن SelfBot توسط خودِ کاربر — Backend: اشتراک فعال یا نقش
+        admin/owner. (حذف دکمه از UI کافی نیست؛ callback دستی هم باید رد شود.)"""
+        # PATCH (admin/owner login): قبلاً فقط اشتراک فعال قبول می‌شد؛
+        # ADMIN/OWNER که اشتراک ندارند، این مسیر براشون بسته بود. حالا
+        # نقشِ admin/owner هم از gate عبور می‌کند.
+        if not self._user_sub_status(event.sender_id)["active"] \
+           and self._role(event.sender_id) not in (ROLE_OWNER, ROLE_ADMIN):
             await event.answer("❌ برای افزودن SelfBot باید اشتراک فعال داشته باشید.", alert=True)
             return
         await self._clear_admin_panel_wizard(event.sender_id)
@@ -12972,45 +13092,73 @@ class SaaSBot:
                 except Exception:
                     pass
 
-                # 2. حذف session files
+                # 2 + 3. محاسبه‌ی tag-های این کاربر، حذف session files و
+                # حذف از config.json. PATCH: قبلاً در یک passِ جدا،
+                # `glob(sessions/*_{uid}.session)` می‌زد — این pattern با
+                # ساختارِ واقعی (`{tag}.session`، نه `{tag}_{uid}.session`)
+                # هیچ matchی نداشت؛ یعنی session files هرگز پاک نمی‌شدند. حالا
+                # tagها از config استخراج می‌شوند و برای هر tag، فایلِ سشن
+                # (با اسمِ واقعی) و رکورد config هم‌زمان حذف می‌شوند. ضمناً
+                # شرطِ `or account_is_orphan(...)` حذف شد (PATCH قبلی) تا
+                # یتیم‌های سامانه به‌اشتباه پاک نشوند.
+                tags_to_remove: list = []
                 try:
-                    for session_file in _glob.glob(f"sessions/*_{uid}.session"):
-                        try:
-                            _os.remove(session_file)
-                        except Exception:
-                            pass
+                    cfg = self.sb.load_config()
+                    if cfg and config_state() == CONFIG_VALID:
+                        tags_to_remove = [
+                            tag for tag, acc in cfg.items()
+                            if isinstance(acc, dict)
+                            and acc.get("owner_user_id") == uid
+                            and not acc.get("provision_source") == PROVISION_MANUAL
+                        ]
                 except Exception:
                     pass
+
+                # 2. حذف session files (با اسمِ واقعی {tag}.session و
+                # snapshot-های احتمالی {tag}.session-journal و {tag}.session-shm
+                # و {tag}.session-wal که SQLite ممکن است ساخته باشد).
+                if tags_to_remove:
+                    try:
+                        for tag in tags_to_remove:
+                            for suffix in ("", "-journal", "-shm", "-wal"):
+                                p = os.path.join(
+                                    SESSIONS_DIR, f"{tag}.session{suffix}"
+                                )
+                                try:
+                                    _os.remove(p)
+                                except OSError:
+                                    pass
+                    except Exception:
+                        pass
 
                 # 3. حذف از config.json
                 try:
                     cfg = self.sb.load_config()
-                    if cfg and config_state() == CONFIG_VALID:
-                        to_remove = [
-                            tag for tag, acc in cfg.items()
-                            if isinstance(acc, dict)
-                            and (acc.get("owner_user_id") == uid
-                                 or account_is_orphan(acc, tag))
-                            and not acc.get("provision_source") == PROVISION_MANUAL
-                        ]
-                        if to_remove:
-                            for tag in to_remove:
-                                cfg.pop(tag, None)
-                            self.sb.save_config(cfg)
+                    if cfg and config_state() == CONFIG_VALID and tags_to_remove:
+                        for tag in tags_to_remove:
+                            cfg.pop(tag, None)
+                        self.sb.save_config(cfg)
                 except Exception:
                     pass
 
-                # 4. حذف از دیتابیس
+                # 4. حذف از دیتابیس — PATCH (audit-6): قبلاً یک DELETE
+                # cascade دستیِ ناقص اینجا بود که جدولِ `ticket_messages`
+                # (که به `tickets.id` FK دارد) را پاک نمی‌کرد → FK violation
+                # → rollbackِ سایلنت → رکوردهای کاربر در saas.db باقی می‌ماند
+                # ولی session files و config پاک شده بودند + پیام «حذف شد»
+                # به کاربر فرستاده می‌شد. علاوه بر این، `permission_grants`،
+                # `dedicated_bots`، و `bot_data.db` هم لمس نمی‌شدند. حالا
+                # به‌جای این بلوکِ دستی، از `delete_user_completely_async`
+                # استفاده می‌کنیم که قبل از این، Runtimeها را هم متوقف
+                # می‌کند و در یک تراکنشِ واحد و اتمیک همه‌ی جداول را
+                # (با FK order درست) پاک می‌کند. مرحله‌ی ۱ و ۲ و ۳ بالا
+                # هم اکنون اضافی هستند (delete_user_completely_async خودش
+                # آن‌ها را انجام می‌دهد) ولی برای اطمینانِ idempotent بودن
+                # نگه داشته شدیم.
                 try:
-                    with _conn() as c:
-                        # حذف رکوردهای کاربر (به ترتیب وابستگی)
-                        c.execute("DELETE FROM tickets WHERE user_id = ?", (uid,))
-                        c.execute("DELETE FROM subscriptions WHERE user_id = ?", (uid,))
-                        c.execute("DELETE FROM purchases WHERE user_id = ?", (uid,))
-                        c.execute("DELETE FROM admins WHERE user_id = ?", (uid,))
-                        c.execute("DELETE FROM users WHERE user_id = ?", (uid,))
+                    await delete_user_completely_async(uid)
                 except Exception as e:
-                    print(f"⚠️ [cleanup] DB error for uid={uid}: {e}")
+                    print(f"⚠️ [cleanup] delete_user_completely_async error for uid={uid}: {e}")
 
                 # 5. پیام آخر (اگر بتونه)
                 try:
@@ -13956,14 +14104,28 @@ class SaaSBot:
                     # وجود اشتراک فعال هم به‌عنوان یک لایه‌ی دفاعی اضافه شده
                     # تا این دکمه با کپی/فوروارد پیام قدیمی توسط کاربر دیگری
                     # هم قابل سوءاستفاده نباشد.
-                    active_sub = get_active_subscription(event.sender_id)
-                    if not active_sub:
-                        await event.answer(
-                            "برای لاگین اکانت، اول باید اشتراک فعال داشته باشی "
-                            "(لایسنس فعال کن یا اشتراک بخر).",
-                            alert=True,
-                        )
-                        return
+                    #
+                    # PATCH (admin/owner login): قبلاً OWNER و ADMIN هم در
+                    # این گیرِ `get_active_subscription` می‌افتادند — چون طبق
+                    # طراحی، اشتراک فعال ندارند و سیستم براشون همچون
+                    # "کاربر عادی بدون اشتراک" رفتار می‌کرد → دکمه‌ی "📱 لاگین
+                    # کردن سلف" بهشون نشان داده می‌شد ولی با کلیک، خطای
+                    # "اول باید اشتراک فعال داشته باشی" می‌داد. حالا OWNER و
+                    # ADMIN از این gate عبور می‌کنند و مستقیماً وارد ویزارد
+                    # لاگین می‌شوند. این دقیقاً با نیتِ طراحی منطبق است:
+                    # پنلِ لاگین برای «هر کسی که دکمه را می‌بیند» مجاز است،
+                    # و دکمه از قبل فقط برای کسانی نمایش داده می‌شود که
+                    # اشتراک دارند یا نقش admin/owner دارند.
+                    role = self._role(event.sender_id)
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        active_sub = get_active_subscription(event.sender_id)
+                        if not active_sub:
+                            await event.answer(
+                                "برای لاگین اکانت، اول باید اشتراک فعال داشته باشی "
+                                "(لایسنس فعال کن یا اشتراک بخر).",
+                                alert=True,
+                            )
+                            return
                     # فیکس تکمیل اسپک: گزینه‌ی «لاگین به اکانت» فقط تا قبل از
                     # اولین لاگین موفق باید وجود داشته باشد. شرط نمایش در منو
                     # این را اعمال می‌کند، ولی یک دکمه‌ی کهنه/فورواردشده یا
@@ -14002,14 +14164,22 @@ class SaaSBot:
                     # که راهنمای قدم‌به‌قدم فعال‌سازیه — دقیقاً همون چیزی که
                     # کاربر در این صفحه انتظار داره.
                     await event.edit(ACTIVATION_HELP_TEXT, buttons=[UI.nav_row()])
-                # v2.0: نمایندگی سلف — دو callback
-                if data == "user_reseller_info":
-                    await self._show_reseller_info(event)
+                    # PATCH (audit-7): اینجا return افتاده بود → ادامه‌ی
+                    # کد به یک handler دومِ user_reseller_info می‌رسید که
+                    # صفحه را overwrite می‌کرد. حالا بعد از edit، return
+                    # می‌کنیم تا همان صفحه‌ی راهنما باقی بماند.
                     return
+                # v2.0: نمایندگی سلف — PATCH (audit-7): این بلوکِ
+                # `user_reseller_info` یک duplicate است (اولی بالاتر هندل
+                # می‌شود). چون اولی return دارد، اینجا هیچ‌وقت اجرا نمی‌شود
+                # ولی برای اطمینان از ناپدید شدنِ تله‌ی fallthrough، آن
+                # را حذف کردیم. `user_reseller_apply` معتبر است و باقی مانده.
                 if data == "user_reseller_apply":
                     await self._apply_reseller(event)
                     return
-                    return
+                # PATCH (audit-7): این return غیرقابل‌دسترس (unreachable)
+                # حذف شد — خطِ بعد از آن در `except Exception` قرار دارد و
+                # این return هیچ‌وقت اجرا نمی‌شد.
             except Exception as e:
                 # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
                 # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
@@ -14711,6 +14881,20 @@ def register_account(tag: str, bot: "SelfBot", task: "asyncio.Task", acc: dict =
 
 def unregister_account(tag: str) -> None:
     ACCOUNTS.pop(tag, None)
+    # PATCH (audit-9 memory leak): قبلاً فقط ACCOUNTS[tag] پاک می‌شد ولی
+    # سه ریجیستریِ دیگر هم بعد از توقفِ دائمیِ یک اکانت باید تمیز شوند
+    # وگرنه مونوتونیک رشد می‌کنند:
+    #   ۱. BOT_STATUS[tag] — وضعیت runtime (starting/ready/error/...)
+    #      هیچ‌وقت بعد از توقفِ دائمی پاک نمی‌شد.
+    #   ۲. _TAG_LOCKS[tag] — قفل per-tag برای جلوگیری از دو run_bot هم‌زمان.
+    #      اگر اکانت دیگر وجود ندارد، قفل هم دیگر لازم نیست.
+    #   ۳. _START_LOCKS[tag] — قفلِ مرکزیِ ensure_started. همان بالا.
+    # نکته: `_PENDING_STARTS[tag]` و `_RUNTIME_TASKS[tag]` خودشان با
+    # done_callback و در `finally` تمیز می‌شوند، پس نیازی به لمسِ
+    # آن‌ها اینجا نیست. `_STOP_INFLIGHT[tag]` هم در finally پاک می‌شود.
+    BOT_STATUS.pop(tag, None)
+    _TAG_LOCKS.pop(tag, None)
+    _START_LOCKS.pop(tag, None)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -15257,6 +15441,14 @@ CONFIG_VALID = "valid"
 CONFIG_INVALID = "invalid"
 _config_state = CONFIG_MISSING
 
+# PATCH (concurrent-save safety): save_config از مسیرهای sync و async هم
+# صدا زده می‌شود (یک کالبکِ هم‌زمان از AdminBot و یک فراخوانیِ مستقیم از
+# CLI). بدون این قفل، دو فراخوانیِ هم‌زمان می‌توانستند روی همان
+# `{CONFIG_FILE}.tmp` ثابت با هم رقابت کنند و یکی overwriteِ دیگری را
+# یا محتوای نصف‌نوشته را جایگزین کند. threading.Lock (نه asyncio.Lock) چون
+# save_config خودش sync است و هیچ `await`ی داخلش نیست.
+_SAVE_CONFIG_LOCK = threading.Lock()
+
 
 def config_state() -> str:
     """وضعیت کنونی config.json (آخرین نتیجه‌ی load_config/save_config)."""
@@ -15335,6 +15527,16 @@ def _spawn_dedicated_bot(bot_id: int, owner_id: int, token: str) -> str:
     # دایرکتوری داده‌ی خودِ ربات اختصاصی — حتی با cwd متفاوت، DB/config/sessions
     # همین دایرکتوری می‌شود و DB اصلی پروژه در cwd ساخته نمی‌شود.
     env["SELFBOT_DATA_DIR"] = bot_dir
+    # PATCH (audit-8 CRITICAL): هر ربات اختصاصی `main.py all` را اجرا
+    # می‌کند که خودش یک `run_helper_bot_forever()` می‌سازد. اگر parent
+    # اینجا `HELPER_BOT_TOKEN` را پاس نده، فرعی هم همان توکن را از env
+    # می‌خواند و یک HelperBot دوم روی همان توکن بالا می‌آید → 409
+    # Conflict در getUpdates → هر دو HelperBot بالاخره یکی پیام‌ها را
+    # می‌گیرند و دیگری crash می‌کند → از دست رفتن پیام‌های پشتیبانی.
+    # راه‌حل: HELPER_BOT_TOKEN را در envِ فرعی پاک می‌کنیم. فرعی هیچ
+    # HelperBotی بالا نمی‌آورد — به پشتیبانی از طریق AdminBot خودش
+    # (با ADMIN_BOT_TOKEN که در بالا pass شد) جواب می‌دهد.
+    env.pop("HELPER_BOT_TOKEN", None)
     log_path = os.path.join(bot_dir, "bot.log")
     with open(log_path, "a", encoding="utf-8") as log_f:
         proc = _sp.Popen(
@@ -15458,28 +15660,48 @@ def save_config(cfg: dict) -> bool:
             f"ابتدا با Restore یا تعمیرِ صریح آن را درست کنید."
         )
         return False
-    tmp_path = CONFIG_FILE + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            # دسترسی *قبل* از نوشتنِ محتوا محدود می‌شود — وگرنه یک پنجره‌ی
-            # کوتاه وجود دارد که فایل با umask پیش‌فرض (معمولاً 0644) روی
-            # دیسک است و api_hash/توکن/شماره‌ی همه‌ی مشتری‌ها برای هر کاربرِ
-            # دیگری روی سرور خواندنی است.
-            _chmod_private(tmp_path)
-            json.dump(cfg, f, indent=4, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, CONFIG_FILE)
-    except Exception:
-        # فایل موقتِ نیمه‌نوشته نباید کنار config اصلی جا بماند
+    # PATCH (concurrent-save safety): قبلاً `tmp_path = CONFIG_FILE + ".tmp"`
+    # ثابت بود و قفلی هم در کار نبود؛ دو کورتینِ هم‌زمان (مثلاً دو کالبک از
+    # AdminBot/SaaSBot) می‌توانستند روی همان فایلِ موقتِ مشترک بنویسند و
+    # یکی جایگزینیِ دیگری را overwrite کند. حالا:
+    #   ۱. قفلِ ماژول‌سطحیِ _SAVE_CONFIG_LOCK فراخوانی‌های sync و async را
+    #      سریال می‌کند (save_config از دو مسیر sync/async هم صدا زده می‌شود).
+    #   ۲. tmp_path با uuid یکتا می‌شود تا حتی بدون قفل هم روی‌هم‌نویسی نباشد.
+    #   ۳. قبل از replace، یک best-effort کپی از config فعلی به .bak گرفته
+    #      می‌شود — یک bug در caller دیگر کل کپیِ تنها را از بین نمی‌برد.
+    with _SAVE_CONFIG_LOCK:
+        # یک backup best-effort از configِ فعلی، قبل از replace. اگر فایلِ
+        # قدیمی به هر دلیلی (مثلاً در حافظه‌ی یک کورتینِ دیگر که در حال
+        # خواندنش بوده) 필요 باشد، هنوز .bak قابل‌بازیابی است.
         try:
-            os.remove(tmp_path)
+            if os.path.exists(CONFIG_FILE):
+                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
         except OSError:
+            # اگر backup نشد، همچنان ادامه بده — main config نباید به‌خاطر
+            # backup نشدن، ننوشته بماند.
             pass
-        raise
-    _chmod_private(CONFIG_FILE)
-    _config_state = CONFIG_VALID
-    return True
+        tmp_path = f"{CONFIG_FILE}.tmp.{secrets.token_hex(8)}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                # دسترسی *قبل* از نوشتنِ محتوا محدود می‌شود — وگرنه یک پنجره‌ی
+                # کوتاه وجود دارد که فایل با umask پیش‌فرض (معمولاً 0644) روی
+                # دیسک است و api_hash/توکن/شماره‌ی همه‌ی مشتری‌ها برای هر کاربرِ
+                # دیگری روی سرور خواندنی است.
+                _chmod_private(tmp_path)
+                json.dump(cfg, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, CONFIG_FILE)
+        except Exception:
+            # فایل موقتِ نیمه‌نوشته نباید کنار config اصلی جا بماند
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
+        _chmod_private(CONFIG_FILE)
+        _config_state = CONFIG_VALID
+        return True
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -20116,7 +20338,14 @@ async def run_bot(tag, config, interactive=False):
                 consecutive_failures = 0
                 # فقط بعد از موفقیت کامل start: ثبت در ACCOUNTS + سیگنال
                 # آماده‌شدن به منتظران.
-                register_account(tag, bot, asyncio.current_task(), load_config().get(tag, {}))
+                # NOTE: `config` (پارامترِ run_bot) خودش همان دیکشنریِ per-account
+                # است (همان cfg[tag] در محلِ صدای ensure_started/run_bot). در نسخه‌ی
+                # قبلی اشتباهاً `cfg.get(tag, {})` نوشته شده بود، در حالی که `cfg`
+                # در این اسکوپ تعریف نشده بود → NameError که هر بار run_bot را
+                # بعد از start با شکست مواجه می‌کرد و اکانت ثابت می‌کرد بدون
+                # bump شدن retry counter. در نتیجه RunningAccount هرگز در ACCOUNTS
+                # ثبت نمی‌شد و هندلرهای پنل (entry.acc.get(...)) همیشه None می‌گرفتند.
+                register_account(tag, bot, asyncio.current_task(), config)
                 if not pending.done():
                     pending.set_result(True)
                 await bot.run()
