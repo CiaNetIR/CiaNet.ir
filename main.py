@@ -870,12 +870,16 @@ def is_dangerous_account(acc) -> bool:
 def is_owner_bypass(actor_id: int) -> bool:
     """
     آیا این کاربر مالک اصلی سیستم است و از Anti-Ban معاف است؟
-    فقط در نمونه‌ی اصلی و فقط برای ADMIN_ID.
+    فقط در نمونه‌ی اصلی و فقط برای ADMIN_ID یا هر کس که در OWNER_IDS باشد.
+    PATCH (v2.0.10): OWNER_IDS env support.
     """
     if IS_DEDICATED_BOT:
         return False
     try:
-        return int(actor_id) == int(ADMIN_ID)
+        actor_id_int = int(actor_id)
+        # OWNER_IDS در module load time ست می‌شه و شامل ADMIN_ID هم هست
+        # (اگه ADMIN_ID تنظیم شده باشه). این چک idempotent و thread-safe است.
+        return actor_id_int in OWNER_IDS or actor_id_int == int(ADMIN_ID)
     except Exception:
         return False
 
@@ -5595,6 +5599,12 @@ class AdminBot:
         await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
         self._register_handlers()
 
+        # PATCH (v2.0.10): reference به client رو در ماژول نگه دار تا
+        # _owner_notify_async بتونه به OWNER پیام بفرسته (مثلاً وقتی یک
+        # اکانت fatal-auth می‌خوره و باید notify بشه).
+        global _ADMIN_CLIENT_REF
+        _ADMIN_CLIENT_REF["client"] = self.client
+
         if self._backup_task is None or self._backup_task.done():
             self._backup_task = asyncio.create_task(self._daily_backup_loop())
 
@@ -8376,6 +8386,20 @@ async def run_admin_bot_forever(selfbot_module):
 
 OWNER_ID = ADMIN_ID
 
+# PATCH (v2.0.10): پشتیبانی از multi-OWNER. OWNER_IDS env (comma-separated)
+# اجازه می‌ده چند کاربر نقش OWNER داشته باشن. اگه تنظیم نشه، فقط ADMIN_ID
+# مالک است (همان رفتار قبلی). هر کس که در OWNER_IDS باشه هم به‌عنوان OWNER
+# شناخته می‌شه و در is_owner_bypass و notify ها مشمول می‌شه.
+_owner_ids_raw = os.environ.get("OWNER_IDS", "").strip()
+OWNER_IDS: set = set()
+if _owner_ids_raw:
+    for _oid in _owner_ids_raw.split(","):
+        _oid = _oid.strip()
+        if _oid.isdigit():
+            OWNER_IDS.add(int(_oid))
+if ADMIN_ID:
+    OWNER_IDS.add(ADMIN_ID)
+
 # دو متن جداگانه: «سلف چیست» (معرفی کوتاه با ویژگی‌ها) و
 # «راهنمای فعال‌سازی» (مراحل قدم‌به‌قدم).
 # v1.8.0: این دو متن قبلاً با هم ترکیب شده بودن و کاربر شکایت داشت.
@@ -8648,6 +8672,11 @@ class SaaSBot:
         # به مالک برسانند.
         global _SAAS_BOT_REF
         _SAAS_BOT_REF = self
+
+        # PATCH (v2.0.10): reference به client رو در ماژول نگه دار تا
+        # _owner_notify_async بتونه به OWNER پیام بفرسته.
+        global _ADMIN_CLIENT_REF
+        _ADMIN_CLIENT_REF["client"] = self.client
 
         # یوزرنیمِ خودِ ربات — برای ساختِ لینکِ دعوت
         try:
@@ -14706,11 +14735,11 @@ class SaaSBot:
                         await self.admin_panel.start_login_wizard_for_user(event, event.sender_id)
                     return
                 if data == "user_reseller_info":
-                    await event.edit(
-                        "👥 برای تبدیل‌شدن به نماینده، باید یک «لایسنس نمایندگی» از OWNER دریافت "
-                        "کنی و از همان بخش «🔑 فعالسازی با لایسنس» فعالش کنی.",
-                        buttons=[UI.nav_row()],
-                    )
+                    # PATCH (v2.0.10): revive _show_reseller_info — این متد
+                    # تعریف شده بود ولی audit-7 اشتباهاً آن را unreachable کرد.
+                    # حالا دوباره فراخوانی می‌شه تا صفحه‌ی توصیفیِ برنامه‌ی
+                    # نمایندگی (با اطلاعات کامل + دکمه‌ی درخواست) نشون داده بشه.
+                    await self._show_reseller_info(event)
                     return
                 if data == "user_help":
                     # v1.8.0: قبلاً HELP_TEXT (یه متن طولانی ترکیبی) نمایش
@@ -15159,6 +15188,53 @@ def _is_fatal_auth_error(exc: BaseException) -> bool:
     if not _FATAL_AUTH_ERROR_TYPES:
         return False
     return isinstance(exc, _FATAL_AUTH_ERROR_TYPES)
+
+
+# PATCH (v2.0.10): Notify OWNER از طریق ربات مدیریت (اگه بالا هست) یا حداقل
+# در journald. این تابع در ۳ fatal-auth site (در SelfBot.run، reconnect، و
+# handler) صدا زده می‌شه تا اکانتی که سایلنت می‌میره، OWNER خبردار بشه.
+# تلاش می‌کنه از طریق admin bot پیام بفرسته — اگه نشد، در stderr چاپ
+# می‌کنه که در journald قابل دیدنه.
+async def _owner_notify_async(text: str) -> None:
+    """
+    OWNER رو از یک رویداد مهم مطلع کن. best-effort — اگه admin bot هنوز
+    بالا نیامده یا chat در دسترس نیست، به‌جای silent swallow، در stderr
+    چاپ می‌کنه که journald آن را ذخیره می‌کنه.
+
+    PATCH (v2.0.10): به همه‌ی OWNER_IDS پیام می‌فرسته (اگه تنظیم شده باشن)
+    و نه فقط به ADMIN_ID. این کمک می‌کنه اگه OWNER اصلی تلگرامش پاک بشه،
+    # صاحبان دیگه‌ای هم خبردار بشن.
+    """
+    try:
+        global _ADMIN_CLIENT_REF
+        client = None
+        try:
+            client = _ADMIN_CLIENT_REF.get("client") if _ADMIN_CLIENT_REF else None
+        except Exception:
+            pass
+        if client is not None and client.is_connected():
+            # به همه‌ی OWNERها بفرست (اگه یکی fail شد، بقیه باز هم می‌گیرن)
+            sent_any = False
+            for owner_id in OWNER_IDS or ({ADMIN_ID} if ADMIN_ID else set()):
+                try:
+                    await client.send_message(int(owner_id), text)
+                    sent_any = True
+                except Exception:
+                    pass
+            if sent_any:
+                return
+            # هیچ OWNER دریافت نکرد — fallback به stderr
+            print(f"⚠️ [OWNER NOTIFY] (no delivery) {text}", file=sys.stderr)
+            return
+        # fallback: stderr → journald
+        print(f"⚠️ [OWNER NOTIFY] (no admin client) {text}", file=sys.stderr)
+    except Exception as e:
+        # هیچ‌وقت نباید این تابع exception بده — بهترین تلاش، silent fallback
+        print(f"❌ [OWNER NOTIFY FAILED] {e}: {text}", file=sys.stderr)
+
+
+# placeholder که AdminBot در start() خودش آن را ست می‌کند.
+_ADMIN_CLIENT_REF: dict = {}
 
 
 # ========== تنظیمات دیباگ ==========
@@ -16198,6 +16274,13 @@ def _first_account_creds(cfg: dict):
     سالم ولی ناقص (بدون api_id/api_hash) → KeyError. حالا همه‌ی ورودی‌ها
     را می‌گردد و اولین ورودیِ معتبر (دیکت با api_id و api_hash) را برمی‌-
     گرداند؛ اگر هیچ‌کدام معتبر نبود RuntimeError با پیام واضح می‌دهد.
+
+    PATCH (v2.0.10): fallback به env vars CIANET_API_ID / CIANET_API_HASH.
+    اگه config.json خالی یا خراب شد و هیچ اکانتِ موجودی نداریم، این
+    متغیرهای env اجازه می‌دن admin bot بالا بیاد و کاربر اکانت تازه
+    اضافه کنه. این deadlock رو شکستن می‌ده: بدون این، اگه config خالی
+    بشه، admin bot بالا نمیاد و کاربر هیچ‌وقت نمی‌تونه اولین اکانت رو
+    اضافه کنه.
     """
     for acc in cfg.values():
         if (
@@ -16206,6 +16289,14 @@ def _first_account_creds(cfg: dict):
             and acc.get("api_hash")
         ):
             return acc["api_id"], acc["api_hash"]
+    # PATCH (v2.0.10): env fallback برای bootstrap از deadlock
+    env_api_id = os.environ.get("CIANET_API_ID", "").strip()
+    env_api_hash = os.environ.get("CIANET_API_HASH", "").strip()
+    if env_api_id and env_api_hash:
+        try:
+            return int(env_api_id), env_api_hash
+        except ValueError:
+            pass
     raise RuntimeError(
         "config.json خالی یا فاقد یک اکانتِ پایه‌ی معتبر (api_id/api_hash) است — "
         "این عملیات ممکن نیست. با پشتیبانی تماس بگیر."
@@ -17251,6 +17342,15 @@ class SelfBot:
         self._restart_task = None
 
         self._fatal_auth_error = False
+        # PATCH (v2.0.10 ANTI-BAN): per-account ban counter — وقتی یک
+        # اکانت ۳ بار در ۳۰ روز به خطای fatal-auth می‌خوره، خودکار
+        # disabled می‌شه و OWNER notify می‌شه. این سیاست، اکانت‌های
+        # مشکل‌دار رو از استمرار در retry و ریسکِ 더ster به اشتراکِ
+        # api_id محافظت می‌کنه.
+        self.ban_count = 0
+        self.ban_first_seen = 0.0
+        self._BAN_THRESHOLD = 3
+        self._BAN_WINDOW_SEC = 30 * 24 * 3600  # 30 days
 
         self.enemies: dict = {}
         self.tracker_enabled = False
@@ -17298,6 +17398,59 @@ class SelfBot:
         هم نشان دهد."""
         self.runtime_status = status
         _set_bot_status(self.tag, status)
+
+    async def _on_fatal_auth(self, error_msg: str) -> None:
+        """
+        PATCH (v2.0.10): وقتی یک خطای احراز هویتِ غیرقابل‌بازیابی رخ می‌دهد:
+        ۱. ban counter رو increment می‌کنه.
+        ۲. اگه در ۳۰ روز ۳ بار رخ داده، اکانت رو در config.json disabled می‌کنه.
+        ۳. OWNER رو notify می‌کنه.
+
+        این سیاست از retry بی‌نهایتِ اکانت‌های مشک‌دار جلوگیری می‌کنه و
+        ریسکِ ban شدنِ api_id مشترک رو کاهش می‌ده.
+        """
+        try:
+            import time as _time
+            now = _time.time()
+            # reset counter اگه پنجره‌ی ۳۰ روز گذشته
+            if self.ban_first_seen and (now - self.ban_first_seen > self._BAN_WINDOW_SEC):
+                self.ban_count = 0
+                self.ban_first_seen = 0.0
+            if not self.ban_first_seen:
+                self.ban_first_seen = now
+            self.ban_count += 1
+
+            # notify OWNER
+            short_err = error_msg[:200] if error_msg else "unknown"
+            notify_text = (
+                f"🛑 اکانت «{self.tag}» به خطای احراز هویتِ غیرقابل‌بازیابی خورد.\n\n"
+                f"⚠️ خطا: `{short_err}`\n"
+                f"📊 تعداد در ۳۰ روز اخیر: {self.ban_count} از {self._BAN_THRESHOLD}\n"
+            )
+            if self.ban_count >= self._BAN_THRESHOLD:
+                notify_text += (
+                    f"\n🔒 اکانت خودکار disabled شد — برای جلوگیری از retry بی‌نهایت "
+                    f"و حفاظت از api_id مشترک."
+                )
+            try:
+                await _owner_notify_async(notify_text)
+            except Exception:
+                pass
+
+            # اگه threshold رسید، اکانت رو disabled کن
+            if self.ban_count >= self._BAN_THRESHOLD:
+                try:
+                    cfg = load_config()
+                    if self.tag in cfg and isinstance(cfg[self.tag], dict):
+                        if not cfg[self.tag].get("disabled"):
+                            cfg[self.tag]["disabled"] = True
+                            cfg[self.tag]["disabled_reason"] = "auto_ban_counter"
+                            save_config(cfg)
+                except Exception as e:
+                    print(f"⚠️ [{self.tag}] خطا در disable خودکار اکانت: {e}")
+        except Exception as e:
+            # هرگز نباید این تابع exception بده — بهترین تلاش
+            print(f"⚠️ [{self.tag}] خطا در _on_fatal_auth: {e}")
 
     def _persist(self, **kwargs) -> None:
         for key, value in kwargs.items():
@@ -18182,6 +18335,8 @@ class SelfBot:
             if _is_fatal_auth_error(e):
                 print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
                 self._fatal_auth_error = True
+                # PATCH (v2.0.10): notify OWNER + increment ban counter
+                await self._on_fatal_auth(str(e))
                 return
             print(f"⚠️ [{self.tag}] خطای کنترل‌نشده در هندلر {name}: {e}")
             if DEBUG:
@@ -20612,6 +20767,8 @@ class SelfBot:
                     print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در run_until_disconnected: {e}")
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
+                    # PATCH (v2.0.10): notify OWNER + increment ban counter
+                    await self._on_fatal_auth(str(e))
                     continue
                 _em = str(e).lower()
                 if "readonly" in _em or "read-only" in _em or "read only" in _em:
@@ -20659,6 +20816,8 @@ class SelfBot:
                     print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی هنگام reconnect: {e}")
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
+                    # PATCH (v2.0.10): notify OWNER + increment ban counter
+                    await self._on_fatal_auth(str(e))
                     continue
                 consecutive_failures += 1
                 print(
