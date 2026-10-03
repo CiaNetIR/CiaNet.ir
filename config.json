@@ -1,0 +1,20 @@
+{
+    "bootstrap": {
+        "type": "user",
+        "api_id": 28610972,
+        "api_hash": "c8b34f797ced4e920f6a1565b9d4a396",
+        "disabled": true,
+        "provision_source": "legacy"
+    },
+    "8102": {
+        "type": "user",
+        "api_id": 28610972,
+        "api_hash": "c8b34f797ced4e920f6a1565b9d4a396",
+        "phone": "+989378629312",
+        "user_id": 7195356703,
+        "owner_user_id": 6423823908,
+        "provision_source": "license",
+        "tg_user_id": 7195356703,
+        "tg_username": "qdmori"
+    }
+}
