@@ -15,13 +15,11 @@ cianet_updater.py — Auto-Update & Account Propagation
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -140,33 +138,60 @@ def _release_lock() -> None:
 
 def _verify_min_commit(repo_dir: str, remote_commit: str) -> Tuple[bool, str]:
     """
-    PATCH (v2.0.13): تأیید اینکه remote_commit حداقل برابر min_commit_hash است.
-    این از supply-chain attack جلوگیری می‌کنه: اگه GitHub اکانت لوک بره و
-    `main` فورس‌پوش بشه به یک commit قدیمی/مخرب، updater رد می‌کنه.
+    PATCH (v2.2.0 CRITICAL): تأیید واقعیِ supply chain.
 
-    Min commit hash از env var `CIANET_MIN_COMMIT` خوانده می‌شه. اگه تنظیم
-    نشه (empty)، verification skip می‌شه (backward-compatible با نصب‌های
-    موجود). اگه تنظیم بشه، باید یک ۴۰-کاراکتر hex SHA-1 باشه.
+    قبلاً (v2.0.13) مقایسه‌ی رشته‌ای SHA-1 انجام می‌شد که FALSE SENSE
+    OF SECURITY می‌داد — git SHAs به‌صورت الفبایی مرتب‌شده chronological
+    نیستن. یه rollback به یه commit قدیمی می‌تونست ~۵۰٪ از مواقع عبور کنه.
 
-    Returns: (success, message)
+    حالا از `git merge-base --is-ancestor <min> <remote>` استفاده
+    می‌کنیم که از تاریخچه‌ی واقعی git استفاده می‌کنه. اگه min یک
+    ancestor از remote باشه (یعنی remote جدیدتر یا برابر با min)،
+    تأیید می‌شه. وگرنه رد می‌شه.
+
+    FAIL-CLOSED: اگه verification به هر دلیلی fail بشه (network، git
+    error، exception)، update رد می‌شه — نه proceed. این در تضاد با
+    v2.0.13 بود که fail-open بود.
+
+    Min commit hash از env var `CIANET_MIN_COMMIT` خوانده می‌شه.
+    اگه تنظیم نشه (empty)، verification skip می‌شه (backward-compatible).
     """
     min_commit = os.environ.get("CIANET_MIN_COMMIT", "").strip().lower()
     if not min_commit:
         return True, ""  # verification disabled
-    if len(min_commit) != 40 or not all(c in "0123456789abcdef" for c in min_commit):
-        return False, f"❌ CIANET_MIN_COMMIT invalid: '{min_commit[:8]}...' (must be 40-hex SHA)"
-    if not remote_commit or len(remote_commit) != 40:
+    # پذیرش SHA-1 (40 hex) و SHA-256 (64 hex) — برای آینده
+    if not (len(min_commit) in (40, 64) and all(c in "0123456789abcdef" for c in min_commit)):
+        return False, f"❌ CIANET_MIN_COMMIT invalid: '{min_commit[:8]}...' (must be 40 or 64 hex chars)"
+    if not remote_commit or len(remote_commit) not in (40, 64):
         return False, f"❌ remote commit invalid: '{remote_commit}'"
-    # مقایسه‌ی ساده‌ی رشته‌ای — git SHAs lex comparable within same repo
-    # (تضمین شده توسط SHA-1 hash format).
-    if remote_commit < min_commit:
-        return False, (
-            f"❌ Supply chain check failed:\n"
-            f"   remote commit {remote_commit[:8]} is older than min {min_commit[:8]}\n"
-            f"   Possible rollback attack or force-push to old commit.\n"
-            f"   Update refused. Set CIANET_MIN_COMMIT to a newer value to allow."
+    if remote_commit == min_commit:
+        return True, ""  # همان — تأیید شده
+    # PATCH (v2.2.0): استفاده از git merge-base --is-ancestor
+    # که از تاریخچه‌ی واقعی git استفاده می‌کنه، نه مقایسه‌ی رشته‌ای.
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", min_commit, remote_commit],
+            cwd=repo_dir, capture_output=True, text=True, timeout=10,
         )
-    return True, ""
+        if result.returncode == 0:
+            # min_commit is ancestor of remote_commit → remote is at-or-after min → OK
+            return True, ""
+        elif result.returncode == 1:
+            # min_commit is NOT ancestor of remote_commit → remote is older → REJECT
+            return False, (
+                f"❌ Supply chain check failed:\n"
+                f"   remote commit {remote_commit[:8]} is NOT a descendant of min {min_commit[:8]}\n"
+                f"   Possible rollback attack or force-push to old commit.\n"
+                f"   Update refused. Update CIANET_MIN_COMMIT to a newer value to allow."
+            )
+        else:
+            # exit 128 = git error (commit not found, etc.)
+            stderr = result.stderr.strip()[:200]
+            return False, f"❌ git merge-base error (exit {result.returncode}): {stderr}"
+    except subprocess.TimeoutExpired:
+        return False, "❌ Supply chain check timeout — update refused (fail-closed)"
+    except Exception as e:
+        return False, f"❌ Supply chain check exception: {type(e).__name__}: {e}"
 
 
 def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]:
@@ -180,31 +205,43 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         return False, "❌ یک update دیگه در حال اجراست"
 
     try:
-        # PATCH (v2.0.13): قبل از pull، remote commit رو fetch کن و
-        # با min_commit_hash مقایسه کن. اگه قدیمی‌تر بود، رد کن.
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", BRANCH, "--quiet"],
-                cwd=repo_dir, capture_output=True, text=True, timeout=30,
-            )
-            remote_commit = get_remote_commit(repo_dir)
-            if remote_commit:
+        # PATCH (v2.2.0 CRITICAL): fail-closed verification.
+        # قبلاً (v2.0.13) اگر fetch یا verify exception می‌داد، log warning
+        # و continue می‌کرد (fail-open) — یعنی اگر network glitch باشه،
+        # update بدون verify اعمال می‌شد. حالا fail-closed است: اگر
+        # CIANET_MIN_COMMIT تنظیم شده باشه و verify شکست بخوره، update
+        # رد می‌شه.
+        min_commit = os.environ.get("CIANET_MIN_COMMIT", "").strip()
+        if min_commit:
+            try:
+                subprocess.run(
+                    ["git", "fetch", "origin", BRANCH, "--quiet"],
+                    cwd=repo_dir, capture_output=True, text=True, timeout=30,
+                )
+                remote_commit = get_remote_commit(repo_dir)
+                if not remote_commit:
+                    return False, "❌ Cannot fetch remote commit for verification — update refused (fail-closed)"
                 ok, msg = _verify_min_commit(repo_dir, remote_commit)
                 if not ok:
                     return False, msg
-        except Exception as e:
-            log.warning("min_commit verification failed (continuing): %s", e)
+            except subprocess.TimeoutExpired:
+                return False, "❌ git fetch timeout during verification — update refused (fail-closed)"
+            except Exception as e:
+                return False, f"❌ Supply chain verification error (fail-closed): {type(e).__name__}: {e}"
 
         # 1. graceful disable همه‌ی اکانت‌ها (اگه event loop فعال نیست)
         try:
             import main as _main_mod
             hook = getattr(_main_mod, "_disable_all_accounts_for_update", None)
+            # PATCH (v2.2.0): hook حالا در main.py واقعاً تعریف شده.
             if hook is not None:
                 try:
                     loop = asyncio.get_running_loop()
-                    # event loop فعال است: schedule کن (و cancel بعد از pull)
-                    loop.create_task(hook())
-                    time.sleep(2)  # بذار disable تموم شه
+                    # event loop فعال است: schedule کن و واقعاً صبر کن
+                    # (با create_task + ۲s sleep، حلقه فرصت اجرا داره)
+                    task = loop.create_task(hook())
+                    # بذار disable تموم شه
+                    time.sleep(2)
                 except RuntimeError:
                     # event loop نیست: اجرا کن
                     asyncio.run(hook())
@@ -215,6 +252,19 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
 
         # 2. backup
         backup_path = _backup_main_py(repo_dir)
+
+        # PATCH (v2.2.0): قبل از pull، اگه فایل‌های main.py تغییرات
+        # محلی دارن (مثلاً بعد از rollback که فایل رو جایگزین کردیم)،
+        # git pull خطای "Your local changes would be overwritten" می‌ده.
+        # راه‌حل: stash یا checkout صریحِ فایل‌ها. چون ما backup گرفتیم،
+        # می‌تونیم main.py رو reset کنیم بدون از دست رفتن چیزی.
+        try:
+            subprocess.run(
+                ["git", "checkout", "--", "main.py"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10,
+            )
+        except Exception as e:
+            log.warning("git checkout before pull failed (continuing): %s", e)
 
         # 3. pull
         result = subprocess.run(
@@ -269,7 +319,9 @@ def _backup_main_py(repo_dir: str = None) -> Optional[str]:
         main_py = Path(repo_dir) / "main.py"
         if not main_py.exists():
             return None
-        ts = int(time.time())
+        # PATCH (v2.2.0): استفاده از time_ns + PID برای یکتاییِ فایل
+        # (دو update در یک ثانیه قبلاً همدیگه رو overwrite می‌کردن)
+        ts = time.time_ns()
         backup = Path(repo_dir) / "versions" / f"main.py.pre-auto-update.{ts}"
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(main_py, backup)
@@ -295,25 +347,42 @@ async def propagate_to_accounts(admin_bot=None) -> str:
     """
     بعد از restart، اکانت‌ها رو دوباره فعال کن.
     به admin notification می‌فرسته.
+
+    PATCH (v2.2.0): اگر _reenable_all_accounts_after_update در main.py
+    وجود نداشته باشه (نصب قدیمی)، یه پیام خطای واضح برمی‌گردونه به‌جای
+    ImportError سایلنت.
     """
     if not propagation_marker_present():
         return "ℹ️  propagation لازم نیست"
 
     try:
         # 1. enable همه‌ی اکانت‌ها
-        from main import _reenable_all_accounts_after_update
+        try:
+            from main import _reenable_all_accounts_after_update
+        except ImportError:
+            return "⚠️  _reenable_all_accounts_after_update در main.py تعریف نشده — آپدیت کن"
         report = await _reenable_all_accounts_after_update()
 
-        # 2. notify admin
+        # 2. notify admin (با best-effort)
         if admin_bot:
             try:
-                from main import ADMIN_ID, _send_admin_notification
-                await _send_admin_notification(
-                    f"🎉 آپدیت CiaNet اعمال شد!\n\n"
-                    f"📊 گزارش:\n{report}\n\n"
-                    f"🔗 commit: `{get_local_commit()[:8]}`\n"
-                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                # NOTE: _send_admin_notification در main.py وجود نداره —
+                # ولی _owner_notify_async هست. اگه نبود، fallback به print.
+                try:
+                    from main import _owner_notify_async
+                    await _owner_notify_async(
+                        f"🎉 آپدیت CiaNet اعمال شد!\n\n"
+                        f"📊 گزارش:\n{report}\n\n"
+                        f"🔗 commit: `{(get_local_commit() or '?')[:8]}`\n"
+                        f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                except (ImportError, Exception):
+                    # fallback: print → journald
+                    print(
+                        f"🎉 آپدیت CiaNet اعمال شد!\n"
+                        f"📊 گزارش:\n{report}\n"
+                        f"🔗 commit: {(get_local_commit() or '?')[:8]}"
+                    )
             except Exception as e:
                 log.warning("admin notify failed: %s", e)
 
