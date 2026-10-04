@@ -2306,7 +2306,18 @@ def auto_renew_subscription(user_id: int) -> dict:
     """اگه اشتراک کاربر منقضی شده و auto_renoval فعال است و موجودی
     کیف پول کافی است، خودکار یه اشتراک جدید بساز.
     بازگشت: {"ok": True, "renewed": True/False, "reason": "..."}
+
+    v2.10.0: کل عملیات در یک _conn_immediate برای جلوگیری از race.
     """
+    # v2.10.0: atomic lock — دو فراخوانی هم‌زمان نمی‌تونن هر دو succeed کنن
+    with _conn_immediate() as c:
+        # double-check داخل lock
+        active = c.execute(
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
+            (user_id,)
+        ).fetchone()
+        if active:
+            return {"ok": True, "renewed": False, "reason": "already_active"}
     sub = get_active_subscription(user_id)
     if sub and sub.get("status") == "active":
         return {"ok": True, "renewed": False, "reason": "already_active"}
@@ -2341,6 +2352,16 @@ def auto_renew_subscription(user_id: int) -> dict:
 def create_scheduled_message(user_id: int, tag: str, chat_id: int, text: str,
                               scheduled_at: str) -> dict:
     """ساخت پیام زمان‌بندی‌شده. scheduled_at به فرمت ISO."""
+    # v2.10.0: validation
+    if not tag or not text or not scheduled_at:
+        return {"error": "missing_fields"}
+    if not isinstance(chat_id, int) or chat_id <= 0:
+        return {"error": "invalid_chat_id"}
+    try:
+        from datetime import datetime
+        datetime.fromisoformat(scheduled_at.replace("Z", ""))
+    except Exception:
+        return {"error": "invalid_scheduled_at"}
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO scheduled_messages (user_id, tag, chat_id, text, "
@@ -2373,6 +2394,13 @@ def delete_scheduled_message(msg_id: int, user_id: int) -> bool:
 # v2.9.9: auto-reply templates
 def create_auto_reply(user_id: int, tag: str, keyword: str, reply: str) -> dict:
     """ساخت پاسخ خودکار بر اساس کلمه‌ی کلیدی."""
+    # v2.10.0: validation
+    if not tag or not keyword or not reply:
+        return {"error": "missing_fields"}
+    keyword = keyword.strip()[:100]
+    reply = reply.strip()[:1000]
+    if not keyword or not reply:
+        return {"error": "empty_after_trim"}
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO auto_replies (user_id, tag, keyword, reply, is_active, "
@@ -2422,6 +2450,13 @@ def create_affiliate_commission(referrer_id: int, referred_id: int,
                                 order_id: int, amount_toman: int,
                                 commission_percent: int = 10) -> dict:
     """ثبت کمیسیون affiliate."""
+    # v2.10.0: validation
+    if not isinstance(commission_percent, int) or commission_percent < 0 or commission_percent > 100:
+        return {"error": "invalid_commission_percent"}
+    if not isinstance(amount_toman, int) or amount_toman < 0:
+        return {"error": "invalid_amount"}
+    if referrer_id == referred_id:
+        return {"error": "self_referral"}
     commission = int(amount_toman * commission_percent / 100)
     with _conn() as c:
         cur = c.execute(
@@ -2446,6 +2481,26 @@ def list_affiliate_commissions(referrer_id: int, limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
+# v2.10.0: ثبت کمیسیون affiliate وقتی یه سفارش paid می‌شه
+def _maybe_award_affiliate(user_id: int, order_id: int, amount_toman: int) -> None:
+    """اگه کاربر referrer داره، کمیسیون affiliate ثبت کن."""
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT referred_by FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if not row or not row["referred_by"]:
+            return  # no referrer
+        referrer = int(row["referred_by"])
+        if referrer == user_id:
+            return  # self-referral guard
+        # درصد کمیسیون از settings (default 10%)
+        pct = int(get_setting("affiliate_commission_percent", "10") or "10")
+        create_affiliate_commission(referrer, user_id, order_id, amount_toman, pct)
+    except Exception as e:
+        print(f"⚠️ [affiliate] error: {e}")
+
+
 def affiliate_stats(referrer_id: int) -> dict:
     """آمار affiliate: تعداد، مجموع کمیسیون، پرداخت‌شده."""
     with _conn() as c:
@@ -2455,11 +2510,14 @@ def affiliate_stats(referrer_id: int) -> dict:
             "FROM affiliate_commissions WHERE referrer_id = ?",
             (referrer_id,),
         ).fetchone()
+    # v2.10.0: COALESCE برای جلوگیری از NULL در paid_commission
+    s_val = int(total["s"] or 0)
+    p_val = int(total["p"] or 0)
     return {
-        "total_referrals": total["n"],
-        "total_commission": int(total["s"]),
-        "paid_commission": int(total["p"]),
-        "pending_commission": int(total["s"]) - int(total["p"]),
+        "total_referrals": int(total["n"] or 0),
+        "total_commission": s_val,
+        "paid_commission": p_val,
+        "pending_commission": s_val - p_val,
     }
 
 
@@ -22166,6 +22224,9 @@ class SelfBot:
             return result
 
         async def wrapped_send_file(*args, **kwargs):
+            # v2.10.0: gate check (قبلاً missing بود)
+            if not self._gate_outbound():
+                return None
             result = await orig_send_file(*args, **kwargs)
             await self._preserve_offline()
             return result
@@ -24273,6 +24334,38 @@ async def _embed_web_panel(host: str = "127.0.0.1", port: int = 8000):
     except Exception as e:
         print(f"⚠️ [embed_panel] خطا در شروع web panel: {e}")
 
+
+
+# v2.10.0: حلقه‌ی ارسال پیام‌های زمان‌بندی‌شده
+async def _scheduled_message_loop():
+    """هر ۶۰ ثانیه چک می‌کنه اگه پیام زمان‌بندی‌شده‌ای due شده، بفرسته."""
+    while True:
+        try:
+            with _conn() as c:
+                rows = c.execute(
+                    "SELECT * FROM scheduled_messages "
+                    "WHERE sent = 0 AND scheduled_at <= ? "
+                    "ORDER BY scheduled_at ASC LIMIT 20",
+                    (_now(),),
+                ).fetchall()
+            for row in rows:
+                msg = dict(row)
+                entry = ACCOUNTS.get(msg["tag"])
+                if entry is None or entry.bot is None:
+                    continue  # account not running
+                try:
+                    await entry.bot.send_message(msg["chat_id"], msg["text"])
+                    with _conn_immediate() as c2:
+                        c2.execute(
+                            "UPDATE scheduled_messages SET sent = 1 WHERE id = ?",
+                            (msg["id"],),
+                        )
+                    print(f"✅ [sched] پیام {msg['id']} به {msg['chat_id']} ارسال شد")
+                except Exception as e:
+                    print(f"⚠️ [sched] خطا در ارسال پیام {msg['id']}: {e}")
+        except Exception as e:
+            print(f"⚠️ [sched_loop] خطا: {e}")
+        await asyncio.sleep(60)
 
 
 if __name__ == "__main__":

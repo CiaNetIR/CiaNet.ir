@@ -1424,15 +1424,24 @@ async def user_pay_order_with_wallet(order_id: int, request: Request):
     try:
         import re as _re
         plan_name = order["plan"]
+        # v2.10.0: استفاده از pricing.duration_days (قبلاً regex بود)
         days = 30
-        m_match = _re.search(r"(\d+)", plan_name)
-        if m_match:
-            days = int(m_match.group(1))
+        try:
+            _pricing = m.get_pricing(plan_name)
+            if _pricing and _pricing.get("duration_days"):
+                days = int(_pricing["duration_days"])
+        except Exception:
+            pass
         with m._conn_immediate() as c:
-            c.execute(
-                "UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ?",
+            # v2.10.0: atomic — WHERE status='pending' برای جلوگیری از double-pay
+            cur = c.execute(
+                "UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? "
+                "WHERE id = ? AND status = 'pending'",
                 (m._now(), order_id),
             )
+            if cur.rowcount == 0:
+                raise HTTPException(400, "این فاکتور قبلاً پرداخت شده یا لغو شده")
+
         m.create_subscription(uid, plan_name, days)
         return {"ok": True, "balance": pay_result["balance"], "subscription_days": days}
     except Exception as e:
@@ -1709,9 +1718,11 @@ async def analytics_export(request: Request, _: None = Depends(require_auth)):
     for r in rows:
         writer.writerow([r[i] for i in range(len(r))])
     output.seek(0)
+    # v2.10.0: UTF-8 BOM برای Excel (Persian text درست نشون داده بشه)
+    csv_data = "\ufeff" + output.getvalue()
     return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
+        iter([csv_data]),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=cianet_orders.csv"}
     )
 
@@ -1730,7 +1741,13 @@ async def zarinpal_create_payment(order_id: int, request: Request):
         raise HTTPException(404, "فاکتور پیدا نشد")
     if order["status"] != "pending":
         raise HTTPException(400, "این فاکتور قابل پرداخت نیست")
-    callback_url = str(request.url_for("zarinpal_callback"))
+    # v2.10.0: اگه PANEL_URL ست شده، از اون استفاده کن (برای reverse proxy)
+    import os as _os
+    panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
+    if panel_url:
+        callback_url = f"{panel_url}/api/payment/zarinpal/callback"
+    else:
+        callback_url = str(request.url_for("zarinpal_callback"))
     result = m.create_zarinpal_payment(order_id, callback_url)
     if result.get("ok"):
         return {"ok": True, "url": result["url"]}
@@ -1751,13 +1768,15 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
     amount = int(order["amount_toman"])
     verify_result = m.verify_zarinpal_payment(Authority, amount)
     if verify_result.get("ok"):
-        # تأیید فاکتور + ساخت اشتراک
+        # v2.10.0: idempotent — WHERE status='pending' برای جلوگیری از double-callback
         with m._conn_immediate() as c:
-            c.execute(
+            cur = c.execute(
                 "UPDATE orders SET status = 'paid', pay_method = 'zarinpal', paid_at = ? "
-                "WHERE id = ?",
+                "WHERE id = ? AND status = 'pending'",
                 (m._now(), order["id"]),
             )
+            if cur.rowcount == 0:
+                return JSONResponse({"ok": True, "message": "already_processed"})
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)
         days = int(pricing["duration_days"] or 30) if pricing else 30
