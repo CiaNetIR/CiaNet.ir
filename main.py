@@ -1305,6 +1305,19 @@ def _migrate_schema(c) -> None:
         if added:
             print("✅ [saas_db] مهاجرت orders با موفقیت انجام شد — ستون‌های تخفیف اضافه شدند.")
 
+    # v2.10.5: مهاجرت wallet_transactions CHECK
+    if "wallet_transactions" in tables:
+        try:
+            c.execute("INSERT INTO wallet_transactions (user_id, amount, balance_after, type, created_at) VALUES (0, 0, 0, 'reseller_credit', 'test')")
+            c.execute("DELETE FROM wallet_transactions WHERE user_id = 0 AND amount = 0")
+        except Exception:
+            print("🔧 [saas_db] مهاجرت wallet_transactions: افزودن reseller_credit...")
+            c.execute("ALTER TABLE wallet_transactions RENAME TO wallet_transactions_old")
+            c.execute("CREATE TABLE wallet_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, amount INTEGER NOT NULL, balance_after INTEGER NOT NULL, type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund','reseller_credit')), ref TEXT, reason TEXT, created_by INTEGER, created_at TEXT NOT NULL)")
+            c.execute("INSERT INTO wallet_transactions SELECT * FROM wallet_transactions_old")
+            c.execute("DROP TABLE wallet_transactions_old")
+            print("✅ [saas_db] مهاجرت wallet_transactions انجام شد.")
+
 
 def init_db() -> None:
     with _conn() as c:
@@ -10669,9 +10682,10 @@ class SaaSBot:
             UI.go("💰 تأیید پرداخت", "admin_finance"),
             UI.go("🏷 قیمت‌گذاری", "owner_pricing"),
             UI.go("🎟 کدهای تخفیف", "owner_discount_codes"),
-            UI.go("💳 درگاه‌های پرداخت", "owner_payment_gateways"),
             UI.go("🎫 لایسنس و دسترسی", "license_access"),
         ]
+        if role == ROLE_OWNER:
+            sec1.append(UI.go("💳 درگاه‌های پرداخت", "owner_payment_gateways"))
         # Ⅱ کاربران
         sec2 = [
             # v2.8.9: دکمه‌ی «📋 لیست همه کاربران» — از تابع _owner_show_users
@@ -20463,7 +20477,7 @@ class SelfBot:
                     # module-level load_config/save_config استفاده می‌کنیم
                     try:
                         cfg = load_config()
-                        if self.tag in cfg:
+                        if self.tag in cfg and isinstance(cfg[self.tag], dict):
                             cfg[self.tag]["disabled"] = True
                             cfg[self.tag]["disabled_reason"] = "telegram_warning"
                             save_config(cfg)
