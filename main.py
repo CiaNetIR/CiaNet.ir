@@ -10435,16 +10435,19 @@ class SaaSBot:
         )
 
     async def _show_admin_tools(self, event, role: str):
-        """🧰 ابزارهای کم‌کاربردِ مدیریتی — یک لایه پایین‌ترِ هابِ ادمین."""
+        """🧰 ابزارهای کم‌کاربردِ مدیریتی — یک لایه پایین‌ترِ هابِ ادمین.
+
+        v2.8.8: تکرارها حذف شدند. قبلاً «🔐 مجوزهای حساس» و «💾 بکاپ و بازیابی»
+        هم در هاب اصلی و هم اینجا نمایش داده می‌شدند. حالا فقط چیزهایی
+        که در هاب اصلی نیستن (ربات اختصاصی + تنظیمات) اینجا هستن.
+        """
         if role not in (ROLE_OWNER, ROLE_ADMIN):
             await event.answer("⛔ دسترسی نداری", alert=True)
             return
         items = [UI.go("🤖 ربات‌های اختصاصی", "owner_dedicated_list")]
         if role == ROLE_OWNER:
             items.extend([
-                UI.go("🔐 مجوزهای حساس", "cap_list"),
                 UI.go("⚙️ تنظیمات", "admin_settings"),
-                UI.go("💾 بکاپ و بازیابی", "admin_backup"),
             ])
         buttons = self._pair_buttons(items)
         buttons.append(UI.nav_row())
@@ -13021,11 +13024,21 @@ class SaaSBot:
         await event.edit(UI.screen("🔐 مجوزِ حساس", body=body), buttons=buttons)
 
     async def _owner_choose_capability_scope(self, event, uid: int):
-        """انتخابِ دامنه‌ی مجوز قبل از تأیید."""
+        """انتخابِ دامنه‌ی مجوز قبل از تأیید.
+
+        v2.8.8 BUGFIX: این تابع ممکن است از دو جا صدا زده بشه:
+        ۱. از callback (event.edit کار می‌کنه)
+        ۲. از text wizard (event.edit کار نمی‌کنه — BadRequestError)
+        تابع خودش تشخیص می‌ده و از روش درست استفاده می‌کنه.
+        """
         if not self._cap_owner_only(event):
             return
         if not uid:
-            await event.answer("کاربر نامعتبر است.", alert=True)
+            # event.answer فقط روی callback‌ها کار می‌کنه
+            if hasattr(event, "answer"):
+                await event.answer("کاربر نامعتبر است.", alert=True)
+            else:
+                await event.respond("❌ کاربر نامعتبر است.")
             return
         role = self._role(uid)
         body = [
@@ -13040,7 +13053,22 @@ class SaaSBot:
             [UI.go("👥 مشتریانِ خودم", f"cap_confirm:{uid}:{SCOPE_RESELLER}")],
             [UI.neutral("انصراف", f"cap_user:{uid}")],
         ]
-        await event.edit(UI.screen("🔐 انتخابِ دامنه", body=body), buttons=buttons)
+        screen_text = UI.screen("🔐 انتخابِ دامنه", body=body)
+        # v2.8.8: تشخیص نوع event — اگه CallbackQuery.Event هست (با edit)،
+        # وگرنه از respond استفاده کن.
+        if hasattr(event, "edit") and hasattr(event, "message_id"):
+            try:
+                await event.edit(screen_text, buttons=buttons)
+                return
+            except Exception:
+                pass  # fallback به respond
+        # حالت پیام متنی — از respond استفاده کن
+        # nav.push رو هم بزن تا back درست کار کنه
+        try:
+            self.nav.push(event.sender_id, f"cap_user:{uid}")
+        except Exception:
+            pass
+        await event.respond(screen_text, buttons=buttons)
 
     async def _owner_confirm_capability(self, event, uid: int, scope: str):
         """تأییدِ نهاییِ اعطا — یک کلیکِ تصادفی نباید مجوز بدهد."""
