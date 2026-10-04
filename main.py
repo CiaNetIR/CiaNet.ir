@@ -5086,7 +5086,19 @@ def list_open_tickets() -> list:
 # یا از systemd Environment=... / فایل .env استفاده کن.
 ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
 _admin_id_raw = os.environ.get("ADMIN_ID", "").strip()
-ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else 0  # 0 = تنظیم‌نشده
+ADMIN_ID = int(_admin_id_raw) if _admin_id_raw.isdigit() else 0
+# v2.8.6 BUGFIX: warning واضح اگه ADMIN_ID ست نشده — قبلاً فقط یه هشدار
+# تو init_db چاپ می‌شد که گاهی جا می‌افتاد. حالا در همان ابتدای اجرای main.py
+# این warning نشون داده می‌شه تا کاربر بفهمه چرا نقش OWNER نمی‌گیره.
+if ADMIN_ID == 0:
+    print("\n" + "=" * 60)
+    print("🚨 خطای حیاتی: متغیر ADMIN_ID تنظیم نشده!")
+    print("🚨 بدون این متغیر، کاربر به‌عنوان ROLE_USER شناخته می‌شه و")
+    print("🚨 منوی OWNER/ADMIN (شامل لایسنس، آپدیت، پنل وب و...) رو نمی‌بینه.")
+    print("🚨 راه‌حل:")
+    print("🚨   echo ADMIN_ID=YOUR_TELEGRAM_ID | sudo tee -a /etc/selfbot.env")
+    print("🚨   sudo systemctl restart selfbot")
+    print("=" * 60 + "\n")  # 0 = تنظیم‌نشده
 
 # آیا این نمونه، یک «ربات اختصاصی» است (زیرپروسه‌ای که برای یک نماینده/
 # مشتری spawn شده)؟ _spawn_dedicated_bot این متغیر را برای فرآیندِ جدا set
@@ -9597,6 +9609,12 @@ class SaaSBot:
         else:
             # فقط خرید سلف
             buttons.append([UI.confirm("🛒 خرید سلف", "user_renew")])
+
+        # v2.8.6 BUGFIX: دکمه‌ی «👤 حساب کاربری» اضافه شد — این دکمه
+        # مسیرِ دسترسی به کیف پول، سفارش‌ها، دعوت دوستان و راهنماست.
+        # قبلاً این دکمه وجود نداشت و کدِ _show_account_card (که شامل
+        # «💰 کیف پول» است) کاملاً unreachable بود.
+        buttons.append([UI.go("👤 حساب کاربری", "user_account")])
 
         # ── ردیف ۴ (تکی): خرید با لایسنس
         buttons.append([UI.go("🔑 خرید با لایسنس", "user_activate_license")])
@@ -23055,11 +23073,18 @@ async def _run_single_account_cli(tag: str, cfg_entry: dict, caller: str) -> Non
 
 
 async def main():
-    # اعتبارسنجی env ربات مدیریت قبل از هر چیز (حتی قبل از helper/SelfBot):
-    # در حالت «all» اگر ADMIN_BOT_TOKEN/ADMIN_ID ناقص باشند، همه‌ی مشکلات
-    # یک‌جا گزارش و همان ابتدا خارج می‌شویم — SelfBot‌ها بی‌دلیل بالا نمی‌آیند.
-    if len(sys.argv) > 1 and sys.argv[1] == "all":
+    # v2.8.6 BUGFIX: _validate_saas_env_or_exit() حالا در همه‌ی حالت‌ها
+    # اجرا می‌شه (نه فقط "all"). این جلوی حالت سایلنت fail رو می‌گیره وقتی
+    # کاربر interactive یا single-tag اجرا می‌کنه.
+    try:
         _validate_saas_env_or_exit()
+    except SystemExit:
+        raise
+    except Exception as _e:
+        print(f"⚠️ [validate_saas_env] خطای غیربحرانی: {_e}")
+    # اگر در حالت "all" هستیم، validation سخت‌گیرانه‌تره (در _validate
+    # خودش چک می‌شه).
+    # (قبلاً این خط اینجا بود: if len(sys.argv) > 1 and sys.argv[1] == "all": _validate_saas_env_or_exit())
     # ستون‌های رفرال — روی نصب‌های موجود هم بی‌خطر اضافه می‌شوند
     try:
         ensure_referral_schema()
@@ -23103,15 +23128,18 @@ async def main():
             await add_account()
             cfg = load_config()
 
+    # v2.8.6 BUGFIX: embed panel در همه‌ی حالت‌ها شروع می‌شه، نه فقط "all".
+    # این تضمین می‌کنه که اگه کاربر `python main.py <tag>` یا interactive
+    # اجرا کنه، پنل وب هم بالا بیاد.
+    embed_panel_env = os.environ.get("CIANET_EMBED_PANEL", "1").strip().lower()
+    if embed_panel_env in ("1", "true", "yes"):
+        panel_port = int(os.environ.get("CIANET_PANEL_PORT", "8000"))
+        asyncio.create_task(_embed_web_panel(port=panel_port))
+        print(f"🌐 [embed_panel] web panel در همین پروسه روی port {panel_port} شروع شد")
+
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg == "all":
-            # v2.8.5: شروع web panel در همین event loop — برای دسترسی به Telethon
-            embed_panel_env = os.environ.get("CIANET_EMBED_PANEL", "1").strip().lower()
-            if embed_panel_env in ("1", "true", "yes"):
-                panel_port = int(os.environ.get("CIANET_PANEL_PORT", "8000"))
-                asyncio.create_task(_embed_web_panel(port=panel_port))
-                print(f"🌐 [embed_panel] web panel در همین پروسه روی port {panel_port} شروع شد")
             await _run_all_accounts(cfg)
             return
         elif arg in cfg:
