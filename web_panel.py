@@ -1575,6 +1575,281 @@ def _calc_days_left(sub: dict) -> int:
         return 0
 
 
+
+# ─── v2.9.7: Phase 3 — Analytics API ────────────────────────────────────
+
+@app.get("/api/analytics/overview")
+async def analytics_overview(request: Request, _: None = Depends(require_auth)):
+    """آمار کلی — MRR، ARPU، نرخ churn، رشد."""
+    m = _main()
+    with m._conn() as c:
+        # MRR: مجموع پرداخت‌های تاییدشده در ۳۰ روز اخیر
+        mrr_row = c.execute(
+            "SELECT COALESCE(SUM(amount_toman),0) FROM orders WHERE status='paid' "
+            "AND paid_at >= date('now','-30 days')"
+        ).fetchone()
+        mrr = int(mrr_row[0]) if mrr_row else 0
+        # تعداد کل کاربران
+        total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        # اشتراک‌های فعال
+        active_subs = c.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE status='active'"
+        ).fetchone()[0]
+        # اشتراک‌های منقضی شده در ۳۰ روز اخیر
+        expired_30d = c.execute(
+            "SELECT COUNT(*) FROM subscriptions WHERE status='expired' "
+            "AND (expire_date IS NOT NULL AND expire_date >= date('now','-30 days'))"
+        ).fetchone()[0]
+        # کل درآمد (همه‌ی زمان‌ها)
+        total_revenue = c.execute(
+            "SELECT COALESCE(SUM(amount_toman),0) FROM orders WHERE status='paid'"
+        ).fetchone()[0]
+        # تعداد سفارش‌های ۳۰ روز اخیر
+        orders_30d = c.execute(
+            "SELECT COUNT(*) FROM orders WHERE created_at >= date('now','-30 days')"
+        ).fetchone()[0]
+    arpu = (mrr / active_subs) if active_subs > 0 else 0
+    churn_rate = (expired_30d / total_users * 100) if total_users > 0 else 0
+    return {
+        "mrr_toman": mrr,
+        "total_revenue_toman": total_revenue,
+        "total_users": total_users,
+        "active_subscriptions": active_subs,
+        "expired_30d": expired_30d,
+        "orders_30d": orders_30d,
+        "arpu_toman": int(arpu),
+        "churn_rate_percent": round(churn_rate, 2),
+    }
+
+@app.get("/api/analytics/daily-revenue")
+async def analytics_daily_revenue(request: Request, _: None = Depends(require_auth)):
+    """درآمد روزانه ۳۰ روز اخیر — برای نمودار."""
+    m = _main()
+    with m._conn() as c:
+        rows = c.execute(
+            "SELECT date(paid_at) AS day, SUM(amount_toman) AS rev, COUNT(*) AS cnt "
+            "FROM orders WHERE status='paid' AND paid_at >= date('now','-30 days') "
+            "GROUP BY date(paid_at) ORDER BY day"
+        ).fetchall()
+    return {
+        "labels": [r[0] for r in rows],
+        "revenue": [int(r[1] or 0) for r in rows],
+        "orders": [int(r[2] or 0) for r in rows],
+    }
+
+@app.get("/api/analytics/subscription-stats")
+async def analytics_sub_stats(request: Request, _: None = Depends(require_auth)):
+    """تفکیک اشتراک‌ها."""
+    m = _main()
+    with m._conn() as c:
+        active = c.execute("SELECT COUNT(*) FROM subscriptions WHERE status='active'").fetchone()[0]
+        expired = c.execute("SELECT COUNT(*) FROM subscriptions WHERE status='expired'").fetchone()[0]
+        pending = c.execute("SELECT COUNT(*) FROM subscriptions WHERE status='pending'").fetchone()[0]
+        total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    nosub = max(0, total_users - active - expired - pending)
+    return {
+        "active": active,
+        "expired": expired,
+        "pending": pending,
+        "no_subscription": nosub,
+        "total_users": total_users,
+    }
+
+@app.get("/api/analytics/audit-log")
+async def analytics_audit_log(request: Request, limit: int = 100, offset: int = 0,
+                              action: str = None, _: None = Depends(require_auth)):
+    """لاگ فعالیت‌ها با فیلتر و صفحه‌بندی."""
+    m = _main()
+    with m._conn() as c:
+        if action:
+            rows = c.execute(
+                "SELECT * FROM logs WHERE action = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (action, limit, offset)
+            ).fetchall()
+            total = c.execute("SELECT COUNT(*) FROM logs WHERE action = ?", (action,)).fetchone()[0]
+        else:
+            rows = c.execute(
+                "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            ).fetchall()
+            total = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+    return {
+        "logs": [
+            {
+                "id": r["id"],
+                "actor_id": r["actor_id"],
+                "action": r["action"],
+                "details": r["details"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+@app.get("/api/analytics/export")
+async def analytics_export(request: Request, _: None = Depends(require_auth)):
+    """خروجی CSV از درآمد."""
+    import csv, io
+    from fastapi.responses import StreamingResponse
+    m = _main()
+    with m._conn() as c:
+        rows = c.execute(
+            "SELECT order_no, user_id, plan, amount_toman, amount_usdt, status, "
+            "discount_code, discount_percent, pay_method, created_at, paid_at "
+            "FROM orders ORDER BY id DESC LIMIT 10000"
+        ).fetchall()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["order_no", "user_id", "plan", "amount_toman", "amount_usdt",
+                     "status", "discount_code", "discount_percent", "pay_method",
+                     "created_at", "paid_at"])
+    for r in rows:
+        writer.writerow([r[i] for i in range(len(r))])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=cianet_orders.csv"}
+    )
+
+# ─── End Phase 3 ────────────────────────────────────────────────────────
+
+
+# ─── v2.9.8: Phase 4 — Iranian payment gateway (Zarinpal) ──────────────
+
+@app.post("/api/payment/zarinpal/create/{order_id}")
+async def zarinpal_create_payment(order_id: int, request: Request):
+    """ساخت پرداخت Zarinpal — redirect URL برمی‌گردونه."""
+    uid = require_user_auth(request)
+    m = _main()
+    order = m.get_order(order_id)
+    if not order or order["user_id"] != uid:
+        raise HTTPException(404, "فاکتور پیدا نشد")
+    if order["status"] != "pending":
+        raise HTTPException(400, "این فاکتور قابل پرداخت نیست")
+    callback_url = str(request.url_for("zarinpal_callback"))
+    result = m.create_zarinpal_payment(order_id, callback_url)
+    if result.get("ok"):
+        return {"ok": True, "url": result["url"]}
+    raise HTTPException(400, result.get("error", "zarinpal_failed"))
+
+@app.get("/api/payment/zarinpal/callback")
+async def zarinpal_callback(request: Request, Authority: str = "", Status: str = ""):
+    """callback Zarinpal بعد از پرداخت."""
+    m = _main()
+    if Status != "OK":
+        return JSONResponse({"ok": False, "error": "payment_cancelled"})
+    # پیدا کردن سفارش با authority
+    with m._conn() as c:
+        row = c.execute("SELECT * FROM orders WHERE txid = ?", (Authority,)).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "order_not_found"})
+    order = dict(row)
+    amount = int(order["amount_toman"])
+    verify_result = m.verify_zarinpal_payment(Authority, amount)
+    if verify_result.get("ok"):
+        # تأیید فاکتور + ساخت اشتراک
+        with m._conn_immediate() as c:
+            c.execute(
+                "UPDATE orders SET status = 'paid', pay_method = 'zarinpal', paid_at = ? "
+                "WHERE id = ?",
+                (m._now(), order["id"]),
+            )
+        plan_name = order["plan"]
+        pricing = m.get_pricing(plan_name)
+        days = int(pricing["duration_days"] or 30) if pricing else 30
+        m.create_subscription(order["user_id"], plan_name, days)
+        return JSONResponse({"ok": True, "ref_id": verify_result.get("ref_id")})
+    return JSONResponse({"ok": False, "error": verify_result.get("error")})
+
+@app.post("/api/user/auto-renew")
+async def toggle_auto_renew(request: Request):
+    """فعال/غیرفعال‌کردن تمدید خودکار از کیف پول."""
+    uid = require_user_auth(request)
+    m = _main()
+    # تست: آیا می‌تونه تمدید کنه؟
+    result = m.auto_renew_subscription(uid)
+    return {"result": result}
+
+# ─── End Phase 4 ────────────────────────────────────────────────────────
+
+
+# ─── v2.9.9: Phase 5 — Scheduling + Auto-reply + Affiliate ──────────────
+
+@app.get("/api/user/scheduled-messages")
+async def list_sched_msgs(request: Request):
+    """لیست پیام‌های زمان‌بندی‌شده‌ی کاربر."""
+    uid = require_user_auth(request)
+    m = _main()
+    msgs = m.list_scheduled_messages(uid)
+    return {"messages": msgs}
+
+@app.post("/api/user/scheduled-messages")
+async def create_sched_msg(request: Request):
+    """ساخت پیام زمان‌بندی‌شده."""
+    from pydantic import BaseModel
+    class SchedMsgReq(BaseModel):
+        tag: str
+        chat_id: int
+        text: str
+        scheduled_at: str
+    uid = require_user_auth(request)
+    m = _main()
+    req = await request.json()
+    result = m.create_scheduled_message(uid, req["tag"], req["chat_id"],
+                                          req["text"], req["scheduled_at"])
+    return result
+
+@app.delete("/api/user/scheduled-messages/{msg_id}")
+async def delete_sched_msg(msg_id: int, request: Request):
+    """حذف پیام زمان‌بندی‌شده."""
+    uid = require_user_auth(request)
+    m = _main()
+    ok = m.delete_scheduled_message(msg_id, uid)
+    return {"ok": ok}
+
+@app.get("/api/user/auto-replies")
+async def list_auto_replies_api(request: Request):
+    """لیست auto-replies."""
+    uid = require_user_auth(request)
+    m = _main()
+    return {"replies": m.list_auto_replies(uid)}
+
+@app.post("/api/user/auto-replies")
+async def create_auto_reply_api(request: Request):
+    """ساخت auto-reply."""
+    uid = require_user_auth(request)
+    m = _main()
+    req = await request.json()
+    return m.create_auto_reply(uid, req["tag"], req["keyword"], req["reply"])
+
+@app.delete("/api/user/auto-replies/{reply_id}")
+async def delete_auto_reply_api(reply_id: int, request: Request):
+    """حذف auto-reply."""
+    uid = require_user_auth(request)
+    m = _main()
+    ok = m.delete_auto_reply(reply_id, uid)
+    return {"ok": ok}
+
+@app.get("/api/user/affiliate/stats")
+async def affiliate_stats_api(request: Request):
+    """آمار affiliate کاربر."""
+    uid = require_user_auth(request)
+    m = _main()
+    return m.affiliate_stats(uid)
+
+@app.get("/api/user/affiliate/commissions")
+async def affiliate_commissions_api(request: Request):
+    """لیست کمیسیون‌های affiliate."""
+    uid = require_user_auth(request)
+    m = _main()
+    return {"commissions": m.list_affiliate_commissions(uid)}
+
+# ─── End Phase 5 ────────────────────────────────────────────────────────
+
 # ─── v2.8.5: Account Settings + Chat API ─────────────────────────────
 # این endpoint‌ها به Telethon client زنده نیاز دارند — فقط وقتی کار می‌کنند
 # که web_panel در همین پروسه‌ی selfbot اجرا شود (embed mode).

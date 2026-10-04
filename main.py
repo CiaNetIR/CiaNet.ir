@@ -1890,6 +1890,45 @@ def ensure_wallet_schema() -> None:
             ")"
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_discount_code ON discount_codes(code)")
+        # v2.9.9: پیام زمان‌بندی‌شده + auto-reply + affiliate
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS scheduled_messages ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  user_id INTEGER NOT NULL,"
+            "  tag TEXT NOT NULL,"
+            "  chat_id INTEGER NOT NULL,"
+            "  text TEXT NOT NULL,"
+            "  scheduled_at TEXT NOT NULL,"
+            "  sent INTEGER DEFAULT 0,"
+            "  created_at TEXT NOT NULL"
+            ")"
+        )
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS auto_replies ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  user_id INTEGER NOT NULL,"
+            "  tag TEXT NOT NULL,"
+            "  keyword TEXT NOT NULL,"
+            "  reply TEXT NOT NULL,"
+            "  is_active INTEGER DEFAULT 1,"
+            "  created_at TEXT NOT NULL"
+            ")"
+        )
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS affiliate_commissions ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  referrer_id INTEGER NOT NULL,"
+            "  referred_id INTEGER NOT NULL,"
+            "  order_id INTEGER,"
+            "  amount_toman INTEGER NOT NULL,"
+            "  commission_percent INTEGER NOT NULL,"
+            "  commission_toman INTEGER NOT NULL,"
+            "  paid INTEGER DEFAULT 0,"
+            "  created_at TEXT NOT NULL"
+            ")"
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_sched_msg ON scheduled_messages(scheduled_at, sent)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_aff_referrer ON affiliate_commissions(referrer_id, paid)")
 
 
 def referral_link(bot_username: str, user_id: int) -> str:
@@ -2188,6 +2227,240 @@ def list_discount_codes(limit: int = 50) -> list:
             "SELECT * FROM discount_codes ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# v2.9.8: درگاه پرداخت ایرانی (Zarinpal)
+# این توابع با فراخوانی API Zarinpal یه payment می‌سازه و بعد از پرداخت
+# callback رو handle می‌کنه. OWNER باید merchant_id رو در settings ست کنه.
+def create_zarinpal_payment(order_id: int, callback_url: str) -> dict:
+    """ساخت پرداخت Zarinpal — redirect URL برمی‌گردونه.
+    بازگشت: {"ok": True, "url": "..."} یا {"error": "..."}
+    """
+    import urllib.request, urllib.parse, json as _json
+    merchant = (get_setting("zarinpal_merchant") or "").strip()
+    if not merchant:
+        return {"error": "zarinpal_merchant ست نشده — در پنل ادمین تنظیم کن"}
+    order = get_order(order_id)
+    if not order:
+        return {"error": "order_not_found"}
+    amount = int(order["amount_toman"])
+    # Zarinpal API request
+    try:
+        payload = _json.dumps({
+            "merchant_id": merchant,
+            "amount": amount * 10,  # Zarinpal تومان را به ریال تبدیل می‌کند
+            "callback_url": callback_url,
+            "description": f"CiaNet اشتراک {order['plan']}",
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.zarinpal.com/pg/v4/payment/request.json",
+            data=payload, method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = _json.loads(r.read().decode())
+        if resp.get("data", {}).get("code") == 100:
+            authority = resp["data"]["authority"]
+            # ثبت authority در سفارش
+            with _conn_immediate() as c:
+                c.execute(
+                    "UPDATE orders SET pay_method = 'zarinpal', txid = ? WHERE id = ?",
+                    (authority, order_id),
+                )
+            url = f"https://www.zarinpal.com/pg/StartPay/{authority}"
+            return {"ok": True, "url": url, "authority": authority}
+        return {"error": f"zarinpal_error: {resp}"}
+    except Exception as e:
+        return {"error": f"zarinpal_request_failed: {e}"}
+
+
+def verify_zarinpal_payment(authority: str, amount_toman: int) -> dict:
+    """تأیید پرداخت Zarinpal بعد از redirect به callback."""
+    import urllib.request, json as _json
+    merchant = (get_setting("zarinpal_merchant") or "").strip()
+    if not merchant:
+        return {"error": "zarinpal_merchant ست نشده"}
+    try:
+        payload = _json.dumps({
+            "merchant_id": merchant,
+            "amount": amount_toman * 10,  # ریال
+            "authority": authority,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.zarinpal.com/pg/v4/payment/verify.json",
+            data=payload, method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = _json.loads(r.read().decode())
+        code = resp.get("data", {}).get("code")
+        if code in (100, 101):  # 100=paid, 101=already verified
+            return {"ok": True, "ref_id": resp["data"].get("ref_id")}
+        return {"error": f"verify_failed: code={code}"}
+    except Exception as e:
+        return {"error": f"verify_request_failed: {e}"}
+
+
+# v2.9.8: تمدید خودکار از کیف پول
+def auto_renew_subscription(user_id: int) -> dict:
+    """اگه اشتراک کاربر منقضی شده و auto_renoval فعال است و موجودی
+    کیف پول کافی است، خودکار یه اشتراک جدید بساز.
+    بازگشت: {"ok": True, "renewed": True/False, "reason": "..."}
+    """
+    sub = get_active_subscription(user_id)
+    if sub and sub.get("status") == "active":
+        return {"ok": True, "renewed": False, "reason": "already_active"}
+    # پیدا کردن آخرین پلن کاربر
+    with _conn() as c:
+        last_sub = c.execute(
+            "SELECT plan FROM subscriptions WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+    if not last_sub:
+        return {"ok": True, "renewed": False, "reason": "no_previous_plan"}
+    plan_name = last_sub["plan"]
+    pricing = get_pricing(plan_name)
+    if not pricing:
+        return {"ok": True, "renewed": False, "reason": "plan_not_found"}
+    amount = int(pricing["price_toman"])
+    days = int(pricing["duration_days"] or 30)
+    bal = get_wallet_balance(user_id)
+    if bal < amount:
+        return {"ok": True, "renewed": False, "reason": "insufficient_balance"}
+    # پرداخت از کیف پول
+    pay_result = wallet_pay_from_balance(user_id, amount, ref=f"auto_renew:{plan_name}")
+    if not pay_result.get("ok"):
+        return {"ok": False, "renewed": False, "reason": pay_result.get("error")}
+    # ساخت اشتراک جدید
+    create_subscription(user_id, plan_name, days)
+    log_action(user_id, "auto_renew", f"plan={plan_name}, amount={amount}, days={days}")
+    return {"ok": True, "renewed": True, "plan": plan_name, "days": days, "balance": pay_result["balance"]}
+
+
+# v2.9.9: پیام زمان‌بندی‌شده
+def create_scheduled_message(user_id: int, tag: str, chat_id: int, text: str,
+                              scheduled_at: str) -> dict:
+    """ساخت پیام زمان‌بندی‌شده. scheduled_at به فرمت ISO."""
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO scheduled_messages (user_id, tag, chat_id, text, "
+            "scheduled_at, sent, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+            (user_id, tag, chat_id, text, scheduled_at, _now()),
+        )
+    return {"ok": True, "id": cur.lastrowid}
+
+
+def list_scheduled_messages(user_id: int, limit: int = 50) -> list:
+    """لیست پیام‌های زمان‌بندی‌شده‌ی کاربر."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM scheduled_messages WHERE user_id = ? "
+            "ORDER BY scheduled_at ASC LIMIT ?", (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_scheduled_message(msg_id: int, user_id: int) -> bool:
+    """حذف پیام زمان‌بندی‌شده (با مالکیت چک)."""
+    with _conn_immediate() as c:
+        cur = c.execute(
+            "DELETE FROM scheduled_messages WHERE id = ? AND user_id = ? AND sent = 0",
+            (msg_id, user_id),
+        )
+    return cur.rowcount > 0
+
+
+# v2.9.9: auto-reply templates
+def create_auto_reply(user_id: int, tag: str, keyword: str, reply: str) -> dict:
+    """ساخت پاسخ خودکار بر اساس کلمه‌ی کلیدی."""
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO auto_replies (user_id, tag, keyword, reply, is_active, "
+            "created_at) VALUES (?, ?, ?, ?, 1, ?)",
+            (user_id, tag, keyword, reply, _now()),
+        )
+    return {"ok": True, "id": cur.lastrowid}
+
+
+def list_auto_replies(user_id: int) -> list:
+    """لیست auto-replies کاربر."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM auto_replies WHERE user_id = ? ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_auto_reply(reply_id: int, user_id: int) -> bool:
+    """حذف auto-reply."""
+    with _conn_immediate() as c:
+        cur = c.execute(
+            "DELETE FROM auto_replies WHERE id = ? AND user_id = ?",
+            (reply_id, user_id),
+        )
+    return cur.rowcount > 0
+
+
+def find_auto_reply(tag: str, text: str, user_id: int = None) -> str:
+    """جستجوی auto-reply برای کلمه‌ی کلیدی در text."""
+    text_lower = (text or "").lower().strip()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT keyword, reply FROM auto_replies "
+            "WHERE tag = ? AND is_active = 1 AND (? IS NULL OR user_id = ?)",
+            (tag, user_id, user_id),
+        ).fetchall()
+    for r in rows:
+        if r["keyword"].lower() in text_lower:
+            return r["reply"]
+    return None
+
+
+# v2.9.9: affiliate commission
+def create_affiliate_commission(referrer_id: int, referred_id: int,
+                                order_id: int, amount_toman: int,
+                                commission_percent: int = 10) -> dict:
+    """ثبت کمیسیون affiliate."""
+    commission = int(amount_toman * commission_percent / 100)
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO affiliate_commissions (referrer_id, referred_id, "
+            "order_id, amount_toman, commission_percent, commission_toman, "
+            "paid, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+            (referrer_id, referred_id, order_id, amount_toman,
+             commission_percent, commission, _now()),
+        )
+    log_action(referrer_id, "affiliate_commission",
+               f"referred={referred_id}, amount={amount_toman}, commission={commission}")
+    return {"ok": True, "commission_toman": commission, "id": cur.lastrowid}
+
+
+def list_affiliate_commissions(referrer_id: int, limit: int = 50) -> list:
+    """لیست کمیسیون‌های affiliate یک کاربر."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM affiliate_commissions WHERE referrer_id = ? "
+            "ORDER BY id DESC LIMIT ?", (referrer_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def affiliate_stats(referrer_id: int) -> dict:
+    """آمار affiliate: تعداد، مجموع کمیسیون، پرداخت‌شده."""
+    with _conn() as c:
+        total = c.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(commission_toman),0) AS s, "
+            "SUM(CASE WHEN paid=1 THEN commission_toman ELSE 0 END) AS p "
+            "FROM affiliate_commissions WHERE referrer_id = ?",
+            (referrer_id,),
+        ).fetchone()
+    return {
+        "total_referrals": total["n"],
+        "total_commission": int(total["s"]),
+        "paid_commission": int(total["p"]),
+        "pending_commission": int(total["s"]) - int(total["p"]),
+    }
 
 
 def list_users_for_reseller(reseller_id: int) -> list:

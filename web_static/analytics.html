@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiaNet Admin — آنالیتیکس</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stat-card { padding: 16px; border-radius: 8px; background: rgba(15,23,42,0.4); border-left: 3px solid var(--accent); }
+    .stat-card .label { font-size: 0.85rem; color: var(--text-dim); }
+    .stat-card .value { font-size: 1.5rem; font-weight: 700; margin-top: 6px; }
+    .chart-container { background: rgba(15,23,42,0.4); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    .chart-container canvas { max-height: 300px; }
+  </style>
+</head>
+<body>
+  <nav class="topnav">
+    <div class="brand">CiaNet Admin</div>
+    <div class="nav-items">
+      <a href="/app/dashboard.html">داشبورد</a>
+      <a href="/app/users.html">کاربران</a>
+      <a href="/app/finance.html">امور مالی</a>
+      <a href="/app/audit.html">لاگ فعالیت</a>
+      <a href="/app/analytics.html" class="active">📊 آنالیتیکس</a>
+      <a href="/app/settings.html">تنظیمات</a>
+    </div>
+  </nav>
+
+  <div class="container" style="max-width:1200px;">
+    <div class="stat-grid" id="stat-grid">در حال بارگذاری...</div>
+    <div class="chart-container">
+      <h3>📈 درآمد ۳۰ روز اخیر</h3>
+      <canvas id="revenueChart"></canvas>
+    </div>
+    <div class="chart-container">
+      <h3>📊 وضعیت اشتراک‌ها</h3>
+      <canvas id="subChart"></canvas>
+    </div>
+    <div style="margin-top:20px;text-align:center">
+      <a href="/api/analytics/export" class="link-btn" style="text-decoration:none;padding:10px 20px;display:inline-block">📥 خروجی CSV سفارش‌ها</a>
+    </div>
+  </div>
+
+  <script>
+    const adminSession = document.cookie.includes('cianet_panel_session');
+    if (!adminSession) { window.location.href = '/app/login.html'; }
+
+    async function apiCall(method, path) {
+      const r = await fetch(path, { method, credentials: 'include' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }
+    function faDigits(n) {
+      return String(n).replace(/[0-9]/g, d => '۰۱۲۳۴۵۶۷۸۹'[+d]);
+    }
+    function fmt(n) {
+      return faDigits(Number(n).toLocaleString('en-US'));
+    }
+
+    async function loadOverview() {
+      try {
+        const d = await apiCall('GET', '/api/analytics/overview');
+        document.getElementById('stat-grid').innerHTML = `
+          <div class="stat-card"><div class="label">MRR (۳۰ روز)</div><div class="value">${fmt(d.mrr_toman)} Toman</div></div>
+          <div class="stat-card"><div class="label">کل درآمد</div><div class="value">${fmt(d.total_revenue_toman)} Toman</div></div>
+          <div class="stat-card"><div class="label">کاربران کل</div><div class="value">${fmt(d.total_users)}</div></div>
+          <div class="stat-card"><div class="label">اشتراک‌های فعال</div><div class="value">${fmt(d.active_subscriptions)}</div></div>
+          <div class="stat-card"><div class="label">ARPU</div><div class="value">${fmt(d.arpu_toman)} Toman</div></div>
+          <div class="stat-card"><div class="label">نرخ churn</div><div class="value">${faDigits(d.churn_rate_percent)}%</div></div>
+        `;
+      } catch (err) {
+        document.getElementById('stat-grid').textContent = 'خطا: ' + err.message;
+      }
+    }
+
+    async function loadRevenueChart() {
+      try {
+        const d = await apiCall('GET', '/api/analytics/daily-revenue');
+        new Chart(document.getElementById('revenueChart'), {
+          type: 'line',
+          data: {
+            labels: d.labels,
+            datasets: [{
+              label: 'درآمد (Toman)',
+              data: d.revenue,
+              borderColor: '#f59e0b',
+              backgroundColor: 'rgba(245,158,11,0.1)',
+              fill: true, tension: 0.3,
+            }]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      } catch (err) { console.error(err); }
+    }
+
+    async function loadSubChart() {
+      try {
+        const d = await apiCall('GET', '/api/analytics/subscription-stats');
+        new Chart(document.getElementById('subChart'), {
+          type: 'doughnut',
+          data: {
+            labels: ['فعال', 'منقضی', 'بدون اشتراک', 'در انتظار'],
+            datasets: [{
+              data: [d.active, d.expired, d.no_subscription, d.pending],
+              backgroundColor: ['#22c55e', '#ef4444', '#64748b', '#f59e0b'],
+            }]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      } catch (err) { console.error(err); }
+    }
+
+    Promise.all([loadOverview(), loadRevenueChart(), loadSubChart()]);
+  </script>
+</body>
+</html>
