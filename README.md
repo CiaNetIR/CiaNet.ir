@@ -2,429 +2,285 @@
 
 # 🤖 CiaNet.ir
 
-### Telegram Selfbot SaaS Panel
+### پنل مدیریت سلف‌بات تلگرام + سیستم SaaS کامل
 
-پنل مدیریت چند‌اکانتی با ربات تلگرام + پنل وب + آپدیت خودکار
+ربات مدیریت چنداکانتی تلگرام + پنل وب + درگاه پرداخت + کیف پول + سیستم همکاری
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
 [![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
-[![Version](https://img.shields.io/badge/version-2.1.7-blue.svg)](#-changelog)
+[![Version](https://img.shields.io/badge/version-2.11.5-blue.svg)](#-changelog)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[Quick Start](#-quick-start) · [Features](#-features) · [Web Panel](#-web-panel) · [Architecture](#-architecture) · [Changelog](#-changelog)
-
 </div>
 
 ---
 
-## ⚡ Quick Start
+## ✨ امکانات
 
-### 🚀 نصب یک‌مرحله‌ای (توصیه‌شده)
+### 🤖 ربات سلف
+- **مدیریت چند اکانت** — همزمان چند اکانت تلگرام رو روشن نگه دار
+- **تبچی** — ارسال خودکار پیام تکراری در گروه/کانال
+- **تایم و بیو** — ساعت زنده در اسم یا بیو
+- **آنلاین دائمی** — اکانت همیشه آنلاین
+- **تیک خودکار** — پیوی/گروه/کانال خودکار خوانده شود
+- **سکوت** — حذف خودکار پیام‌های ورودی پیوی
+- **ردیاب** — ذخیره پیام‌های حذف/ادیت‌شده
+- **بازی‌های تضمینی** — تاس/دارت/بسکتبال/فوتبال/اسلات
+- **قیمت لحظه‌ای** — طلا/تتر/ترون/تون
+- **کپی و ذخیره** — کپی محتوای پیام با لینک
+- **فونت** — bold/double/sans/mono برای اسم
+
+### 🛡 حفاظت از Ban
+- **محدودیت نرخ** — ۲۰۰ پیام/روز، ۱ ثانیه فاصله
+- **گرم‌کردن اکانت** — اکانت جدید ۳۰ دقیقه با نرخ کم
+- **مدیریت FloodWait** — ۶۰ ثانیه صبر بعد از Flood + هماهنگی بین همه loops
+- **تشخیص هشدار تلگرام** — پیام از 777000 → شمارش + نوتیف OWNER
+- **غیرفعال‌سازی خودکار** — اگه ban شد، اکانت متوقف می‌شه
+
+### 💰 سیستم مالی
+- **کیف پول کاربر** — شارژ/کسر/پرداخت با موجودی
+- **درگاه پرداخت** — Zarinpal + Zibal + کارت به کارت + تتر TRC20
+- **کد تخفیف** — درصد تخفیف + محدودیت استفاده
+- **لایسنس چندبارمصرف** — max_uses قابل تنظیم (۱ تا ۱۰۰۰)
+- **ساخت گروهی لایسنس** — تا ۱۰۰ لایسنس همزمان
+- **تمدید خودکار** — از کیف پول وقتی اشتراک منقضی شد
+- **ربات اختصاصی** — کاربر ربات خودش رو می‌خره + توکن می‌فرسته
+
+### 👥 سیستم کاربری
+- **۴ نقش** — OWNER / ADMIN / RESELLER / USER
+- **نمایندگی** — مشتری جمع کن + مدیریت مشتری‌ها
+- **همکاری (Affiliate)** — ۱۰٪ کمیسیون خودکار
+- **دعوت دوستان** — جایزه اشتراک هدیه بعد از ۳ دعوت
+
+### 🌐 پنل وب
+- **پنل کاربر** — ورود با کد لایسنس (بدون رمز عبور)
+  - داشبورد: موجودی + اشتراک + سلف‌بات‌ها
+  - کیف پول: موجودی + تراکنش‌ها
+  - سفارش‌ها: لیست + پرداخت با کیف پول
+  - اکانت‌ها: انتخاب + Live Session
+  - چت‌ها: لیست چت‌ها + ارسال پیام
+  - تنظیمات: پروکسی + api_id + phone
+- **پنل ادمین** — ورود با username/password
+  - داشبورد: MRR + ARPU + churn rate
+  - آنالیتیکس: نمودار درآمد + تفکیک اشتراک‌ها
+  - کاربران: لیست + جستجو + مدیریت
+  - درگاه‌های پرداخت: فعال/غیرفعال + مرچنت
+  - خروجی CSV سفارش‌ها
+
+### 🔐 امنیت
+- **رمز دو مرحله‌ای (2FA)** — تغییر/حذف/بازیابی/ایمیل
+- **دستگاه‌های لاگین‌شده** — لیست + بستن
+- **کد لاگین** — دریافت کد ورود اکانت
+- **۲FA به‌صورت hash** — salted SHA-256 (نه plaintext)
+- **اکانت مالک** — 2FA غیرقابل تغییر
+
+### 🔄 آپدیت خودکار
+- **بررسی آپدیت** — هر ۶ ساعت
+- **اعمال آپدیت** — git fetch + reset --hard + restart
+- **rollback** — بازگشت به نسخه‌ی قبل (با صفحه‌بندی)
+- **تشخیص تغییرات محلی** — اگه فایل‌ها دستی replace شده باشند
+
+### ⏰ اتوماسیون
+- **پیام زمان‌بندی‌شده** — ارسال در زمان مشخص
+- **پاسخ خودکار** — بر اساس کلمه‌ی کلیدی
+
+---
+
+## 🚀 نصب
+
+### روش اول: نصب خودکار (توصیه‌شده)
+
+```bash
+sudo bash <(curl -sL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/install.sh)
+```
+
+ازت می‌پرسه:
+- آیدی عددی تلگرام (از @userinfobot)
+- توکن ربات ادمین (از @BotFather)
+- api_id و api_hash (از my.telegram.org)
+- نام کاربری و پسورد پنل ادمین
+- دامنه‌ی پنل (اختیاری)
+
+بعد از نصب:
+1. در تلگرام `/start` بزن
+2. اکانت اضافه کن (شماره + کد + 2FA)
+3. پنل وب روی `https://your-domain/u/login.html`
+
+### روش دوم: نصب دستی
 
 ```bash
 git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
 cd /opt/cianet
-sudo API_ID=YOUR_API_ID API_HASH=YOUR_API_HASH ADMIN_BOT_TOKEN=YOUR_TOKEN ADMIN_ID=YOUR_ID bash quick_install.sh
-```
 
-یا interactive (ازت می‌پرسه):
+# ساخت venv
+sudo python3 -m venv .venv
+sudo .venv/bin/pip install -r requirements.txt
 
-```bash
-git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
-cd /opt/cianet
-sudo bash quick_install.sh
-```
-
-این اسکریپت همه‌چیز رو انجام می‌ده:
-- ✅ venv + telethon + fastapi نصب
-- ✅ کاربر `cianet` می‌سازه
-- ✅ env file با credentials شما
-- ✅ config.json خالی معتبر
-- ✅ systemd service `selfbot` (ربات)
-- ✅ systemd service `cianet-panel` (پنل وب port 8000)
-- ✅ هر دو سرویس رو start می‌کنه
-
-### نصب مرحله‌ای (قدیمی)
-
-```bash
-git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
-cd /opt/cianet
-sudo bash install_service.sh    # ربات سلف
-sudo bash install_panel.sh      # پنل وب
-```
-
----
-
-## ✨ Features
-
-### 🤖 ربات سلف (Telegram)
-
-| قابلیت | توضیح |
-|--------|------|
-| **چند اکانتی** | مدیریت unlimited اکانت کاربر از یک پنل |
-| **پنل شیشه‌ای** | UI کامل با callback buttons + nav stack |
-| **قابلیت‌های خودکار** | name/bio loop, presence, tabchi, dice |
-| **پروفایل پویا** | ساعت در name، bio متغیر |
-| **antiban** | jitter per-tag, detection بدونه الگوی synchronized |
-| **session guard** | auto-recovery، corruption detection |
-| **proxy support** | SOCKS5/HTTP/MTProto per-account |
-
-### 👥 نقش‌ها
-
-- **OWNER** — کل سیستم + auto-updater + web panel
-- **ADMIN** — مدیریت کاربران و اکانت‌ها
-- **RESELLER** — مشتری‌های خودش + ربات اختصاصی
-- **USER** — اکانت خودش + اشتراک
-
-### 🌐 Web Panel
-
-- 🔐 ورود با bcrypt (PANEL_ADMIN_USER + PANEL_ADMIN_PASS_HASH)
-- 📊 ۹ صفحه: داشبورد، کاربران، سلف‌بات‌ها، مالی، تیکت‌ها، audit، نسخه، هش، تنظیمات
-- 🎨 Dark theme (Vercel/Linear-inspired) + RTL
-- ⚡ Frontend استاتیک در `web_static/` (بدون نیاز به npm)
-- 🔄 در دسترس از: `http://localhost:8000/app/login.html` یا `https://panel.domain.ir/app/login.html`
-
-### 🔒 امنیت
-
-- bcrypt password hashing (با sha256 fallback)
-- ۸-hour session cookies با random 32-byte token
-- session در memory (در restart پاک می‌شه)
-- فقط OWNER می‌تونه login کنه (single-user model)
-- `(Optional)` Cloudflare Zero Trust access policy برای 2FA
-
-### 🔄 آپدیت خودکار + Rollback
-
-- دکمه‌ی «🔄 آپدیت و ورژن» در پنل OWNER
-- backup خودکار از main.py قبل از هر آپدیت
-- rollback به هر نسخه‌ی قدیمی با یک کلیک
-- (Optional) `CIANET_MIN_COMMIT` env برای supply chain protection
-
----
-
-## 🌐 Web Panel
-
-### Frontend
-
-| آدرس | محتوا |
-|------|------|
-| `/app/login.html` | ورود |
-| `/app/dashboard.html` | داشبورد آمار |
-| `/app/users.html` | مدیریت کاربران |
-| `/app/accounts.html` | مدیریت سلف‌بات‌ها |
-| `/app/finance.html` | پرداخت‌ها |
-| `/app/tickets.html` | تیکت‌ها |
-| `/app/audit.html` | Audit log |
-| `/app/version.html` | آپدیت/rollback |
-| `/app/tools.html` | api_id/api_hash |
-| `/app/settings.html` | تنظیمات |
-
-### Backend API
-
-| آدرس | محتوا |
-|------|------|
-| `GET /api/health` | Health check (public) |
-| `POST /api/auth/login` | Login |
-| `GET /api/dashboard` | آمار کلی |
-| `GET /api/users` | لیست کاربران |
-| `GET /api/accounts` | لیست سلف‌بات‌ها |
-| `GET /api/finance/payments` | پرداخت‌ها |
-| `GET /api/tickets` | تیکت‌ها |
-| `GET /api/audit-log` | Audit log |
-| `GET /api/version` | اطلاعات نسخه |
-| `GET /api/tools/api-creds` | api_id/api_hash pool |
-| `/api/docs` | Swagger UI (interactive) |
-
----
-
-## 📁 File Structure
-
-```
-/opt/cianet/
-├── main.py              # ربات اصلی (selfbot + admin + saas)
-├── cianet_updater.py    # auto-updater module
-├── web_panel.py         # FastAPI backend (port 8000)
-├── web_static/          # Frontend استاتیک (vanilla JS)
-│   ├── app.js
-│   ├── styles.css
-│   └── *.html           # 9 pages
-├── web/                 # (اختیاری) Next.js frontend
-├── install_service.sh   # نصب ربات
-├── install_panel.sh     # نصب پنل وب
-├── setup.sh             # legacy install (interactive)
-├── requirements.txt
-└── data/
-    ├── config.json      # api_id, api_hash, sessions per account
-    ├── saas.db          # users, subscriptions, payments, tickets
-    ├── bot_data.db      # account metadata
-    └── sessions/        # .session files (chmod 600)
-```
-
----
-
-## ⚙️ Environment Variables
-
-در `/etc/cianet.env`:
-
-### ضروری
-
-```bash
-API_ID=12345                       # از my.telegram.org
-API_HASH=abc123def456...           # از my.telegram.org
-ADMIN_BOT_TOKEN=123456:ABC-DEF      # از @BotFather
-ADMIN_ID=123456789                 # Telegram user_id شما
-```
-
-### اختیاری
-
-```bash
-# Multi-OWNER (اگه چند صاحب داری)
-OWNER_IDS=123456789,987654321
-
-# Bootstrap api_id (اگه config.json خالی شد)
-CIANET_API_ID=12345
-CIANET_API_HASH=abc123def456...
-
-# Auto-updater supply chain protection
-CIANET_MIN_COMMIT=<40-char SHA از آخرین شناخته‌شده‌ی خوب>
-
-# Web panel auth
+# ساخت env file
+sudo tee /etc/selfbot.env > /dev/null << 'EOF'
+API_ID=YOUR_API_ID
+API_HASH=YOUR_API_HASH
+ADMIN_BOT_TOKEN=YOUR_BOT_TOKEN
+ADMIN_ID=YOUR_TELEGRAM_ID
 PANEL_ADMIN_USER=admin
-PANEL_ADMIN_PASS_HASH=$2b$12$...   # bcrypt hash
-PANEL_SESSION_SECRET=<32-byte hex>
+PANEL_ADMIN_PASS_HASH=sha256:YOUR_HASH
+PANEL_URL=https://your-domain.com
+EOF
 
-# Web panel URL (برای دکمه‌ی «پنل وب» در ربات)
-PANEL_URL=https://panel.cianet.ir
-
-# CORS
-PANEL_CORS_ORIGINS=https://panel.cianet.ir,http://localhost:3000
-
-# Helper bot (اختیاری)
-HELPER_BOT_TOKEN=...
-```
-
----
-
-## 🛠️ Operations
-
-### سرویس‌ها
-
-```bash
-# ربات اصلی
-sudo systemctl status cianet
-sudo systemctl restart cianet
-sudo journalctl -u cianet -f
-
-# پنل وب
-sudo systemctl status cianet-panel
-sudo systemctl restart cianet-panel
-sudo journalctl -u cianet-panel -f
-
-# (اگه Cloudflare Tunnel انتخاب کردی)
-sudo systemctl status cianet-tunnel
-sudo journalctl -u cianet-tunnel -f
-```
-
-### بکاپ
-
-```bash
-# بکاپ کامل (config + sessions + databases):
-cd /opt/cianet
-sudo tar -czf /tmp/cianet-backup-$(date +%F).tar.gz data/
-
-# یا از داخل ربات: پنل OWNER → 💾 بکاپ و بازیابی
-```
-
-### آپدیت
-
-```bash
-# روش ۱: از داخل ربات (توصیه‌شده)
-# پنل OWNER → 🔄 آپدیت و ورژن → 📥 اعمال آپدیت
-
-# روش ۲: manual
-cd /opt/cianet
-sudo git pull origin main
-sudo systemctl restart cianet cianet-panel
-```
-
-### Rollback
-
-```bash
-# از داخل ربات: پنل OWNER → 🔄 آپدیت و ورژن → ↩️ لیست نسخه‌های قابل rollback
-# یا از web panel: /app/version.html
-```
-
----
-
-## 🔐 Security Notes
-
-- **session files** = کلید takeover اکانت‌ها. همیشه با `chmod 600` ذخیره می‌شن
-- **config.json** = شامل api_id, api_hash, phone. با `chmod 600` ذخیره می‌شه
-- **saas.db / bot_data.db** = PII + payments. با `chmod 600` بعد از init
-- **دکمه‌ی antiban** = قبل از عملیات حساس (terminate sessions, 2FA reset) روی اکانت‌های خارجی، تأیید دوم می‌خواد
-
-### توصیه‌ها
-
-1. **حتماً** توکن GitHub و سرویس‌های ابری رو بعد از استفاده revoke کن
-2. اگه از Cloudflare Tunnel استفاده می‌کنی، Zero Trust Access Policy فعال کن
-3. password پنل وب رو قوی بزار (۱۲+ کاراکتر)
-4. هر چند ماه یک‌بار از `/app/audit.html` لاگ‌ها رو بررسی کن
-
----
-
-## 🐛 Troubleshooting
-
-### پنل بالا نمیاد
-
-```bash
-sudo systemctl status cianet-panel
-sudo journalctl -u cianet-panel --no-pager -n 30
-```
-
-### خطای "Cannot uninstall typing_extensions"
-
-این یعنی apt و pip conflict دارن. راه‌حل: از venv استفاده کن (در install_panel.sh خودکار انجام می‌شه).
-
-```bash
-sudo rm -rf /opt/cianet/.venv
-sudo bash /opt/cianet/install_panel.sh
-```
-
-### خطای "Address already in use" (port 8000)
-
-```bash
-sudo lsof -i :8000
-sudo kill <PID>
-sudo systemctl restart cianet-panel
-```
-
-### Cloudflare Tunnel وصل نمی‌شه
-
-```bash
-sudo systemctl status cianet-tunnel
-sudo journalctl -u cianet-tunnel --no-pager -n 20
-```
-
-اگه خطای "token invalid" داد، tunnel رو در Cloudflare dashboard دوباره بساز.
-
-### ربات کرش می‌کنه
-
-```bash
-sudo journalctl -u cianet --no-pager -n 50
-# یا:
-DEBUG=1 sudo systemctl restart cianet
-```
-
----
-
-## 📋 Changelog
-
-### v2.1.7 (current)
-
-- ✅ دکمه‌ی «🌐 پنل وب» در ربات با URL buttons که مستقیم مرورگر رو باز می‌کنن
-- ✅ تشخیص خودکار وضعیت cianet-panel و cianet-tunnel
-- ✅ README مرتب و تمیز
-
-### v2.1.6
-
-- ☁️ پشتیبانی از Cloudflare Tunnel + Zero Trust در install_panel.sh
-- ✅ نصب خودکار `cloudflared` با apt/yum/binary fallback
-- ✅ systemd service `cianet-tunnel` با auto-restart
-- ✅ ثبت خودکار `PANEL_URL` در env
-
-### v2.1.5
-
-- 🔐 Username case-insensitive در login
-- 🐛 فیکس DB schema در ۵ endpoint (amount, approved_at, text, etc.)
-- 🌐 Frontend استاتیک (web_static/) — بدون نیاز به npm
-- 🤖 دکمه‌ی «🌐 پنل وب» در پنل OWNER ربات
-
-### v2.1.0 — v2.1.4
-
-- 🌐 پنل وب کامل (FastAPI + Next.js frontend)
-- 🐛 فیکس venv برای typing_extensions conflict
-- 🐛 فیکس password prompt UX
-
-### v2.0.8 — v2.0.13
-
-- 🔄 آپدیت خودکار + Rollback (دکمه‌ی «🔄 آپدیت و ورژن»)
-- 🚀 Owner quick-actions panel
-- 🔒 Supply chain protection (CIANET_MIN_COMMIT)
-- 📊 Resilience fixes (wizard TTL, logs trim)
-
-### v2.0.0 — v2.0.7
-
-- 🤖 پایه‌ی ربات سلف + پنل ادمین
-- 🐛 ۱۴ باگ critical فیکس شد
-- 🎨 UI overhaul با nav stack
-
----
-
-## 🗑️ Uninstall / حذف کامل
-
-برای حذف کامل CiaNet از سرور:
-
-```bash
-# ۱. توقف سرویس‌ها
-sudo systemctl stop selfbot cianet-panel cianet-tunnel 2>/dev/null
-
-# ۲. غیرفعال‌سازی سرویس‌ها
-sudo systemctl disable selfbot cianet-panel cianet-tunnel 2>/dev/null
-
-# ۳. حذف فایل‌های systemd
-sudo rm -f /etc/systemd/system/selfbot.service
-sudo rm -f /etc/systemd/system/cianet-panel.service
-sudo rm -f /etc/systemd/system/cianet-tunnel.service
+# ساخت systemd service
+sudo cp install_service.sh /etc/systemd/system/selfbot.service
 sudo systemctl daemon-reload
-
-# ۴. حذف nginx config (اگه تنظیم کردی)
-sudo rm -f /etc/nginx/sites-enabled/cianet-panel
-sudo rm -f /etc/nginx/sites-available/cianet-panel
-sudo systemctl reload nginx 2>/dev/null
-
-# ۵. حذف فایل env (شامل credentials)
-sudo rm -f /etc/cianet.env /etc/selfbot.env
-
-# ۶. حذف دایرکتوری پروژه
-sudo rm -rf /opt/cianet
-
-# ۷. (اختیاری) حذف کاربر cianet
-sudo userdel cianet 2>/dev/null
-
-# ۸. (اختیاری) حذف cloudflared
-sudo apt remove -y cloudflared 2>/dev/null
-sudo rm -f /usr/local/bin/cloudflared
-
-# ۹. (اختیاری) حذف nginx config بکاپ
-sudo rm -f /etc/nginx/sites-available/cianet-panel*
-
-# ۱۰. تأیید حذف
-systemctl status selfbot 2>&1 | head -3
-systemctl status cianet-panel 2>&1 | head -3
-ls /opt/cianet 2>&1
+sudo systemctl enable selfbot
+sudo systemctl start selfbot
 ```
 
 ---
 
-## 📜 License
+## 📋 پیش‌نیازها
 
-MIT License — see [LICENSE](LICENSE) file.
-
----
-
-## 🤝 Contributing
-
-PR ها welcome هستن. لطفاً قبل از submit:
-
-1. `python3 -c "import ast; ast.parse(open('main.py').read())"` رو اجرا کن
-2. shell syntax رو با `bash -n install_panel.sh` بررسی کن
-3. commit message مطابق با conventional commits باشه
+- Python 3.10+
+- Ubuntu 20.04+ / Debian 11+
+- Telegram API credentials (api_id + api_hash)
+- Bot token (از @BotFather)
+- دامنه + Cloudflare Tunnel (برای پنل وب از بیرون)
 
 ---
 
-<div align="center">
+## 🏗 معماری
 
-**ساخته‌شده با ❤️ توسط [DLSDT](https://github.com/DLSDT)**
+```
+┌─────────────────────────────────────────────────┐
+│                   Telegram                       │
+│                                                   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ ربات ادمین │  │ ربات سلف  │  │ ربات کاربر│       │
+│  │ (SaaSBot) │  │ (SelfBot) │  │ (Helper)  │       │
+│  └─────┬─────┘  └─────┬─────┘  └──────────┘       │
+│        │               │                           │
+│        └───────┬───────┘                           │
+│                │                                   │
+├────────────────┼─────────────────────────────────┤
+│           VPS (Server)                            │
+│                │                                   │
+│  ┌─────────────┴─────────────┐                    │
+│  │     main.py (24K lines)    │                    │
+│  │  ┌─────┐  ┌─────┐  ┌─────┐│                    │
+│  │  │SaaSBot│  │SelfBot│  │AdminBot││                │
+│  │  └─────┘  └─────┘  └─────┘│                    │
+│  │       web_panel.py         │                    │
+│  │  (embed uvicorn port 8000) │                    │
+│  │       cianet_updater.py    │                    │
+│  └───────────────────────────┘                    │
+│                │                                   │
+│  ┌──────┐  ┌──────┐  ┌──────┐                     │
+│  │saas.db│  │bot.db│  │config│                     │
+│  └──────┘  └──────┘  └──────┘                     │
+│                │                                   │
+├────────────────┼─────────────────────────────────┤
+│           Cloudflare Tunnel                       │
+│                │                                   │
+│         https://your-domain                        │
+│                                                   │
+│  ┌──────────┐  ┌──────────┐                       │
+│  │ /u/*     │  │ /app/*   │                       │
+│  │ پنل کاربر│  │ پنل ادمین│                       │
+│  └──────────┘  └──────────┘                       │
+└─────────────────────────────────────────────────┘
+```
 
-اگه این پروژه بهت کمک کرد، یه ⭐ بده!
+---
 
-</div>
+## 🎛 تنظیمات درگاه پرداخت
+
+در ربات تلگرام: `🎛 پنل مدیریت` → `💳 درگاه‌های پرداخت`
+
+| درگاه | نوع | نیاز |
+|-------|-----|------|
+| 🟡 Zarinpal | آنلاین | کد مرچنت |
+| 🟢 Zibal | آنلاین | کد مرچنت |
+| 💳 کارت به کارت | دستی | تأیید OWNER |
+| 💵 تتر TRC20 | خودکار | کیف پول USDT |
+| 💰 کیف پول | فوری | شارژ OWNER |
+
+---
+
+## 📊 API Endpoints
+
+### کاربر (با لایسنس)
+| Method | Path | توضیح |
+|--------|------|------|
+| POST | `/api/user/login` | ورود با کد لایسنس |
+| GET | `/api/user/me` | اطلاعات کاربر |
+| GET | `/api/user/wallet` | موجودی + تراکنش‌ها |
+| GET | `/api/user/orders` | لیست سفارش‌ها |
+| GET | `/api/user/chats` | لیست چت‌ها |
+| POST | `/api/user/chats/{id}/send` | ارسال پیام |
+| GET | `/api/user/account/settings` | تنظیمات اکانت |
+
+### ادمین (با session)
+| Method | Path | توضیح |
+|--------|------|------|
+| GET | `/api/analytics/overview` | MRR + ARPU + churn |
+| GET | `/api/analytics/daily-revenue` | نمودار درآمد |
+| GET | `/api/analytics/export` | خروجی CSV |
+| GET | `/api/users` | لیست کاربران |
+| POST | `/api/users/{id}/wallet/credit` | شارژ کیف پول |
+
+---
+
+## 📝 Changelog
+
+### v2.11.5
+- ۴ باگ فیکس: admin guards، wallet race، deadlock، 2FA purge
+- `_purge_old_2fa_plaintext` اضافه شد
+- `owner_web_panel` از ADMIN حذف شد
+
+### v2.11.4
+- ۶ باگ فیکس: duplicate buttons، admin guards، dedicated bot rowcount
+- `dedicated_bots` INSERT با reseller_id درست
+- `_tabchi_loop` _flood_until با `(e.seconds or 30)`
+
+### v2.11.3
+- ۵ باگ فیکس: admin guards، double-charge، order-before-debit
+- `dedicated_bot_price()` helper استفاده شد
+- `_purge_old_2fa_plaintext` اضافه شد
+
+### v2.11.0
+- بازگشت به v2.10.5 base (پایدار)
+- اضافه‌شدن: ربات اختصاصی + نمایندگی + 2FA block + connection cleanup
+
+### v2.10.5
+- ۸ باگ فیکس از ۵ ممیزی موازی
+- wallet_transactions migration + auto_renew atomic + 2FA salted
+
+### v2.10.0
+- ۱۲ باگ فیکس از ۵ ممیزی
+- فاز ۱-۵: تخفیف + کیف پول + سفارش + زمان‌بندی + affiliate
+
+### v2.9.0
+- فاز ۳: آنالیتیکس + نمودار
+- فاز ۴: درگاه Zarinpal + auto-renew
+- فاز ۵: زمان‌بندی + auto-reply + affiliate
+
+### v2.8.0
+- کیف پول کاربر + پنل وب غیرمتمرکز + ساخت گروهی لایسنس
+
+### v2.7.0
+- ساخت گروهی لایسنس (۱ تا ۱۰۰)
+
+### v2.6.0
+- UI حرفه‌ای + ۲۲ باگ فیکس
+
+---
+
+## 📄 License
+
+MIT License — استفاده آزاد
+
+---
+
+## 🔗 لینک‌ها
+
+- [گیت‌هاب](https://github.com/DLSDT/CiaNet.ir)
+- [Issues](https://github.com/DLSDT/CiaNet.ir/issues)
+- [Telegram](https://t.me/CiaNetSelf)
