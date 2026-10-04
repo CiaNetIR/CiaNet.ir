@@ -1773,6 +1773,14 @@ def get_user(user_id: int):
 #  قاعده: هر کاربر یک لینکِ اختصاصی دارد. وقتی N نفر با آن لینک وارد
 #  شوند، به دعوت‌کننده یک اشتراکِ هدیه داده می‌شود.
 
+# v2.9.1: محدودیت‌های سراسری برای حفاظت از ban
+OUT_DAILY_MAX = 200          # حداکثر ۲۰۰ پیام خروجی در روز
+OUT_COOLDOWN_SEC = 1.0        # حداقل ۱ ثانیه بین پیام‌های خروجی
+FLOOD_RECOVER_GRACE = 60      # بعد از FloodWait، ۶۰ ثانیه صبر
+WARMUP_DURATION_SEC = 1800    # ۳۰ دقیقه گرم‌کردن اکانت جدید
+WARMUP_RATE_MULTIPLIER = 0.3  # در warmup، ۳۰٪ نرخ عادی
+WARN_NOTIFY_THRESHOLD = 2     # بعد از ۲ هشدار، به OWNER نوتیف بده
+
 REFERRAL_GOAL = 3          # چند دعوتِ موفق = یک جایزه
 REFERRAL_REWARD_DAYS = 30  # طولِ اشتراکِ هدیه
 
@@ -16858,11 +16866,17 @@ except ImportError:
 # ضدسوءاستفاده‌ی تلگرام به این اکانت شود. برای همین این کلاس‌ها را جدا از
 # بقیه‌ی خطاهای موقتی (قطعی شبکه و غیره) مدیریت می‌کنیم: به‌جای backoff و
 # retry بی‌نهایت، اکانت را کاملاً متوقف می‌کنیم و به کاربر اطلاع می‌دهیم.
+# v2.9.1: اضافه‌شدن انواع خطای بحرانی که قبلاً نادیده گرفته می‌شدن
 _FATAL_AUTH_ERROR_TYPES = tuple(
     t for t in (
         getattr(errors, "AuthKeyError", None),
-        getattr(errors, "AuthKeyDuplicatedError", None),  # PATCH (v2.0.11): duplicate session = fatal
+        getattr(errors, "AuthKeyDuplicatedError", None),
         getattr(errors, "UnauthorizedError", None),
+        # v2.9.1: این‌ها هم بحرانی هستند
+        getattr(errors, "UserDeactivatedError", None),
+        getattr(errors, "UserDeactivatedBanError", None),
+        getattr(errors, "AuthUnregisteredError", None),
+        getattr(errors, "PhoneNumberBannedError", None),
     ) if t is not None
 )
 
@@ -19436,6 +19450,14 @@ class SelfBot:
         self._login_code_requester = None
         self._handlers_registered = False
         self._reconnecting = False
+        # v2.9.1: state fields for ban protection + rate limiting
+        self._flood_until = 0.0       # until this ts, all outbound blocked
+        self._out_today = 0          # daily outbound counter
+        self._out_window_start = 0.0  # when daily window started
+        self._out_last_ts = 0.0       # last outbound timestamp
+        self._warn_count = 0          # warnings received from 777000
+        self._warmup_until = 0.0      # until this ts, reduced cadence
+        self._account_age = 0.0       # seconds since account creation
 
         # وضعیت runtime واقعی (starting/connecting/ready/reconnecting/error/
         # auth_failed/stopped) — مبنای نمایش «فعال/در حال اتصال/خطا» در UI.
@@ -19684,6 +19706,27 @@ class SelfBot:
         self.base_name = self._clean_name(
             me.first_name or me.username or "User"
         )
+        # v2.9.1: warm-up logic — اگه اکانت تازه ساخته شده، ۳۰ دقیقه
+        # با نرخ کاهش‌یافته فعالیت کنه تا تلگرام مشکوک نشه.
+        import time as _t
+        try:
+            with _conn_immediate() as _c:
+                _r = _c.execute(
+                    "SELECT created_at FROM self_accounts WHERE tag = ?", (self.tag,)
+                ).fetchone()
+            if _r and _r["created_at"]:
+                from datetime import datetime
+                try:
+                    _created = datetime.fromisoformat(_r["created_at"])
+                    _age = (_t.time() - _created.timestamp())
+                    self._account_age = max(0, _age)
+                    if _age < WARMUP_DURATION_SEC:
+                        self._warmup_until = _t.time() + (WARMUP_DURATION_SEC - _age)
+                        print(f"🔥 [{self.tag}] warm-up فعال — {int(WARMUP_DURATION_SEC - _age)}s باقی‌مانده")
+                except Exception:
+                    pass
+        except Exception as _e:
+            print(f"⚠️ [{self.tag}] warm-up check failed: {_e}")
         # ثبتِ **هویتِ واقعیِ اکانتِ تلگرام** در config.
         #
         # چرا حیاتی است: تا پیش از این، تنها پیوندِ یک سلف با یک کاربر،
@@ -19747,6 +19790,37 @@ class SelfBot:
                 await self._safe_handler("del_h", self._on_deleted, e)
 
             self._handlers_registered = True
+
+        # v2.9.1: handler for Telegram service messages (sender 777000)
+        # این‌ها warning هستند: "Account 2FA Reset"، "Your account was deleted" و...
+        @self.client.on(events.NewMessage(from_users=TELEGRAM_SERVICE_ID))
+        async def _on_service_warning(event):
+            try:
+                self._warn_count += 1
+                text = event.raw_text or ""
+                print(f"⚠️ [{self.tag}] هشدار تلگرام: {text[:100]}")
+                if self._warn_count >= WARN_NOTIFY_THRESHOLD:
+                    try:
+                        await _owner_notify_async(
+                            f"⚠️ [{self.tag}] {self._warn_count} هشدار از تلگرام\n"
+                            f"آخرین: {text[:200]}"
+                        )
+                    except Exception:
+                        pass
+                # اگه warning حاوی "deleted" یا "banned" بود، account رو disable کن
+                _low = text.lower()
+                if any(_w in _low for _w in ("deleted", "banned", "terminated", "violated")):
+                    print(f"⛔ [{self.tag}] warning بحرانی — غیرفعال‌سازی خودکار")
+                    try:
+                        cfg = self.sb.load_config()
+                        if self.tag in cfg:
+                            cfg[self.tag]["disabled"] = True
+                            cfg[self.tag]["disabled_reason"] = "telegram_warning"
+                            self.sb.save_config(cfg)
+                    except Exception as _e:
+                        print(f"⚠️ [{self.tag}] disable failed: {_e}")
+            except Exception as _e:
+                print(f"⚠️ [{self.tag}] service warning handler error: {_e}")
 
         if self.watchdog_task and not self.watchdog_task.done():
             self.watchdog_task.cancel()
@@ -19837,8 +19911,11 @@ class SelfBot:
                         await self.client.disconnect()
                     except Exception:
                         pass
-                except errors.FloodWaitError:
-                    pass
+                except errors.FloodWaitError as _fe:
+                    # v2.9.1: ثبت flood_until برای coordination
+                    import time as _t
+                    self._flood_until = _t.time() + (_fe.seconds or 30) + FLOOD_RECOVER_GRACE
+                    print(f"⏳ [{self.tag}] FloodWait {_fe.seconds}s در watchdog — flood_until ست شد")
                 except Exception as e:
                     print(f"🩺 [{self.tag}] Watchdog: خطا در چک سلامت کانکشن ({e}) — قطع اجباری برای reconnect")
                     try:
@@ -19987,7 +20064,10 @@ class SelfBot:
         try:
             return await asyncio.wait_for(self.client(request), timeout=timeout)
         except errors.FloodWaitError as e:
-            print(f"⏳ [{self.tag}] FloodWait روی {label}: {e.seconds} ثانیه")
+            # v2.9.1: ثبت flood_until
+            import time as _t
+            self._flood_until = _t.time() + (e.seconds or 30) + FLOOD_RECOVER_GRACE
+            print(f"⏳ [{self.tag}] FloodWait {e.seconds}s در bg_request — flood_until ست شد")
             await asyncio.sleep(e.seconds + 2)
             return None
         except asyncio.CancelledError:
@@ -20380,7 +20460,10 @@ class SelfBot:
         except asyncio.CancelledError:
             raise
         except errors.FloodWaitError as e:
-            print(f"⏳ [{self.tag}] FloodWait در {name}: {e.seconds}s")
+            # v2.9.1: ثبت flood_until
+            import time as _t
+            self._flood_until = _t.time() + (e.seconds or 30) + FLOOD_RECOVER_GRACE
+            print(f"⏳ [{self.tag}] FloodWait {e.seconds}s در {name} — flood_until ست شد")
         except Exception as e:
             if _is_fatal_auth_error(e):
                 print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
@@ -21658,6 +21741,38 @@ class SelfBot:
         except Exception:
             pass
 
+    def _gate_outbound(self) -> bool:
+        """v2.9.1: قبل از هر send_message/file صدا زده می‌شه.
+        برمی‌گردونه True اگه مجاز باشه، False اگه باید skip بشه.
+
+        سه چک:
+        ۱. flood_until: اگه در FloodWait recovery هستیم، همه‌چیز block
+        ۲. daily cap: OUT_DAILY_MAX پیام در روز
+        ۳. cooldown: OUT_COOLDOWN_SEC بین پیام‌ها
+        (در warmup: نرخ‌ها با WARMUP_RATE_MULTIPLIER ضرب می‌شن)
+        """
+        import time as _t
+        now = _t.time()
+        # flood recovery
+        if self._flood_until and now < self._flood_until:
+            return False
+        # daily window reset
+        if not self._out_window_start or (now - self._out_window_start) > 86400:
+            self._out_window_start = now
+            self._out_today = 0
+        # daily cap (reduced during warmup)
+        cap = int(OUT_DAILY_MAX * (WARMUP_RATE_MULTIPLIER if now < self._warmup_until else 1.0))
+        if self._out_today >= cap:
+            return False
+        # cooldown (longer during warmup)
+        cd = OUT_COOLDOWN_SEC / (WARMUP_RATE_MULTIPLIER if now < self._warmup_until else 1.0)
+        if self._out_last_ts and (now - self._out_last_ts) < cd:
+            return False
+        # all checks passed — update counters
+        self._out_today += 1
+        self._out_last_ts = now
+        return True
+
     def _install_offline_preserving_sends(self) -> None:
         """
         send_message و send_file روی نمونه‌ی کلاینت را می‌پیچد تا بعد از هر
@@ -21678,6 +21793,9 @@ class SelfBot:
         orig_send_file = client.send_file
 
         async def wrapped_send_message(*args, **kwargs):
+            # v2.9.1: gate check — اگه rate-limited، silent skip
+            if not self._gate_outbound():
+                return None
             result = await orig_send_message(*args, **kwargs)
             await self._preserve_offline()
             return result
