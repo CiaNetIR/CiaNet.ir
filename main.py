@@ -3036,10 +3036,9 @@ def create_license(license_type: str, duration_days: int, created_by: int,
          admin    → duration_days باید None باشد
        مقادیر malformed هرگز وارد DB نمی‌شوند.
 
-    ۳) طبق اسپک «تمام لایسنس‌های جدید فقط یک‌بارمصرف‌اند»: max_uses همیشه
-       ۱ است — هر مقداری که فراخواننده (به‌خاطر سازگاری با کد/تست قدیمی)
-       ارسال کند نادیده گرفته می‌شود؛ لایسنس‌های قدیمیِ max_uses>1 در
-       دیتابیس دست‌نخورده می‌مانند.
+    ۳) v2.10.1: max_uses از پارامتر خوانده می‌شه (default=1).
+       می‌تونه ۱ تا ۱۰۰۰ باشه — یعنی یه لایسنس رو می‌شه چند بار استفاده کرد.
+       مثلاً max_uses=5 یعنی ۵ کاربر می‌تونن با همین کد اشتراک فعال کنن.
 
     در شکست: {"error": "..."} برمی‌گرداند (هیچ ردیفی ساخته نمی‌شود).
     """
@@ -3071,6 +3070,11 @@ def create_license(license_type: str, duration_days: int, created_by: int,
         if duration_days is not None:
             return {"error": "invalid_duration"}
         reseller_user_limit = None
+    # v2.10.1: اعتبارسنجی max_uses
+    if max_uses is None:
+        max_uses = 1
+    if not isinstance(max_uses, int) or isinstance(max_uses, bool) or max_uses < 1 or max_uses > 1000:
+        return {"error": "invalid_max_uses"}
     with _conn() as c:
         # احتمال برخورد کد تصادفی عملاً صفر است، ولی برای اطمینان یک retry
         # ساده می‌گذاریم؛ کل چرخه‌ی تولید+چک+درج در یک تراکنش است تا برخورد
@@ -3091,15 +3095,15 @@ def create_license(license_type: str, duration_days: int, created_by: int,
         c.execute(
             "INSERT INTO licenses (code, license_type, duration_days, max_uses, used_count, "
             "reseller_user_limit, created_by, created_at, is_active) "
-            "VALUES (?, ?, ?, 1, 0, ?, ?, ?, 1)",
-            (code, license_type, duration_days, reseller_user_limit, created_by, _now()),
+            "VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1)",
+            (code, license_type, duration_days, max_uses, reseller_user_limit, created_by, _now()),
         )
-    log_action(created_by, "create_license", f"code={code}, type={license_type}")
+    log_action(created_by, "create_license", f"code={code}, type={license_type}, max_uses={max_uses}")
     return get_license(code)
 
 
 def create_license_batch(license_type: str, duration_days, created_by: int,
-                         count: int, reseller_user_limit=None) -> dict:
+                         count: int, reseller_user_limit=None, max_uses: int = 1) -> dict:
     """
     ساخت گروهیِ لایسنس — همان اعتبارسنجیِ create_license، ولی N بار در یک
     تراکنشِ اتمیک. اگر کدی تصادفاً تکرار شد (احتمال عملاً صفر)، فقط همان
@@ -3152,6 +3156,9 @@ def create_license_batch(license_type: str, duration_days, created_by: int,
         reseller_user_limit = None
     licenses = []
     failed = 0
+    # v2.10.1: اعتبارسنجی max_uses
+    if not isinstance(max_uses, int) or isinstance(max_uses, bool) or max_uses < 1 or max_uses > 1000:
+        return {"error": "invalid_max_uses"}
     with _conn() as c:
         for _i in range(count):
             code = _generate_license_code()
@@ -3168,8 +3175,8 @@ def create_license_batch(license_type: str, duration_days, created_by: int,
             c.execute(
                 "INSERT INTO licenses (code, license_type, duration_days, max_uses, used_count, "
                 "reseller_user_limit, created_by, created_at, is_active) "
-                "VALUES (?, ?, ?, 1, 0, ?, ?, ?, 1)",
-                (code, license_type, duration_days, reseller_user_limit, created_by, _now()),
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1)",
+                (code, license_type, duration_days, max_uses, reseller_user_limit, created_by, _now()),
             )
             row = c.execute("SELECT * FROM licenses WHERE code = ?", (code,)).fetchone()
             licenses.append(dict(row))
@@ -3410,7 +3417,11 @@ def _license_created_text(lic: dict) -> str:
     elif lic["license_type"] == LICENSE_TYPE_RESELLER:
         limit = lic.get("reseller_user_limit")
         lines.append(f"👥 سقف:\n{limit if limit else '—'} مشتری")
-    lines.append("🔒 مصرف:\n۱ بار")
+    mu = lic.get("max_uses", 1)
+    if mu > 1:
+        lines.append(f"🔒 مصرف:\n{fa_digits(mu)} بار")
+    else:
+        lines.append("🔒 مصرف:\n۱ بار")
     return "\n".join(lines)
 
 
@@ -9576,7 +9587,9 @@ WIZ_CL_BATCH_QTY = "cl_batch_qty"
 # v2.8.12: کدهای تخفیف
 WIZ_DISCOUNT_PERCENT = "discount_pending_percent"
 WIZ_DISCOUNT_MAX_USES = "discount_pending_max_uses"
-WIZ_DISCOUNT_APPLY_CODE = "discount_apply_code"  # v2.9.0: اعمال کد تخفیف در فاکتور
+WIZ_DISCOUNT_APPLY_CODE = "discount_apply_code"  # v2.9.0
+WIZ_CL_MAX_USES = "cl_pending_max_uses"  # v2.10.1
+WIZ_CL_BATCH_MAX_USES = "cl_batch_pending_max_uses"  # v2.10.1: اعمال کد تخفیف در فاکتور
 WIZ_WALLET_CREDIT_AMOUNT = "wallet_credit_amount"
 WIZ_WALLET_CREDIT_REASON = "wallet_credit_reason"
 WIZ_WALLET_DEBIT_AMOUNT = "wallet_debit_amount"
@@ -14688,6 +14701,37 @@ class SaaSBot:
             await event.respond(_license_result_text(lic))
             return True
 
+        # v2.10.1: max_uses for single license
+        if state == WIZ_CL_MAX_USES:
+            try:
+                mu = _to_int(text)
+                assert 1 <= mu <= 1000
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد بین ۱ و ۱۰۰۰ بفرست:")
+                return True
+            ltype = wiz["data"].get("license_type", LICENSE_TYPE_ACCOUNT)
+            duration = wiz["data"].get("duration_days", 30)
+            self.wizards.pop(event.sender_id, None)
+            lic = create_license(ltype, duration_days=duration,
+                                created_by=event.sender_id, max_uses=mu)
+            await event.respond(_license_result_text(lic))
+            return True
+
+        # v2.10.1: max_uses for batch license
+        if state == WIZ_CL_BATCH_MAX_USES:
+            try:
+                mu = _to_int(text)
+                assert 1 <= mu <= 1000
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد بین ۱ و ۱۰۰۰ بفرست:")
+                return True
+            wiz["data"]["max_uses"] = mu
+            wiz["state"] = WIZ_CL_BATCH_QTY
+            await event.respond(
+                "🔢 حالا تعداد لایسنس‌ها رو بفرست (۱ تا ۱۰۰):",
+            )
+            return True
+
         if state == WIZ_CL_BATCH_RESELLER_LIMIT:
             try:
                 limit = int(text)
@@ -14714,6 +14758,7 @@ class SaaSBot:
             ltype = wiz["data"].get("license_type", LICENSE_TYPE_ACCOUNT)
             duration = wiz["data"].get("duration_days")
             reseller_limit = wiz["data"].get("reseller_user_limit")
+            mu = wiz["data"].get("max_uses", 1)  # v2.10.1
             self.wizards.pop(event.sender_id, None)
             result = create_license_batch(
                 license_type=ltype,
@@ -14721,6 +14766,7 @@ class SaaSBot:
                 created_by=event.sender_id,
                 count=qty,
                 reseller_user_limit=reseller_limit,
+                max_uses=mu,
             )
             summary = _license_batch_result_text(result)
             await event.respond(summary)
@@ -16615,10 +16661,17 @@ class SaaSBot:
                         return
                     duration = int(data.split(":", 1)[1])
                     ltype = wiz["data"].get("license_type", LICENSE_TYPE_ACCOUNT)
-                    self.wizards.pop(event.sender_id, None)
-                    lic = create_license(ltype, duration_days=duration, created_by=event.sender_id)
-                    await event.edit(_license_result_text(lic),
-                                     buttons=[UI.nav_row()])
+                    wiz["data"]["duration_days"] = duration
+                    wiz["data"]["license_type"] = ltype
+                    wiz["state"] = "cl_pending_max_uses"
+                    await event.edit(
+                        "🔢 **تعداد استفاده‌ی مجاز**\n\n"
+                        "این لایسنس چند بار قابل استفاده باشه?\n"
+                        "۱ = یک‌بارمصرف (پیشفرض)\n"
+                        "۵ = ۵ کاربر می‌تونن استفاده کنن\n\n"
+                        "یه عدد بفرست (۱ تا ۱۰۰۰):",
+                        buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                    )
                     return
                 # ──────── ساخت گروهی لایسنس (v2.7.0) ────────
                 # v2.8.12: کدهای تخفیف
@@ -16694,9 +16747,13 @@ class SaaSBot:
                         return
                     duration = int(data.split(":", 1)[1])
                     wiz["data"]["duration_days"] = duration
-                    wiz["state"] = WIZ_CL_BATCH_QTY
+                    wiz["state"] = "cl_batch_pending_max_uses"
                     await event.edit(
-                        "🔢 **تعداد لایسنس** رو بفرست (۱ تا ۱۰۰):",
+                        "🔢 **تعداد استفاده‌ی مجاز برای هر لایسنس**\n\n"
+                        "هر لایسنس چند بار قابل استفاده باشه?\n"
+                        "۱ = یک‌بارمصرف (پیشفرض)\n"
+                        "۵ = ۵ کاربر می‌تونن استفاده کنن\n\n"
+                        "یه عدد بفرست (۱ تا ۱۰۰۰):",
                         buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
                     )
                     return
