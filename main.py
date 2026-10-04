@@ -10662,14 +10662,13 @@ class SaaSBot:
             return f"{sep}({fa_digits(n)})" if n else ""
 
         # ── ۵ بخش با ساختار یکدست ──
-        # Ⅰ فروش
-        # v2.8.12: دکمه‌ی «🎟 کدهای تخفیف» اضافه شد
+        # Ⅰ فروش و مالی
         sec1 = [
             UI.go(f"💳 سفارشات در انتظار{badge(pending_pay)}", "owner_payments", primary=True),
-            UI.go("🏷 قیمت‌گذاری", "owner_pricing"),
-            UI.go("🎫 لایسنس و دسترسی", "license_access"),
             UI.go("💰 تأیید پرداخت", "admin_finance"),
+            UI.go("🏷 قیمت‌گذاری", "owner_pricing"),
             UI.go("🎟 کدهای تخفیف", "owner_discount_codes"),
+            UI.go("💳 درگاه‌های پرداخت", "owner_payment_gateways"),
         ]
         # Ⅱ کاربران
         sec2 = [
@@ -14459,28 +14458,28 @@ class SaaSBot:
             f"به‌صورت خودکار تایید می‌شود."
         )
                 # v2.10.2: فقط درگاه‌های فعال
+                # v2.10.3: فقط درگاه‌های فعال — با برچسب‌های فارسی درست
         buttons = []
         if get_setting("pay_trc20_enabled", "1") == "1":
-            buttons.append([UI.go("ф плат с тер (TRC20)", f"order_tron:{order['id']}".encode())])
+            buttons.append([UI.go("💵 پرداخت با تتر (TRC20)", f"order_tron:{order['id']}".encode())])
         if get_setting("pay_card_enabled", "1") == "1":
-            buttons.append([UI.go("плат с карт", f"order_card:{order['id']}".encode())])
+            buttons.append([UI.go("💳 پرداخت با کارت", f"order_card:{order['id']}".encode())])
         if get_setting("pay_zarinpal_enabled", "0") == "1" and (get_setting("zarinpal_merchant") or "").strip():
-            buttons.append([UI.go("🟡 плат анлайн (زرین‌پال)", f"order_zarinpal:{order['id']}".encode())])
+            buttons.append([UI.go("🟡 پرداخت آنلاین (زرین‌پال)", f"order_zarinpal:{order['id']}".encode())])
         if get_setting("pay_zibal_enabled", "0") == "1" and (get_setting("zibal_merchant") or "").strip():
-            buttons.append([UI.go("🟢 плат анлайн (زیبال)", f"order_zibal:{order['id']}".encode())])
+            buttons.append([UI.go("🟢 پرداخت آنلاین (زیبال)", f"order_zibal:{order['id']}".encode())])
         try:
             bal = get_wallet_balance(order["user_id"])
             if bal >= int(order["amount_toman"]):
-                buttons.append([UI.go(f"💰 плат бاه کیف پول ({fa_digits(bal)} Toman)",
+                buttons.append([UI.go(f"💰 پرداخت با کیف پول ({fa_digits(bal)} Toman)",
                                        f"order_wallet:{order['id']}".encode(), tone="success")])
         except Exception:
             pass
         if not order.get("discount_code"):
-            buttons.append([UI.go("🎀 кد تخفیف داری؟", f"order_discount:{order['id']}".encode())])
-        buttons.append([UI.go("سفارش‌های من", b"user_orders")])
+            buttons.append([UI.go("🎁 کد تخفیف داری؟", f"order_discount:{order['id']}".encode())])
+        buttons.append([UI.go("🧾 سفارش‌های من", b"user_orders")])
         buttons.append([UI.danger("لغو فاکتور", f"order_cancel:{order['id']}")])
-        buttons.append(UI.nav_row())
-        # فاکتور همیشه از یک callback می‌آید → edit. (event.query همان
+        buttons.append(UI.nav_row())        # فاکتور همیشه از یک callback می‌آید → edit. (event.query همان
         # تشخیصِ قابل‌اطمینانِ CallbackQuery است؛ هم‌چنین برای امنیت اگر
         # جایی از مسیر پیام متنی صدا زده شد، respond بفرستد.)
         if getattr(event, "query", None) is None:
