@@ -1286,6 +1286,25 @@ def _migrate_schema(c) -> None:
             )
             print("✅ [saas_db] مهاجرت delete_journal با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
 
+    # v2.9.3: مهاجرت orders — افزودن ستون‌های تخفیف (discount_code, discount_percent,
+    # original_amount_toman) که در v2.9.0 اضافه شدن ولی برای DB‌های قدیمی وجود ندارن.
+    # بدون این migration، create_order شکست می‌خورد و کاربر «خطا در پردازش این دکمه» می‌بینه.
+    if "orders" in tables:
+        cols = _table_columns(c, "orders")
+        added = False
+        if "discount_code" not in cols:
+            print("🔧 [saas_db] مهاجرت schema: افزودن ستون discount_code به orders...")
+            c.execute("ALTER TABLE orders ADD COLUMN discount_code TEXT")
+            added = True
+        if "discount_percent" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN discount_percent INTEGER DEFAULT 0")
+            added = True
+        if "original_amount_toman" not in cols:
+            c.execute("ALTER TABLE orders ADD COLUMN original_amount_toman INTEGER")
+            added = True
+        if added:
+            print("✅ [saas_db] مهاجرت orders با موفقیت انجام شد — ستون‌های تخفیف اضافه شدند.")
+
 
 def init_db() -> None:
     with _conn() as c:
