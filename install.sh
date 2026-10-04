@@ -1,43 +1,25 @@
 #!/usr/bin/env bash
-# CiaNet v2.8.7 — Universal Installer
-# این اسکریپت روی هر سرور اوبونتو/دبیان کار می‌کنه — بدون عیب‌یابی.
+# CiaNet v2.12.0 — Universal Installer with License Gate
+# کاربر باید کد لایسنس معتبر وارد کنه قبل از نصب
 #
 # روش استفاده:
 #   sudo bash install.sh
 #
-# مراحل:
-#   ۱) نصب پیش‌نیازها (python, git, sqlite, cloudflared)
-#   ۲) clone کردن repo
-#   ۳) ساخت venv
-#   ۴) ساخت user cianet
-#   ۵) ساخت /etc/selfbot.env با ADMIN_ID و ADMIN_BOT_TOKEN
-#   ۶) ساخت systemd service با EnvironmentFile
-#   ۷) ساخت nginx config (optional)
-#   ۸) start سرویس
-#
+# برای گرفتن لایسنس با OWNER تماس بگیرید.
+
 set -e
 
-# رنگ‌ها
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-print_step() {
-    echo -e "${BLUE}▶ $1${NC}"
-}
-print_ok() {
-    echo -e "${GREEN}✅ $1${NC}"
-}
-print_warn() {
-    echo -e "${YELLOW}⚠️  $1${NC}"
-}
-print_err() {
-    echo -e "${RED}❌ $1${NC}"
-}
+print_step() { echo -e "${BLUE}▶ $1${NC}"; }
+print_ok() { echo -e "${GREEN}✅ $1${NC}"; }
+print_warn() { echo -e "${YELLOW}⚠️  $1${NC}"; }
+print_err() { echo -e "${RED}❌ $1${NC}"; }
 
-# ─── Check root ───
 if [ "$(id -u)" != "0" ]; then
     print_err "باید با sudo اجرا کنی: sudo bash $0"
     exit 1
@@ -47,14 +29,95 @@ INSTALL_DIR="/opt/cianet"
 SERVICE_NAME="selfbot"
 VENV_DIR="$INSTALL_DIR/.venv"
 REPO_URL="https://github.com/DLSDT/CiaNet.ir.git"
+LICENSE_API="https://license.cianet.ir/api/verify"
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
-echo "  CiaNet v2.8.7 — Universal Installer"
+echo "  🤖 CiaNet v2.12.0 — Installer"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
-# ─── Get credentials from user ───
+# ─── License Gate ───────────────────────────────────────
+print_step "بررسی لایسنس"
+echo ""
+echo "🔒 برای نصب CiaNet به لایسنس نیاز دارید."
+echo "📡 برای دریافت لایسنس با OWNER تماس بگیرید:"
+echo "   Telegram: @CiaNetOwner"
+echo ""
+
+LICENSE_VALID=false
+MAX_ATTEMPTS=3
+ATTEMPT=0
+
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+    ATTEMPT=$((ATTEMPT + 1))
+    read -p "🎫 کد لایسنس را وارد کنید (یا 'exit' برای خروج): " LICENSE_KEY
+
+    if [ "$LICENSE_KEY" = "exit" ] || [ -z "$LICENSE_KEY" ]; then
+        print_err "نصب لغو شد."
+        exit 1
+    fi
+
+    # بررسی لایسنس از طریق API (اگه سرور لایسنس در دسترس باشه)
+    LICENSE_KEY=$(echo "$LICENSE_KEY" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+
+    # روش ۱: بررسی آنلاین از طریق API
+    if command -v curl &> /dev/null; then
+        RESPONSE=$(curl -s --connect-timeout 10 --max-time 15 \
+            -X POST "$LICENSE_API" \
+            -H "Content-Type: application/json" \
+            -d "{\"license\": \"$LICENSE_KEY\"}" 2>/dev/null || echo "")
+    fi
+
+    # روش ۲: بررسی آفلاین (کد‌های معتبر hardcoded)
+    # لیست کد‌های معتبر — OWNER اینجا کد‌های فروخته‌شده رو اضافه می‌کنه
+    # یا از API بررسی می‌کنه
+    VALID_CODES=(
+        "CIANET-DEMO-2024"
+        # کد‌های جدید رو اینجا اضافه کن
+    )
+
+    # اگه API جواب داد
+    if [ -n "$RESPONSE" ] && echo "$RESPONSE" | grep -q '"valid":true'; then
+        LICENSE_VALID=true
+        print_ok "لایسنس معتبر است!"
+        break
+    fi
+
+    # اگه API جواب نداد، بررسی آفلاین
+    for code in "${VALID_CODES[@]}"; do
+        if [ "$LICENSE_KEY" = "$code" ]; then
+            LICENSE_VALID=true
+            break
+        fi
+    done
+
+    if [ "$LICENSE_VALID" = true ]; then
+        print_ok "لایسنس معتبر است!"
+        break
+    fi
+
+    REMAINING=$((MAX_ATTEMPTS - ATTEMPT))
+    if [ $REMAINING -gt 0 ]; then
+        print_warn "کد لایسنس نامعتبر است. $REMAINING تلاش دیگر باقی مانده."
+    fi
+done
+
+if [ "$LICENSE_VALID" != true ]; then
+    print_err "کد لایسنس نامعتبر است یا سرور پاسخ نداد."
+    echo ""
+    echo "📡 برای دریافت لایسنس معتبر با OWNER تماس بگیرید:"
+    echo "   Telegram: @CiaNetOwner"
+    exit 1
+fi
+
+echo ""
+echo "═══════════════════════════════════════════════════════"
+print_ok "لایسنس تأیید شد! ادامه نصب..."
+echo "═══════════════════════════════════════════════════════"
+echo ""
+
+# ─── Get credentials ─────────────────────────────────────
 print_step "تنظیمات اولیه"
 read -p "آیدی عددی تلگرام شما (از @userinfobot بپرس): " ADMIN_ID_INPUT
 read -p "توکن ربات ادمین (از @BotFather): " ADMIN_BOT_TOKEN_INPUT
@@ -64,19 +127,20 @@ read -p "نام کاربری پنل ادمین وب (default: admin): " PANEL_AD
 PANEL_ADMIN_USER_INPUT=${PANEL_ADMIN_USER_INPUT:-admin}
 read -p "پسورد پنل ادمین وب: " PANEL_ADMIN_PASS_INPUT
 read -p "دامنه‌ی پنل (مثلاً panel.yourdomain.ir — اگه نداری، خالی بذار): " PANEL_DOMAIN_INPUT
+read -p "کد مرچنت زرین‌پال (اختیاری — اگه نداری، خالی بذار): " ZARINPAL_MERCHANT_INPUT
 
 if [ -z "$ADMIN_ID_INPUT" ] || [ -z "$ADMIN_BOT_TOKEN_INPUT" ] || [ -z "$API_ID_INPUT" ] || [ -z "$API_HASH_INPUT" ]; then
-    print_err "همه‌ی فیلدها (به‌جز دامنه) اجباری هستن"
+    print_err "همه‌ی فیلدهای اجباری رو پر کن"
     exit 1
 fi
 
-# ─── Install dependencies ───
+# ─── Install dependencies ───────────────────────────────
 print_step "نصب پیش‌نیازها..."
 apt-get update -y >/dev/null 2>&1
 apt-get install -y python3 python3-pip python3-venv git sqlite3 curl nginx >/dev/null 2>&1
 print_ok "پیش‌نیازها نصب شدند"
 
-# ─── Create cianet user ───
+# ─── Create cianet user ─────────────────────────────────
 print_step "ساخت user cianet..."
 if ! id "cianet" &>/dev/null; then
     useradd -r -m -d "$INSTALL_DIR" -s /bin/bash cianet
@@ -85,7 +149,7 @@ else
     print_warn "user cianet از قبل وجود دارد"
 fi
 
-# ─── Clone repo ───
+# ─── Clone repo ────────────────────────────────────────
 print_step "clone کردن repo..."
 if [ -d "$INSTALL_DIR/.git" ]; then
     cd "$INSTALL_DIR"
@@ -99,7 +163,7 @@ else
     print_ok "repo کلون شد"
 fi
 
-# ─── Create venv ───
+# ─── Create venv ────────────────────────────────────────
 print_step "ساخت venv..."
 if [ ! -d "$VENV_DIR" ]; then
     sudo -u cianet python3 -m venv "$VENV_DIR"
@@ -108,15 +172,13 @@ sudo -u cianet "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null 2>&1
 sudo -u cianet "$VENV_DIR/bin/pip" install -r "$INSTALL_DIR/requirements.txt" >/dev/null 2>&1
 print_ok "venv ساخته شد و پیش‌نیازها نصب شدند"
 
-# ─── Create /etc/selfbot.env ───
+# ─── Create /etc/selfbot.env ────────────────────────────
 print_step "ساخت /etc/selfbot.env..."
 ENV_FILE="/etc/selfbot.env"
-
-# Hash password
 PASS_HASH=$(echo -n "$PANEL_ADMIN_PASS_INPUT" | sha256sum | awk '{print "sha256:"$1}')
 
 cat > "$ENV_FILE" << EOF
-# CiaNet environment — generated by install.sh
+# CiaNet environment
 API_ID=$API_ID_INPUT
 API_HASH=$API_HASH_INPUT
 ADMIN_BOT_TOKEN=$ADMIN_BOT_TOKEN_INPUT
@@ -125,18 +187,25 @@ PANEL_ADMIN_USER=$PANEL_ADMIN_USER_INPUT
 PANEL_ADMIN_PASS_HASH=$PASS_HASH
 PANEL_SESSION_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(48))")
 PANEL_CORS_ORIGINS=http://localhost:8000
+CIANET_AUTO_UPDATE=1
 EOF
+
 if [ -n "$PANEL_DOMAIN_INPUT" ]; then
     echo "PANEL_URL=https://$PANEL_DOMAIN_INPUT" >> "$ENV_FILE"
 fi
+if [ -n "$ZARINPAL_MERCHANT_INPUT" ]; then
+    echo "ZARINPAL_MERCHANT=$ZARINPAL_MERCHANT_INPUT" >> "$ENV_FILE"
+    echo "PAY_ZARINPAL_ENABLED=1" >> "$ENV_FILE"
+fi
+
 chmod 600 "$ENV_FILE"
 chown cianet:cianet "$ENV_FILE"
 print_ok "env file ساخته شد"
 
-# ─── Create systemd service ───
+# ─── Create systemd service ────────────────────────────
 print_step "ساخت systemd service..."
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-cat > "$SERVICE_FILE" << 'EOF'
+cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=CiaNet Telegram Selfbot
 After=network-online.target
@@ -165,24 +234,13 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 print_ok "service ساخته شد"
 
-# ─── v2.9.5: Install polkit rule so cianet user can restart the service ───
-print_step "نصب polkit rule برای auto-update..."
-POLKIT_FILE="/etc/polkit-1/rules.d/49-cianet.rules"
-cat > "$POLKIT_FILE" << 'POLKIT'
-// CiaNet: allow cianet user to restart/stop/start the selfbot service
-polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        subject.user == "cianet" &&
-        action.lookup("unit") == "selfbot.service" &&
-        ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0) {
-        return polkit.Result.YES;
-    }
-});
-POLKIT
-chmod 644 "$POLKIT_FILE"
-print_ok "polkit rule نصب شد — auto-update حالا کار می‌کنه"
+# ─── Install polkit + sudoers ───────────────────────────
+print_step "نصب sudoers برای auto-update..."
+echo "cianet ALL=(ALL) NOPASSWD: /bin/systemctl restart selfbot, /bin/systemctl start selfbot, /bin/systemctl stop selfbot" > /etc/sudoers.d/cianet
+chmod 440 /etc/sudoers.d/cianet
+print_ok "sudoers نصب شد — auto-update کار می‌کنه"
 
-# ─── Start service ───
+# ─── Start service ─────────────────────────────────────
 print_step "شروع سرویس..."
 systemctl start "$SERVICE_NAME"
 sleep 5
@@ -194,37 +252,35 @@ else
     exit 1
 fi
 
-# ─── Show final status ───
+# ─── Show final status ─────────────────────────────────
 echo ""
 echo "═══════════════════════════════════════════════════════"
 print_ok "نصب کامل شد!"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 echo "📊 آخرین لاگ‌ها:"
-journalctl -u "$SERVICE_NAME" --since "10 seconds ago" --no-pager | tail -15
-echo ""
-echo "🌐 پنل وب:"
-if [ -n "$PANEL_DOMAIN_INPUT" ]; then
-    echo "   https://$PANEL_DOMAIN_INPUT/u/login.html"
-else
-    echo "   http://localhost:8000/u/login.html"
-fi
+journalctl -u "$SERVICE_NAME" --since "10 seconds ago" --no-pager | tail -10
 echo ""
 echo "🤖 ربات تلگرام:"
 echo "   با آیدی $ADMIN_ID_INPUT مالک هستی — /start بزن"
+echo ""
+if [ -n "$PANEL_DOMAIN_INPUT" ]; then
+    echo "🌐 پنل وب:"
+    echo "   https://$PANEL_DOMAIN_INPUT/u/login.html"
+    echo "   https://$PANEL_DOMAIN_INPUT/app/login.html"
+else
+    echo "🌐 پنل وب (localhost):"
+    echo "   http://localhost:8000/u/login.html"
+    echo "   http://localhost:8000/app/login.html"
+fi
 echo ""
 echo "📋 مراحل بعدی:"
 echo "   ۱. /start بزن تو تلگرام"
 echo "   ۲. «👤 حساب کاربری» → «📱 لاگین کردن سلف»"
 echo "   ۳. شماره موبایل + کد تلگرام بزن"
 echo "   ۴. اگه ۲FA داری، پسورد بزن"
-echo "   ۵. اکانت وصل می‌شه!"
 echo ""
-if [ -n "$PANEL_DOMAIN_INPUT" ]; then
-    echo "🌐 برای دسترسی از بیرون، Cloudflare Tunnel یا nginx proxy تنظیم کن:"
-    echo "   sudo apt install cloudflared"
-    echo "   sudo cloudflared tunnel login"
-    echo "   sudo cloudflared tunnel create cianet"
-    echo "   sudo cloudflared tunnel route dns cianet $PANEL_DOMAIN_INPUT"
-    echo "   # config.yml: ingress from $PANEL_DOMAIN_INPUT → http://localhost:8000"
-fi
+echo "🔧 برای آپدیت خودکار:"
+echo "   /start → 🎛 پنل مدیریت → 🔄 آپدیت و ورژن → 🟢 آپدیت خودکار: فعال"
+echo ""
+echo "📞 پشتیبانی: @CiaNetOwner"
