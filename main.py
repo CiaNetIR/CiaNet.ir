@@ -1802,6 +1802,25 @@ WARN_NOTIFY_THRESHOLD = 2     # بعد از ۲ هشدار، به OWNER نوتی�
 # v2.9.2: TELEGRAM_SERVICE_ID در module level (قبلاً فقط داخل یه متد بود)
 TELEGRAM_SERVICE_ID = 777000   # فرستنده‌ی رسمیِ پیام‌های تلگرام
 
+# v2.9.5: helper برای parse اعداد فارسی/عربی با comma
+def _to_int(text) -> int:
+    """تبدیل رشته به int — اعداد فارسی/عربی و comma رو handle می‌کنه.
+    مثلاً: "۱٬۲۳۴" → 1234, "50" → 50, "abc" → ValueError.
+    """
+    if text is None:
+        raise ValueError("None")
+    s = str(text).strip()
+    # حذف comma و space
+    s = s.replace(",", "").replace("،", "").replace(" ", "")
+    # تبدیل ارقام فارسی/عربی به لاتین
+    fa = "۰۱۲۳۴۵۶۷۸۹"
+    ar = "٠١٢٣٤٥٦٧٨٩"
+    for i, c in enumerate(fa):
+        s = s.replace(c, str(i))
+    for i, c in enumerate(ar):
+        s = s.replace(c, str(i))
+    return int(s)
+
 REFERRAL_GOAL = 3          # چند دعوتِ موفق = یک جایزه
 REFERRAL_REWARD_DAYS = 30  # طولِ اشتراکِ هدیه
 
@@ -12116,10 +12135,13 @@ class SaaSBot:
         """
         دکمه‌ی «📥 اعمال آپدیت»:
         1. backup main.py (به versions/main.py.pre-auto-update.<ts>)
-        2. git pull origin main
-        3. systemctl restart cianet
+        2. git fetch + reset --hard origin/main
+        3. systemctl restart (با auto-detect service name)
         4. بعد از restart، cianet_updater.propagate_to_accounts به‌صورت
            خودکار اکانت‌ها را enable می‌کند.
+
+        v2.9.5: پیام «لطفاً صبر کنید...» قبل از شروع آپدیت نشون داده می‌شه
+        تا کاربر بفهمه چیزی داره اتفاق می‌افته. قبلاً سایلنت بود.
         """
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("⛔ فقط OWNER", alert=True)
@@ -12130,8 +12152,23 @@ class SaaSBot:
             await event.answer(err, alert=True)
             return
 
+        # v2.9.5: پیام واضح قبل از شروع — قبلاً فقط یه alert کوچیک بود
         try:
-            await event.answer("📥 در حال آپدیت... مدت کمی طول می‌کشد.")
+            await event.edit(
+                UI.screen("📥 در حال آپدیت...",
+                          body=[
+                              "⏳ لطفاً صبر کنید...",
+                              "",
+                              f"{UI.GRAY} ۱. بکاپ از main.py فعلی",
+                              f"{UI.GRAY} ۲. git fetch + reset --hard",
+                              f"{UI.GRAY} ۳. systemctl restart",
+                              f"{UI.GRAY} ۴. اکانت‌ها دوباره وصل می‌شن",
+                              "",
+                              f"{UI.AMBER} این ممکنه ۱۰-۳۰ ثانیه طول بکشه.",
+                          ],
+                          subtitle="اگه بیش از ۶۰ ثانیه طول کشید، SSH بزن."),
+                buttons=[],
+            )
         except Exception:
             pass
 
@@ -12448,13 +12485,29 @@ class SaaSBot:
             return
 
         # restart
+        # v2.9.5: auto-detect service name (قبلاً hardcoded "cianet" بود)
         try:
             import subprocess as _sp
+            _svc = os.environ.get("CIANET_SERVICE_NAME", "").strip()
+            if not _svc:
+                for _cand in ("cianet", "selfbot"):
+                    try:
+                        _r = _sp.run(
+                            ["systemctl", "is-enabled", _cand],
+                            capture_output=True, text=True, timeout=3,
+                        )
+                        if _r.returncode == 0:
+                            _svc = _cand
+                            break
+                    except Exception:
+                        continue
+            if not _svc:
+                _svc = "selfbot"  # fallback
             _sp.Popen(
-                ["systemctl", "restart", "cianet"],
+                ["systemctl", "restart", _svc],
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
             )
-            restart_msg = "🔄 سرویس در حال restart..."
+            restart_msg = f"🔄 سرویس در حال restart ({_svc})..."
         except Exception as e:
             restart_msg = f"⚠️ restart ناموفق (دستی بزن): {e}"
 

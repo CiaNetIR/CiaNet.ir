@@ -31,6 +31,12 @@ REPO_URL = "https://github.com/DLSDT/CiaNet.ir.git"
 BRANCH = os.environ.get("CIANET_BRANCH", "main")
 INSTALL_DIR = os.environ.get("CIANET_INSTALL_DIR", "/opt/cianet")
 
+# v2.9.5: تنظیم HOME برای git (safe.directory نیاز داره)
+# اگه HOME ست نشده باشه (مثلاً در systemd)، git نمی‌تونه
+# config رو بخونه و safe.directory fail می‌شه.
+if not os.environ.get("HOME"):
+    os.environ["HOME"] = INSTALL_DIR
+
 # v2.8.13: Set safe.directory at module load time (not inside apply_update).
 # این جلوی خطای "dubious ownership" رو می‌گیره وقتی سرویس با user=cianet
 # اجرا می‌شه ولی repo با root clone شده. قبلاً فقط داخل apply_update این

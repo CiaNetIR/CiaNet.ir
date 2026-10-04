@@ -149,6 +149,7 @@ Type=simple
 User=cianet
 Group=cianet
 WorkingDirectory=/opt/cianet
+Environment=HOME=/opt/cianet
 EnvironmentFile=/etc/selfbot.env
 ExecStart=/opt/cianet/.venv/bin/python -u main.py all
 Restart=always
@@ -163,6 +164,23 @@ EOF
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 print_ok "service ساخته شد"
+
+# ─── v2.9.5: Install polkit rule so cianet user can restart the service ───
+print_step "نصب polkit rule برای auto-update..."
+POLKIT_FILE="/etc/polkit-1/rules.d/49-cianet.rules"
+cat > "$POLKIT_FILE" << 'POLKIT'
+// CiaNet: allow cianet user to restart/stop/start the selfbot service
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "cianet" &&
+        action.lookup("unit") == "selfbot.service" &&
+        ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0) {
+        return polkit.Result.YES;
+    }
+});
+POLKIT
+chmod 644 "$POLKIT_FILE"
+print_ok "polkit rule نصب شد — auto-update حالا کار می‌کنه"
 
 # ─── Start service ───
 print_step "شروع سرویس..."
