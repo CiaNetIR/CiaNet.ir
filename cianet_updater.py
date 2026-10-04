@@ -453,35 +453,49 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
                         continue
             if not svc_name:
                 svc_name = "cianet"  # fallback
-            # v2.8.13: به‌جای silent systemctl restart، از SIGTERM استفاده می‌کنیم.
-            # این باعث می‌شه systemd (با Restart=always) خودش پروسه رو دوباره
-            # بسازه با کد جدید. قبلاً Popen سایلنت بود و اگه کاربر non-root بود،
-            # restart نمی‌شد ولی ربات می‌گفت «آپدیت شد».
+            # v2.9.6: اگه non-root اجرا می‌شه، اول sudo systemctl رو امتحان کن
+            # (با sudoers rule که در install.sh نصب می‌شه). اگه اون نشد،
+            # plain systemctl، اگه اون هم نشد، SIGTERM fallback.
+            import os as _os_uid
+            _is_root = hasattr(_os_uid, "geteuid") and _os_uid.geteuid() == 0
+            _restart_done = False
             try:
-                # اول تلاش با systemctl
-                rc = subprocess.run(
-                    ["systemctl", "restart", svc_name],
-                    capture_output=True, text=True, timeout=10,
-                )
-                if rc.returncode == 0:
-                    msg += f"\n🔄 سرویس در حال restart ({svc_name})..."
-                else:
-                    # fallback: SIGTERM به خودمون — systemd دوباره می‌سازه
-                    log.warning("systemctl restart failed (rc=%d): %s — fallback to SIGTERM",
-                                rc.returncode, rc.stderr.strip()[:200])
+                # Stage 1: sudo systemctl (اگه sudoers نصب باشه)
+                if not _is_root:
+                    rc = subprocess.run(
+                        ["sudo", "-n", "systemctl", "restart", svc_name],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if rc.returncode == 0:
+                        msg += f"\n🔄 سرویس در حال restart ({svc_name})..."
+                        _restart_done = True
+                # Stage 2: plain systemctl (اگه polkit rule نصب باشه)
+                if not _restart_done:
+                    rc = subprocess.run(
+                        ["systemctl", "restart", svc_name],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if rc.returncode == 0:
+                        msg += f"\n🔄 سرویس در حال restart ({svc_name})..."
+                        _restart_done = True
+                # Stage 3: SIGTERM fallback (systemd با Restart=always دوباره می‌سازه)
+                if not _restart_done:
+                    log.warning("systemctl restart failed — fallback to SIGTERM")
                     msg += f"\n⚠️ systemctl restart ناموفق — استفاده از SIGTERM..."
                     import signal as _signal
                     os.kill(os.getpid(), _signal.SIGTERM)
+                    _restart_done = True
             except Exception as e:
                 log.warning("restart failed: %s — fallback to SIGTERM", e)
                 msg += f"\n⚠️ restart ناموفق ({e}) — استفاده از SIGTERM..."
                 try:
                     import signal as _signal
                     os.kill(os.getpid(), _signal.SIGTERM)
+                    _restart_done = True
                 except Exception:
                     msg += f"\n❌ SIGTERM هم ناموفق — دستی بزن: sudo systemctl restart {svc_name}"
 
-        return True, msg
+            return True, msg
 
     except Exception as e:
         log.exception("apply_update failed")
