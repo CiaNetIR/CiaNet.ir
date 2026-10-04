@@ -76,8 +76,8 @@
         div.innerHTML = `
           <div><strong>${escapeHtml(o.order_no)}</strong> — ${escapeHtml(o.plan)}</div>
           <div class="order-meta">
-            ${fa_digits(o.amount_toman)} Toman
-            ${o.discount_code ? ' · <s>' + fa_digits(o.original_amount_toman) + '</s>' : ''}
+            ${faDigits(o.amount_toman)} Toman
+            ${o.discount_code ? ' · <s>' + faDigits(o.original_amount_toman) + '</s>' : ''}
             · ${statusMap[o.status] || o.status}
             · ${date}
           </div>
@@ -88,10 +88,10 @@
       }
     }
     async function payWithWallet(oid, orderNo, amount) {
-      if (!confirm(`پرداخت ${fa_digits(amount)} Toman از کیف پول برای فاکتور ${orderNo}؟`)) return;
+      if (!confirm(`پرداخت ${faDigits(amount)} Toman از کیف پول برای فاکتور ${orderNo}؟`)) return;
       try {
         const r = await apiCall('POST', `/api/user/orders/${oid}/pay-wallet`);
-        alert('✅ پرداخت شد! موجودی جدید: ' + fa_digits(r.balance) + ' Toman');
+        alert('✅ پرداخت شد! موجودی جدید: ' + faDigits(r.balance) + ' Toman');
         loadOrders();  // refresh
       } catch (err) {
         alert('خطا: ' + err.message);

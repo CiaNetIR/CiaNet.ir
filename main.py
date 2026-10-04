@@ -14053,16 +14053,15 @@ class SaaSBot:
                     "paid_at = ? WHERE id = ?",
                     (_now(), oid),
                 )
-            # ساخت اشتراک
+            # v2.9.4: استفاده از duration_days از جدول pricing — قبلاً
+            # با regex از نام پلن می‌خوندیم که برای نام‌های فارسی (۱ ماهه)
+            # اشتباه می‌داد.
             plan_name = order["plan"]
-            # استخراج مدت اشتراک از نام پلن (مثلاً "۳۰ روز" → ۳۰)
-            days = 30  # default
+            days = 30  # default fallback
             try:
-                # اگه پلن با عدد شروع بشه
-                import re as _re
-                m = _re.search(r"(\d+)", plan_name)
-                if m:
-                    days = int(m.group(1))
+                _pricing = get_pricing(plan_name)
+                if _pricing and _pricing.get("duration_days"):
+                    days = int(_pricing["duration_days"])
             except Exception:
                 pass
             create_subscription(event.sender_id, plan_name, days)
@@ -19834,23 +19833,29 @@ class SelfBot:
                 text = event.raw_text or ""
                 print(f"⚠️ [{self.tag}] هشدار تلگرام: {text[:100]}")
                 if self._warn_count >= WARN_NOTIFY_THRESHOLD:
+                    # v2.9.4: اگه _owner_notify_async موجود نبود، فقط print کن
                     try:
                         await _owner_notify_async(
                             f"⚠️ [{self.tag}] {self._warn_count} هشدار از تلگرام\n"
                             f"آخرین: {text[:200]}"
                         )
+                    except NameError:
+                        print(f"⚠️ [{self.tag}] {self._warn_count} هشدار از تلگرام: {text[:100]}")
                     except Exception:
                         pass
                 # اگه warning حاوی "deleted" یا "banned" بود، account رو disable کن
                 _low = text.lower()
                 if any(_w in _low for _w in ("deleted", "banned", "terminated", "violated")):
                     print(f"⛔ [{self.tag}] warning بحرانی — غیرفعال‌سازی خودکار")
+                    # v2.9.4: self.sb در SelfBot تعریف نشده — از
+                    # module-level load_config/save_config استفاده می‌کنیم
                     try:
-                        cfg = self.sb.load_config()
+                        cfg = load_config()
                         if self.tag in cfg:
                             cfg[self.tag]["disabled"] = True
                             cfg[self.tag]["disabled_reason"] = "telegram_warning"
-                            self.sb.save_config(cfg)
+                            save_config(cfg)
+                            print(f"✅ [{self.tag}] اکانت غیرفعال شد (telegram_warning)")
                     except Exception as _e:
                         print(f"⚠️ [{self.tag}] disable failed: {_e}")
             except Exception as _e:

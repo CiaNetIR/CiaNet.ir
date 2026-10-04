@@ -1281,7 +1281,10 @@ async def user_me(request: Request):
     if not u:
         raise HTTPException(404, "کاربر پیدا نشد")
     balance = m.get_wallet_balance(uid)
-    sub_st = m.SaaSBot._user_sub_status_static(uid) if hasattr(m.SaaSBot, "_user_sub_status_static") else {"active": False, "days": 0, "plan": None}
+    # v2.9.4: استفاده از get_active_subscription (module-level) — قبلاً
+    # m.SaaSBot._user_sub_status_static فراخوانی می‌شد که وجود نداشت
+    # و همیشه {"active": False} برمی‌گردوند.
+    sub = m.get_active_subscription(uid)
     cfg = m.load_config()
     n_bots = len(m.accounts_of_user(cfg, uid))
     return {
@@ -1291,9 +1294,9 @@ async def user_me(request: Request):
         "role": m.get_role(uid, m.OWNER_ID),
         "wallet_balance": balance,
         "subscription": {
-            "active": sub_st.get("active", False),
-            "days_left": sub_st.get("days", 0),
-            "plan": sub_st.get("plan"),
+            "active": bool(sub and sub.get("status") == "active"),
+            "days_left": _calc_days_left(sub) if sub else 0,
+            "plan": sub.get("plan") if sub else None,
         },
         "n_selfbots": n_bots,
     }
@@ -1450,8 +1453,9 @@ async def user_reseller_dashboard(request: Request):
     n_active = 0
     total_revenue = 0
     for c in customers:
-        sub_st = m.SaaSBot._user_sub_status_static(c["user_id"]) if hasattr(m.SaaSBot, "_user_sub_status_static") else {"active": False}
-        if sub_st.get("active"):
+        # v2.9.4: استفاده از get_active_subscription به‌جای متد ناموجود
+        _sub = m.get_active_subscription(c["user_id"])
+        if _sub and _sub.get("status") == "active":
             n_active += 1
         # درآمد تقریبی = مجموع پرداخت‌های تایید شده از این کاربر
         try:
@@ -1553,6 +1557,22 @@ async def admin_debit_user_wallet(user_id: int, req: WalletDebitRequest,
 async def health():
     return {"status": "ok", "time": time.time()}
 
+
+# v2.9.4: محاسبه‌ی روزهای باقی‌مانده از اشتراک
+def _calc_days_left(sub: dict) -> int:
+    if not sub:
+        return 0
+    try:
+        from datetime import datetime
+        expire_str = sub.get("expire_date")
+        if not expire_str:
+            return 0
+        expire = datetime.fromisoformat(expire_str.replace("Z", ""))
+        now = datetime.utcnow()
+        delta = (expire - now).days
+        return max(0, delta)
+    except Exception:
+        return 0
 
 
 # ─── v2.8.5: Account Settings + Chat API ─────────────────────────────
