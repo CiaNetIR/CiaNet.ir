@@ -6812,28 +6812,7 @@ class AdminBot:
 
         # مجوز را برای *این اکانت* چک می‌کنیم — نه فقط یک بولیِ کلی.
         can_sec = self._can_view_security_tools(tag, event.sender_id)
-        if can_sec:
-            body += [
-                UI.SEP,
-                f"{UI.RED} امنیت",
-            ]
-            # شمارشِ دستگاه‌ها (در صورتِ روشن بودن) — اطلاعاتِ مفید برای
-            # تصمیم‌گیری، بدون نیاز به باز کردنِ صفحه.
-            entry = self.sb.ACCOUNTS.get(tag)
-            if entry:
-                try:
-                    sessions = await entry.bot.list_sessions()
-                    n_others = sum(1 for s in sessions if not s["current"])
-                    body.append(f"{UI.dot(True)} دستگاه‌های لاگین‌شده: {fa_digits(n_others + 1)} نشست "
-                                + f"({fa_digits(n_others)} غیر از خودِ سلف)")
-                except Exception:
-                    body.append(f"{UI.GRAY} دستگاه‌های لاگین‌شده: خواندن ناموفق بود")
-
-        buttons = [
-            [UI.go("🌐 تنظیم پروکسی" if not proxy_cfg else "🌐 تغییر پروکسی", f"proxy_start:{tag}")],
-        ]
-                # v2.10.6: منتقل شد به مدیریت اکانت
-        pass
+                # v2.10.7: 2FA/sessions moved to account management
 
         buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
         buttons.append([UI.refresh(f"sessions:{tag}")])
@@ -10612,6 +10591,68 @@ class SaaSBot:
             return row["status"] in ("pending", "approved")
         except Exception:
             return False
+
+    # v2.10.7: خرید ربات اختصاصی
+    async def _start_dedicated_bot_purchase(self, event):
+        """کاربر ربات اختصاصی می‌خره."""
+        uid = event.sender_id
+        price = int(get_setting("dedicated_bot_price", "500000") or "500000")
+        bal = get_wallet_balance(uid)
+        body = [
+            "🤖 **ربات اختصاصی**\n",
+            f"💰 مبلغ: {fa_digits(price)} Toman",
+            f"💳 موجودی کیف پول: {fa_digits(bal)} Toman",
+            "",
+            "با این کار:",
+            "• یه ربات اختصاصی با توکن خودت می‌گیری",
+            "• مالک ربات می‌شی (بدون قابلیت مدیریت اکانت)",
+            "• می‌تونی مشتری جمع کنی و فروش داشته باشی",
+        ]
+        buttons = []
+        if bal >= price:
+            buttons.append([UI.go(f"💰 پرداخت با کیف پول ({fa_digits(bal)} Toman)",
+                                   "dedicated_pay:wallet", tone="success")])
+        buttons.append([UI.go("💳 پرداخت با کارت", "dedicated_pay:card")])
+        buttons.append([UI.nav_back()])
+        await event.edit(
+            UI.screen("🤖 ربات اختصاصی", body=body,
+                      subtitle="ربات اختصاصی با توکن خودت."),
+            buttons=buttons,
+        )
+
+    async def _process_dedicated_bot_payment(self, event, method: str):
+        """پرداخت ربات اختصاصی."""
+        uid = event.sender_id
+        price = int(get_setting("dedicated_bot_price", "500000") or "500000")
+        if method == "wallet":
+            bal = get_wallet_balance(uid)
+            if bal < price:
+                await event.answer("❌ موجودی کافی نیست.", alert=True)
+                return
+            pay_result = wallet_pay_from_balance(uid, price, ref="dedicated_bot")
+            if not pay_result.get("ok"):
+                await event.answer(f"❌ خطا: {pay_result.get('error')}", alert=True)
+                return
+            order = create_order(uid, "ربات اختصاصی", price, 0.0)
+            if isinstance(order, dict) and "id" in order:
+                with _conn_immediate() as c:
+                    c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
+                              (_now(), order["id"]))
+            await self._clear_admin_panel_wizard(uid)
+            self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid, "price": price})
+            await event.edit(
+                "✅ **پرداخت موفق!**\n\n"
+                f"💰 موجودی جدید: {fa_digits(pay_result['balance'])} Toman\n\n"
+                "🤖 حالا توکن رباتت رو بفرست:\n"
+                "از @BotFather یه ربات بساز و توکنش رو اینجا بفرست.",
+                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+        elif method == "card":
+            order = create_order(uid, "ربات اختصاصی", price, 0.0)
+            if isinstance(order, dict) and "id" in order:
+                await self._show_invoice(event, order, 0)
+            else:
+                await event.answer("❌ خطا در ساخت سفارش.", alert=True)
 
     async def _show_reseller_info(self, event):
         """
@@ -14596,6 +14637,31 @@ class SaaSBot:
                 await event.respond(f"❌ خطا: {e}")
             return True
 
+        # v2.10.7: دریافت توکن ربات اختصاصی
+        if state == "dedicated_bot_token":
+            token = (text or "").strip()
+            if not token or len(token) < 20 or ":" not in token:
+                await event.respond("❌ توکن معتبر نیست. از @BotFather بگیر و بفرست:")
+                return True
+            uid = wiz["data"].get("user_id")
+            self.wizards.pop(event.sender_id, None)
+            try:
+                with _conn_immediate() as c:
+                    c.execute(
+                        "INSERT INTO dedicated_bots (bot_token, owner_user_id, status, created_at) "
+                        "VALUES (?, ?, 'pending', ?)",
+                        (token, uid, _now()),
+                    )
+                log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
+                await event.respond(
+                    f"✅ **ربات اختصاصی ثبت شد!**\n\n"
+                    f"🤖 توکن: `{token[:20]}...`\n"
+                    f"⏳ OWNER باید فعالش کنه. به زودی آماده می‌شه."
+                )
+            except Exception as e:
+                await event.respond(f"❌ خطا: {e}")
+            return True
+
         if state == "set_merchant":
             gw = wiz["data"].get("gw", "")
             merchant = (text or "").strip()
@@ -16871,6 +16937,14 @@ class SaaSBot:
                 # می‌شود). چون اولی return دارد، اینجا هیچ‌وقت اجرا نمی‌شود
                 # ولی برای اطمینان از ناپدید شدنِ تله‌ی fallthrough، آن
                 # را حذف کردیم. `user_reseller_apply` معتبر است و باقی مانده.
+                # v2.10.7: خرید ربات اختصاصی
+                if data == "dedicated_bot_buy":
+                    await self._start_dedicated_bot_purchase(event)
+                    return
+                if data.startswith("dedicated_pay:"):
+                    method = data.split(":", 1)[1]
+                    await self._process_dedicated_bot_payment(event, method)
+                    return
                 if data == "user_reseller_apply":
                     await self._apply_reseller(event)
                     return
