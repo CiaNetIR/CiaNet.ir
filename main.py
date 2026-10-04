@@ -1780,6 +1780,8 @@ FLOOD_RECOVER_GRACE = 60      # بعد از FloodWait، ۶۰ ثانیه صبر
 WARMUP_DURATION_SEC = 1800    # ۳۰ دقیقه گرم‌کردن اکانت جدید
 WARMUP_RATE_MULTIPLIER = 0.3  # در warmup، ۳۰٪ نرخ عادی
 WARN_NOTIFY_THRESHOLD = 2     # بعد از ۲ هشدار، به OWNER نوتیف بده
+# v2.9.2: TELEGRAM_SERVICE_ID در module level (قبلاً فقط داخل یه متد بود)
+TELEGRAM_SERVICE_ID = 777000   # فرستنده‌ی رسمیِ پیام‌های تلگرام
 
 REFERRAL_GOAL = 3          # چند دعوتِ موفق = یک جایزه
 REFERRAL_REWARD_DAYS = 30  # طولِ اشتراکِ هدیه
@@ -13904,11 +13906,17 @@ class SaaSBot:
 
     async def _compute_order_amounts(self, toman: int) -> tuple:
         """مبلغ تومان → معادل تتر با نرخ لحظه‌ای؛ fallback به تنظیم/ثابت.
-        خروجی: (amount_usdt, rate_toman). +۱٪ بافر برای نوسان قیمت."""
+        خروجی: (amount_usdt, rate_toman). +۱٪ بافر برای نوسان قیمت.
+
+        v2.9.2: timeout ۵ ثانیه اضافه شد — قبلاً اگه همه‌ی صرافی‌های ایرانی
+        timeout می‌شدن، ۳۰+ ثانیه طول می‌کشید و کاربر «خطا در پردازش این دکمه»
+        می‌دید. حالا بعد از ۵ ثانیه، به fallback ثابت برمی‌گرده.
+        """
         rate = None
         try:
-            rate = await _get_usd_toman_rate()
-        except Exception:
+            # v2.9.2: timeout کوتاه — اگه صرافی‌ها جواب ندادن، سریع fallback کن
+            rate = await asyncio.wait_for(_get_usd_toman_rate(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception):
             rate = None
         if not rate or rate <= 0:
             try:
@@ -19708,16 +19716,23 @@ class SelfBot:
         )
         # v2.9.1: warm-up logic — اگه اکانت تازه ساخته شده، ۳۰ دقیقه
         # با نرخ کاهش‌یافته فعالیت کنه تا تلگرام مشکوک نشه.
+        # v2.9.2: از _bot_db استفاده می‌کنیم (bot_data.db) چون self_accounts
+        # اونجاست، نه تو saas.db.
         import time as _t
         try:
-            with _conn_immediate() as _c:
+            with _bot_db() as _c:
                 _r = _c.execute(
                     "SELECT created_at FROM self_accounts WHERE tag = ?", (self.tag,)
                 ).fetchone()
-            if _r and _r["created_at"]:
+            if _r and _r[0]:
                 from datetime import datetime
                 try:
-                    _created = datetime.fromisoformat(_r["created_at"])
+                    # created_at ممکنه TIMESTAMP یا ISO string باشه
+                    _raw = _r[0]
+                    if isinstance(_raw, str):
+                        _created = datetime.fromisoformat(_raw.replace("Z", ""))
+                    else:
+                        _created = _raw  # datetime object
                     _age = (_t.time() - _created.timestamp())
                     self._account_age = max(0, _age)
                     if _age < WARMUP_DURATION_SEC:
