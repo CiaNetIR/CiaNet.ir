@@ -9789,14 +9789,15 @@ class SaaSBot:
         # «حساب کاربری» حالا هابِ همه‌ی کارهای کم‌کاربرد است — تا منوی اصلی
         # در چهار دکمه جا شود. هر دکمه‌ای که از اینجا حذف می‌شود، قبلاً یک
         # دکمه‌ی سطحِ اول بود و منو را شلوغ می‌کرد.
+        # v2.8.7: آیتم‌های تکراری (که در منوی اصلی هم هستن) حذف شدند.
+        # _show_account_card حالا فقط چیزهایی رو نشون می‌ده که در منوی
+        # اصلی نیستن — یعنی کیف پول، سفارش‌ها، دعوت دوستان. این جلوی
+        # شلوغیِ منو رو می‌گیره.
         items = [
-            UI.go("⏳ مدیریت اشتراک", "user_sub_status"),
             UI.go("💰 کیف پول", "user_wallet"),
             UI.go("🧾 سفارش‌ها", "user_orders"),
-            UI.go("🔑 فعالسازی لایسنس", "user_activate_license"),
             UI.go("❤️ دعوت دوستان", "user_referral"),
-            UI.go("🧠 سلف چیست؟", "user_what_is"),
-            UI.go("📚 راهنمای دستورات", "user_help"),
+            UI.go("👤 نمایندگی", "user_reseller_info"),
         ]
         if self._role(uid) == ROLE_USER:
             items.append(UI.go("👥 نمایندگی", "user_reseller_info"))
@@ -23072,6 +23073,60 @@ async def _run_single_account_cli(tag: str, cfg_entry: dict, caller: str) -> Non
     await _graceful_shutdown_all()
 
 
+# v2.8.7: اصلاح خودکار مالکیت فایل‌های حساس.
+# این تابع فقط اگه پروسه با root اجرا بشه کار می‌کنه.
+def _auto_fix_file_ownership() -> None:
+    """اگه فایل‌های حساس (config.json, sessions/, *.db) مالکش root است
+    و user=cianet در env هست، اون‌ها رو به cianet تغییر می‌ده.
+    این مشکل وقتی پیش میاد که کاربر `sudo python main.py <tag>` اجرا
+    می‌کنه و بعد سرویس (با user=cianet) نمی‌تونه فایل‌ها رو بخونه.
+    """
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        return  # only fix when running as root
+    target_user = os.environ.get("USER") or "cianet"
+    if target_user == "root":
+        return  # don't chown to root
+    try:
+        import pwd, grp, shutil
+        try:
+            uid = pwd.getpwnam(target_user).pw_uid
+            gid = grp.getgrnam(target_user).gr_gid
+        except KeyError:
+            return  # user doesn't exist
+        paths_to_fix = [
+            os.path.join(DATA_DIR, "config.json"),
+            os.path.join(DATA_DIR, "sessions"),
+            os.path.join(DATA_DIR, "bot_data.db"),
+            os.path.join(DATA_DIR, "saas.db"),
+            os.path.join(DATA_DIR, "downloads"),
+            os.path.join(DATA_DIR, "tracker_media"),
+        ]
+        fixed = 0
+        for p in paths_to_fix:
+            if not os.path.exists(p):
+                continue
+            try:
+                stat = os.stat(p)
+                if stat.st_uid != uid or stat.st_gid != gid:
+                    if os.path.isdir(p):
+                        shutil.chown(p, uid, gid)
+                        for root, dirs, files in os.walk(p):
+                            for name in dirs + files:
+                                try:
+                                    shutil.chown(os.path.join(root, name), uid, gid)
+                                except OSError:
+                                    pass
+                    else:
+                        shutil.chown(p, uid, gid)
+                    fixed += 1
+            except (OSError, PermissionError):
+                pass
+        if fixed > 0:
+            print(f"🔧 [auto_fix_ownership] مالکیت {fixed} فایل/پوشه به user={target_user} تغییر کرد")
+    except Exception as _e:
+        print(f"⚠️ [auto_fix_ownership] خطا: {_e}")
+
+
 async def main():
     # v2.8.6 BUGFIX: _validate_saas_env_or_exit() حالا در همه‌ی حالت‌ها
     # اجرا می‌شه (نه فقط "all"). این جلوی حالت سایلنت fail رو می‌گیره وقتی
@@ -23082,9 +23137,15 @@ async def main():
         raise
     except Exception as _e:
         print(f"⚠️ [validate_saas_env] خطای غیربحرانی: {_e}")
-    # اگر در حالت "all" هستیم، validation سخت‌گیرانه‌تره (در _validate
-    # خودش چک می‌شه).
-    # (قبلاً این خط اینجا بود: if len(sys.argv) > 1 and sys.argv[1] == "all": _validate_saas_env_or_exit())
+
+    # v2.8.7: auto-fix ownership of critical files if running as root.
+    # اگه کاربر interactive رو با sudo اجرا کنه، فایل‌ها مالکش root می‌شه
+    # و سرویس (که با user=cianet اجرا می‌شه) نمی‌تونه بخونتشون. این تابع
+    # اون مشکل رو خودکار حل می‌کنه.
+    try:
+        _auto_fix_file_ownership()
+    except Exception as _e:
+        print(f"⚠️ [auto_fix_ownership] خطای غیربحرانی: {_e}")
     # ستون‌های رفرال — روی نصب‌های موجود هم بی‌خطر اضافه می‌شوند
     try:
         ensure_referral_schema()
