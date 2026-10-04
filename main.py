@@ -10971,7 +10971,8 @@ class SaaSBot:
             buttons.append([UI.go("🤝 درخواست نمایندگی", "user_reseller_apply", tone="success")])
         buttons.append(UI.nav_row())
 
-        await event.edit(text, buttons=buttons)
+        # v2.12.2: use respond instead of edit to avoid "mix inline with normal buttons"
+        await event.respond(text, buttons=buttons)
 
     async def _apply_reseller(self, event):
         """
