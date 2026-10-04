@@ -347,7 +347,7 @@ async def auth_login(req: LoginRequest, response: Response):
         httponly=True,
         samesite="lax",
         max_age=SESSION_TTL_SEC,
-        secure=False,  # nginx terminates SSL — set to True in production via env
+        secure=True,  # nginx terminates SSL — set to True in production via env
     )
     return {"ok": True, "user": {"username": req.username, "role": "OWNER"}}
 
@@ -1260,7 +1260,7 @@ async def user_license_login(req: LicenseLoginRequest, response: Response):
         httponly=True,
         samesite="lax",
         max_age=USER_SESSION_TTL_SEC,
-        secure=False,  # در production روی True
+        secure=True,  # در production روی True
     )
     return {"ok": True, "user_id": user_id}
 
@@ -1716,7 +1716,13 @@ async def analytics_export(request: Request, _: None = Depends(require_auth)):
                      "status", "discount_code", "discount_percent", "pay_method",
                      "created_at", "paid_at"])
     for r in rows:
-        writer.writerow([r[i] for i in range(len(r))])
+        safe_row = []
+        for val in r:
+            s = str(val) if val is not None else ""
+            if s.startswith(("=", "+", "-", "@")):
+                s = "'" + s
+            safe_row.append(s)
+        writer.writerow(safe_row)
     output.seek(0)
     # v2.10.0: UTF-8 BOM برای Excel (Persian text درست نشون داده بشه)
     csv_data = "\ufeff" + output.getvalue()
@@ -1962,8 +1968,6 @@ async def user_get_account_settings(request: Request):
     info = {
         "tag": tag,
         "phone": acc.get("phone"),
-        "api_id": acc.get("api_id"),
-        "api_hash": acc.get("api_hash"),
         "proxy": acc.get("proxy"),
         "disabled": bool(acc.get("disabled")),
         "tg_user_id": acc.get("tg_user_id"),

@@ -73,8 +73,8 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
     # لیست کد‌های معتبر — OWNER اینجا کد‌های فروخته‌شده رو اضافه می‌کنه
     # یا از API بررسی می‌کنه
     VALID_CODES=(
-        "CIANET-DEMO-2024"
-        # کد‌های جدید رو اینجا اضافه کن
+        # کدهای معتبر را اینجا اضافه کنید
+        # مثال: "CIANET-XXXX-XXXX"
     )
 
     # اگه API جواب داد
@@ -120,14 +120,18 @@ echo ""
 # ─── Get credentials ─────────────────────────────────────
 print_step "تنظیمات اولیه"
 read -p "آیدی عددی تلگرام شما (از @userinfobot بپرس): " ADMIN_ID_INPUT
-read -p "توکن ربات ادمین (از @BotFather): " ADMIN_BOT_TOKEN_INPUT
+read -s -p "توکن ربات ادمین (از @BotFather): " ADMIN_BOT_TOKEN_INPUT
+echo ""
 read -p "api_id (از my.telegram.org): " API_ID_INPUT
-read -p "api_hash (از my.telegram.org): " API_HASH_INPUT
+read -s -p "api_hash (از my.telegram.org): " API_HASH_INPUT
+echo ""
 read -p "نام کاربری پنل ادمین وب (default: admin): " PANEL_ADMIN_USER_INPUT
 PANEL_ADMIN_USER_INPUT=${PANEL_ADMIN_USER_INPUT:-admin}
-read -p "پسورد پنل ادمین وب: " PANEL_ADMIN_PASS_INPUT
+read -s -p "پسورد پنل ادمین وب: " PANEL_ADMIN_PASS_INPUT
+echo ""
 read -p "دامنه‌ی پنل (مثلاً panel.yourdomain.ir — اگه نداری، خالی بذار): " PANEL_DOMAIN_INPUT
-read -p "کد مرچنت زرین‌پال (اختیاری — اگه نداری، خالی بذار): " ZARINPAL_MERCHANT_INPUT
+read -s -p "کد مرچنت زرین‌پال (اختیاری — اگه نداری، خالی بذار): " ZARINPAL_MERCHANT_INPUT
+echo ""
 
 if [ -z "$ADMIN_ID_INPUT" ] || [ -z "$ADMIN_BOT_TOKEN_INPUT" ] || [ -z "$API_ID_INPUT" ] || [ -z "$API_HASH_INPUT" ]; then
     print_err "همه‌ی فیلدهای اجباری رو پر کن"

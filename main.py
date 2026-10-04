@@ -24512,6 +24512,13 @@ async def main():
         _auto_fix_file_ownership()
     except Exception as _e:
         print(f"⚠️ [auto_fix_ownership] خطای غیربحرانی: {_e}")
+
+    # v2.12.1: chmod 0600 config.json
+    try:
+        import stat as _stat
+        os.chmod(CONFIG_FILE, _stat.S_IRUSR | _stat.S_IWUSR)
+    except Exception:
+        pass
     # ستون‌های رفرال — روی نصب‌های موجود هم بی‌خطر اضافه می‌شوند
     try:
         ensure_referral_schema()
