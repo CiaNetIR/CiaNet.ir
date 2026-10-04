@@ -10026,7 +10026,11 @@ class SaaSBot:
         ]
         # Ⅱ کاربران
         sec2 = [
-            UI.go(f"👥 همه کاربران{badge(active_users)}", "admin_users", primary=True),
+            # v2.8.9: دکمه‌ی «📋 لیست همه کاربران» — از تابع _owner_show_users
+            # استفاده می‌کنه که از قبل وجود داشت ولی هیچ دکمه‌ای بهش وصل نبود.
+            # حالا کاربر بدون سرچ مستقیم لیست صفحه‌بندی‌شده با کلیک می‌بینه.
+            UI.go("📋 لیست همه کاربران", "owner_users", primary=True),
+            UI.go(f"👥 آمار کاربران{badge(active_users)}", "admin_users"),
             UI.go("🔎 جستجوی کاربر", "user_search_start"),
         ]
         # Ⅲ پشتیبانی
