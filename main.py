@@ -9094,7 +9094,8 @@ class AdminBot:
             "state": WIZ_TAG,
             "data": {"owner_user_id": owner_user_id},
         }
-        await event.edit(
+        # v2.12.4: use respond instead of edit (avoid "mix inline" error)
+        await event.respond(
             "🔐 **لاگین اکانت تلگرام شما**\n\n"
             "برای فعال‌سازی سلف روی اکانتت، اول باید اکانتت رو اینجا لاگین کنی.\n\n"
             "یه اسم (تگ) کوتاه برای این اکانت بفرست — فقط حروف انگلیسی/عدد/"
