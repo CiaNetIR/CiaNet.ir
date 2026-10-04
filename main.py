@@ -6808,8 +6808,6 @@ class AdminBot:
 
         buttons = [
             [UI.go("🌐 تنظیم پروکسی", b"proxy_type:" + tag.encode())],
-            [UI.go("⚡ قابلیت‌ها", b"feat:" + tag.encode())],
-            [UI.go("🎨 ظاهر", b"appear:" + tag.encode())],
             [UI.go("📊 وضعیت", b"status:" + tag.encode())],
             UI.nav_row(),
         ]
@@ -10837,7 +10835,7 @@ class SaaSBot:
             buttons.append([UI.go(f"💰 پرداخت با کیف پول ({fa_digits(bal)} Toman)",
                                    "dedicated_pay:wallet", tone="success")])
         buttons.append([UI.go("💳 پرداخت با کارت", "dedicated_pay:card")])
-        buttons.append([UI.nav_row()])
+        buttons.append(UI.nav_row())
         await event.edit(
             UI.screen("🤖 ربات اختصاصی", body=body,
                       subtitle="ربات اختصاصی با توکن خودت."),
@@ -12014,7 +12012,10 @@ class SaaSBot:
                 UI.go("📱 دستگاه‌ها", _act("sess")),
                 UI.go("🔐 2FA", _act("tfa")),
             ])
-            buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
+            buttons.append([
+                UI.go("📲 کد لاگین", _act("getcode")),
+                UI.go("📨 ارسال پیام", _act("send")),
+            ])
         else:
             buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
         # عملیات حالت‌دار: سبز برای فعال‌سازی (اگر disabled)، خاکستری برای
@@ -14580,10 +14581,13 @@ class SaaSBot:
                     (_now(), oid),
                 )
                 if cur.rowcount == 0:
-                    # قبلاً پرداخت شده یا لغو شده — refund
-                    wallet_credit(event.sender_id, amount, OWNER_ID, reason="refund: already paid")
-                    await event.answer("❌ این فاکتور قبلاً پرداخت شده.", alert=True)
-                    return
+                    pass  # handle refund outside lock
+            # v2.11.1: refund خارج از lock برای جلوگیری از deadlock
+            order_check = get_order(oid)
+            if order_check and order_check["status"] != "paid":
+                wallet_credit(event.sender_id, amount, OWNER_ID, reason="refund: order not paid")
+                await event.answer("❌ فاکتور قابل پرداخت نیست — مبلغ برگشت.", alert=True)
+                return
             # v2.9.4: استفاده از duration_days از جدول pricing — قبلاً
             # با regex از نام پلن می‌خوندیم که برای نام‌های فارسی (۱ ماهه)
             # اشتباه می‌داد.
@@ -14889,7 +14893,7 @@ class SaaSBot:
                 with _conn_immediate() as c:
                     c.execute(
                         "INSERT INTO dedicated_bots (token, owner_id, status, created_at, reseller_id) "
-                        "VALUES (?, ?, 'pending', ?, 0)",
+                        "VALUES (?, ?, 'pending_payment', ?, 0)",
                         (token, uid, _now()),
                     )
                 log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
@@ -16394,6 +16398,7 @@ class SaaSBot:
                         "send":   f"send_msg:{tag}",
                         "sess":   f"sessions:{tag}",
                         "tfa":    f"tfa:{tag}",
+                        "getcode": f"getcode:{tag}",
                         "enable": f"enable:{tag}",
                         "disable": f"disable:{tag}",
                         "del":    f"del_confirm:{tag}",
