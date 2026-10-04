@@ -1372,6 +1372,107 @@ async def user_pay_from_wallet(req: WalletPayRequest, request: Request):
 
 # ─── Admin wallet endpoints (added to admin API) ─────────────────
 
+# v2.9.0: User orders API
+@app.get("/api/user/orders")
+async def user_list_orders(request: Request):
+    """لیست سفارش‌های کاربر (با تخفیف + وضعیت)."""
+    uid = require_user_auth(request)
+    m = _main()
+    orders = m.list_user_orders(uid, limit=50)
+    return {
+        "orders": [
+            {
+                "id": o["id"],
+                "order_no": o["order_no"],
+                "plan": o["plan"],
+                "amount_toman": int(o["amount_toman"]),
+                "original_amount_toman": int(o.get("original_amount_toman") or o["amount_toman"]),
+                "amount_usdt": float(o["amount_usdt"]),
+                "discount_code": o.get("discount_code"),
+                "discount_percent": int(o.get("discount_percent") or 0),
+                "status": o["status"],
+                "pay_method": o.get("pay_method"),
+                "created_at": o["created_at"],
+                "expires_at": o.get("expires_at"),
+                "paid_at": o.get("paid_at"),
+            }
+            for o in orders
+        ]
+    }
+
+@app.post("/api/user/orders/{order_id}/pay-wallet")
+async def user_pay_order_with_wallet(order_id: int, request: Request):
+    """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه."""
+    uid = require_user_auth(request)
+    m = _main()
+    order = m.get_order(order_id)
+    if not order or order["user_id"] != uid:
+        raise HTTPException(404, "فاکتور پیدا نشد")
+    if order["status"] != "pending":
+        raise HTTPException(400, "این فاکتور قابل پرداخت نیست")
+    amount = int(order["amount_toman"])
+    bal = m.get_wallet_balance(uid)
+    if bal < amount:
+        raise HTTPException(400, f"موجودی کافی نیست — موجودی: {bal} Toman")
+    pay_result = m.wallet_pay_from_balance(uid, amount, ref=f"order:{order['order_no']}")
+    if not pay_result.get("ok"):
+        raise HTTPException(500, f"خطا در پرداخت: {pay_result.get('error')}")
+    # Mark order as paid + create subscription
+    try:
+        import re as _re
+        plan_name = order["plan"]
+        days = 30
+        m_match = _re.search(r"(\d+)", plan_name)
+        if m_match:
+            days = int(m_match.group(1))
+        with m._conn_immediate() as c:
+            c.execute(
+                "UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ?",
+                (m._now(), order_id),
+            )
+        m.create_subscription(uid, plan_name, days)
+        return {"ok": True, "balance": pay_result["balance"], "subscription_days": days}
+    except Exception as e:
+        raise HTTPException(500, f"خطا در تأیید فاکتور: {e}")
+
+# v2.9.0: Reseller dashboard
+@app.get("/api/user/reseller-dashboard")
+async def user_reseller_dashboard(request: Request):
+    """داشبورد RESELLER: لیست مشتری‌ها + آمار فروش."""
+    uid = require_user_auth(request)
+    m = _main()
+    role = m.get_role(uid, m.OWNER_ID)
+    if role != m.ROLE_RESELLER:
+        raise HTTPException(403, "فقط نماینده‌ها")
+    # لیست مشتری‌های این نماینده
+    customers = m.list_users_for_reseller(uid)
+    # آمار فروش: تعداد اشتراک‌های فعال + کل درآمد (تقریبی)
+    n_active = 0
+    total_revenue = 0
+    for c in customers:
+        sub_st = m.SaaSBot._user_sub_status_static(c["user_id"]) if hasattr(m.SaaSBot, "_user_sub_status_static") else {"active": False}
+        if sub_st.get("active"):
+            n_active += 1
+        # درآمد تقریبی = مجموع پرداخت‌های تایید شده از این کاربر
+        try:
+            with m._conn() as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(amount_toman), 0) AS rev FROM orders WHERE user_id = ? AND status = 'paid'",
+                    (c["user_id"],),
+                ).fetchone()
+                if row:
+                    total_revenue += int(row["rev"])
+        except Exception:
+            pass
+    return {
+        "customers": customers,
+        "stats": {
+            "total_customers": len(customers),
+            "active_subscriptions": n_active,
+            "total_revenue_toman": total_revenue,
+        }
+    }
+
 @app.get("/api/users/{user_id}/wallet")
 async def admin_get_user_wallet(user_id: int, request: Request, _: None = Depends(require_auth)):
     """موجودی + ۲۰ تراکنش آخر یک کاربر — فقط برای ادمین."""

@@ -1358,7 +1358,11 @@ def init_db() -> None:
             payment_id INTEGER,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
-            paid_at TEXT
+            paid_at TEXT,
+            -- v2.9.0: تخفیف
+            discount_code TEXT,
+            discount_percent INTEGER DEFAULT 0,
+            original_amount_toman INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
@@ -3207,8 +3211,28 @@ def approve_card_payment_atomic(payment_id: int, reviewed_by: int) -> dict:
 # ─────────────────────────────────────────────────────
 
 def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
-                 expires_hours: int = ORDER_EXPIRE_HOURS) -> dict:
-    """فاکتور جدید با شماره‌ی ترتیبی (ORD-00001) و انقضای پرداخت."""
+                 expires_hours: int = ORDER_EXPIRE_HOURS,
+                 discount_code: str = None) -> dict:
+    """فاکتور جدید با شماره‌ی ترتیبی (ORD-00001) و انقضای پرداخت.
+
+    v2.9.0: اگه discount_code داده بشه، کد تخفیف رو اعمال می‌کنه و
+    amount_toman/amount_usdt رو با تخفیف می‌سازه. original_amount_toman
+    و discount_percent و discount_code هم در DB ذخیره می‌شن.
+    """
+    original_amount = amount_toman
+    discount_percent = 0
+    applied_code = None
+    if discount_code:
+        result = apply_discount_code(discount_code, amount_toman)
+        if result.get("ok"):
+            amount_toman = result["amount"]
+            discount_percent = result["percent"]
+            applied_code = discount_code
+            # recalculate usdt based on new amount
+            # (با فرض نرخ ثابت — recalculated by caller if needed)
+            amount_usdt = round(amount_usdt * (100 - discount_percent) / 100, 2)
+        else:
+            return {"error": result.get("error", "discount_failed")}
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).strftime(_DATETIME_FMT)
     with _conn() as c:
         row = c.execute("SELECT value FROM settings WHERE key = 'order_seq'").fetchone()
@@ -3220,8 +3244,10 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
         )
         cur = c.execute(
             "INSERT INTO orders (order_no, user_id, plan, amount_toman, amount_usdt, status, "
-            "created_at, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
-            (f"ORD-{seq:05d}", user_id, plan, amount_toman, amount_usdt, _now(), expires_at),
+            "created_at, expires_at, discount_code, discount_percent, original_amount_toman) "
+            "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+            (f"ORD-{seq:05d}", user_id, plan, amount_toman, amount_usdt, _now(), expires_at,
+             applied_code, discount_percent, original_amount),
         )
         oid = cur.lastrowid
     return get_order(oid)
@@ -9171,6 +9197,7 @@ WIZ_CL_BATCH_QTY = "cl_batch_qty"
 # v2.8.12: کدهای تخفیف
 WIZ_DISCOUNT_PERCENT = "discount_pending_percent"
 WIZ_DISCOUNT_MAX_USES = "discount_pending_max_uses"
+WIZ_DISCOUNT_APPLY_CODE = "discount_apply_code"  # v2.9.0: اعمال کد تخفیف در فاکتور
 WIZ_WALLET_CREDIT_AMOUNT = "wallet_credit_amount"
 WIZ_WALLET_CREDIT_REASON = "wallet_credit_reason"
 WIZ_WALLET_DEBIT_AMOUNT = "wallet_debit_amount"
@@ -13903,10 +13930,21 @@ class SaaSBot:
         buttons = [
             [UI.go("💵 پرداخت با تتر (TRC20)", f"order_tron:{order['id']}".encode())],
             [UI.go("💳 پرداخت با کارت", f"order_card:{order['id']}".encode())],
-            [UI.go("🧾 سفارش‌های من", b"user_orders")],
-            [UI.danger("لغو فاکتور", f"order_cancel:{order['id']}")],
-            UI.nav_row(),
         ]
+        # v2.9.0: دکمه‌ی «پرداخت با کیف پول» اگه موجودی کافی باشه
+        try:
+            bal = get_wallet_balance(order["user_id"])
+            if bal >= int(order["amount_toman"]):
+                buttons.append([UI.go(f"💰 پرداخت با کیف پول ({fa_digits(bal)} Toman)",
+                                       f"order_wallet:{order['id']}".encode(), tone="success")])
+        except Exception:
+            pass
+        # v2.9.0: دکمه‌ی «کد تخفیف» اگه هنوز تخفیف داده نشده
+        if not order.get("discount_code"):
+            buttons.append([UI.go("🎁 کد تخفیف داری؟", f"order_discount:{order['id']}".encode())])
+        buttons.append([UI.go("🧾 سفارش‌های من", b"user_orders")])
+        buttons.append([UI.danger("لغو فاکتور", f"order_cancel:{order['id']}")])
+        buttons.append(UI.nav_row())
         # فاکتور همیشه از یک callback می‌آید → edit. (event.query همان
         # تشخیصِ قابل‌اطمینانِ CallbackQuery است؛ هم‌چنین برای امنیت اگر
         # جایی از مسیر پیام متنی صدا زده شد، respond بفرستد.)
@@ -13924,6 +13962,86 @@ class SaaSBot:
         usdt, rate = await self._compute_order_amounts(info["price_toman"])
         order = create_order(event.sender_id, plan, info["price_toman"], usdt)
         await self._show_invoice(event, order, rate)
+
+    # v2.9.0: کد تخفیف در فاکتور
+    async def _start_discount_wizard(self, event, oid: int):
+        """شروع ویزارد برای ورود کد تخفیف."""
+        order = get_order(oid)
+        if not order or order["user_id"] != event.sender_id:
+            await event.answer("❌ فاکتور پیدا نشد.", alert=True)
+            return
+        if order.get("discount_code"):
+            await event.answer("❌ این فاکتور قبلاً کد تخفیف دارد.", alert=True)
+            return
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, "discount_apply_code", {"order_id": oid})
+        await event.respond(
+            f"🎁 **کد تخفیف**\n\n"
+            f"فاکتور: `{order['order_no']}` — {order['plan']}\n"
+            f"مبلغ فعلی: {fa_digits(order['amount_toman'])} Toman\n\n"
+            f"کد تخفیف رو بفرست:"
+        )
+
+    # v2.9.0: پرداخت با کیف پول
+    async def _pay_order_from_wallet(self, event, oid: int):
+        """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه."""
+        order = get_order(oid)
+        if not order or order["user_id"] != event.sender_id:
+            await event.answer("❌ فاکتور پیدا نشد.", alert=True)
+            return
+        if order["status"] != ORDER_STATUS_PENDING:
+            await event.answer("❌ این فاکتور قابل پرداخت نیست.", alert=True)
+            return
+        amount = int(order["amount_toman"])
+        bal = get_wallet_balance(event.sender_id)
+        if bal < amount:
+            await event.answer(
+                f"❌ موجودی کافی نیست.\n"
+                f"مبلغ فاکتور: {fa_digits(amount)} Toman\n"
+                f"موجودی شما: {fa_digits(bal)} Toman",
+                alert=True,
+            )
+            return
+        # کسر از کیف پول
+        pay_result = wallet_pay_from_balance(
+            event.sender_id, amount, ref=f"order:{order['order_no']}"
+        )
+        if not pay_result.get("ok"):
+            await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
+            return
+        # تأیید فاکتور (network_id معادل approve_card_payment_atomic ولی بدون کارت)
+        # ساده‌سازی: مستقیم order رو paid کن + اشتراک بساز
+        try:
+            with _conn_immediate() as c:
+                c.execute(
+                    "UPDATE orders SET status = 'paid', pay_method = 'wallet', "
+                    "paid_at = ? WHERE id = ?",
+                    (_now(), oid),
+                )
+            # ساخت اشتراک
+            plan_name = order["plan"]
+            # استخراج مدت اشتراک از نام پلن (مثلاً "۳۰ روز" → ۳۰)
+            days = 30  # default
+            try:
+                # اگه پلن با عدد شروع بشه
+                import re as _re
+                m = _re.search(r"(\d+)", plan_name)
+                if m:
+                    days = int(m.group(1))
+            except Exception:
+                pass
+            create_subscription(event.sender_id, plan_name, days)
+            await event.edit(
+                f"✅ پرداخت با کیف پول انجام شد\n\n"
+                f"🧾 فاکتور: `{order['order_no']}`\n"
+                f"💰 مبلغ: {fa_digits(amount)} Toman\n"
+                f"💳 موجودی جدید: {fa_digits(pay_result['balance'])} Toman\n\n"
+                f"✅ اشتراک «{plan_name}» فعال شد!",
+                buttons=[UI.nav_row()],
+            )
+        except Exception as _e:
+            print(f"⚠️ [wallet_pay] خطا در تأیید فاکتور: {_e}")
+            await event.answer(f"❌ خطا در تأیید فاکتور: {_e}", alert=True)
 
     async def _user_show_orders(self, event):
         orders = list_user_orders(event.sender_id)
@@ -14284,6 +14402,53 @@ class SaaSBot:
             return True
 
         # v2.8.12: کدهای تخفیف
+        # v2.9.0: اعمال کد تخفیف در فاکتور
+        if state == WIZ_DISCOUNT_APPLY_CODE:
+            oid = wiz["data"].get("order_id")
+            code = (text or "").strip().upper()
+            if not code:
+                await event.respond("❌ کد رو بفرست:")
+                return True
+            self.wizards.pop(event.sender_id, None)
+            order = get_order(oid)
+            if not order or order["user_id"] != event.sender_id:
+                await event.respond("❌ فاکتور پیدا نشد.")
+                return True
+            if order["status"] != ORDER_STATUS_PENDING:
+                await event.respond("❌ این فاکتور قابل ویرایش نیست.")
+                return True
+            # اعمال تخفیف
+            new_amount = apply_discount_code(code, int(order["amount_toman"]))
+            if not new_amount.get("ok"):
+                err_map = {
+                    "not_found": "❌ کد تخفیف پیدا نشد.",
+                    "expired": "❌ کد تخفیف منقضی شده.",
+                    "max_uses_reached": "❌ این کد دیگه قابل استفاده نیست.",
+                }
+                await event.respond(err_map.get(new_amount.get("error"), "❌ خطا."))
+                return True
+            # ذخیره‌ی تخفیف در فاکتور
+            try:
+                with _conn_immediate() as c:
+                    c.execute(
+                        "UPDATE orders SET discount_code = ?, discount_percent = ?, "
+                        "amount_toman = ?, amount_usdt = ?, original_amount_toman = ? "
+                        "WHERE id = ?",
+                        (code, new_amount["percent"], new_amount["amount"],
+                         round(order["amount_usdt"] * (100 - new_amount["percent"]) / 100, 2),
+                         int(order["amount_toman"]), oid),
+                    )
+                await event.respond(
+                    f"✅ تخفیف اعمال شد\n\n"
+                    f"🎁 کد: `{code}`\n"
+                    f"📊 تخفیف: {fa_digits(new_amount['percent'])}%\n"
+                    f"💰 مبلغ قبلی: {fa_digits(order['amount_toman'])} Toman\n"
+                    f"💰 مبلغ جدید: {fa_digits(new_amount['amount'])} Toman"
+                )
+            except Exception as _e:
+                await event.respond(f"❌ خطا در اعمال تخفیف: {_e}")
+            return True
+
         if state == WIZ_DISCOUNT_PERCENT:
             try:
                 pct = int(text)
@@ -16171,6 +16336,16 @@ class SaaSBot:
                     return
                 if data == "user_orders":
                     await self._user_show_orders(event)
+                    return
+                # v2.9.0: کد تخفیف
+                if data.startswith("order_discount:"):
+                    oid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._start_discount_wizard(event, oid)
+                    return
+                # v2.9.0: پرداخت با کیف پول
+                if data.startswith("order_wallet:"):
+                    oid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._pay_order_from_wallet(event, oid)
                     return
                 if data.startswith("order_tron:"):
                     await self._user_start_trx_pay(event, safe_callback_int(data.split(":", 1)[1], 0))

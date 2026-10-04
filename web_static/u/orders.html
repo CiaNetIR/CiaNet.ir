@@ -5,14 +5,26 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CiaNet — سفارش‌ها</title>
   <link rel="stylesheet" href="styles.css">
+  <style>
+    .order-card { padding: 12px; background: rgba(15,23,42,0.4); border-radius: 6px; border-left: 3px solid var(--border); margin-bottom: 10px; }
+    .order-card.paid { border-left-color: var(--success); }
+    .order-card.pending { border-left-color: var(--accent); }
+    .order-card.expired, .order-card.cancelled { border-left-color: var(--danger); opacity: 0.7; }
+    .order-meta { color: var(--text-dim); font-size: 0.85rem; margin-top: 4px; }
+    .pay-btn { margin-top: 8px; padding: 6px 12px; background: var(--accent); border: none; border-radius: 4px; color: #1a1a1a; cursor: pointer; font-family: inherit; font-size: 0.9rem; }
+    .pay-btn:hover { background: var(--accent-hover); }
+  </style>
 </head>
 <body>
   <nav class="topnav">
     <div class="brand">CiaNet</div>
     <div class="nav-items">
       <a href="dashboard.html">داشبورد</a>
+      <a href="accounts.html">🤖 اکانت‌ها</a>
+      <a href="chats.html">💬 چت‌ها</a>
       <a href="wallet.html">💰 کیف پول</a>
       <a href="orders.html" class="active">🧾 سفارش‌ها</a>
+      <a href="account_settings.html">⚙️ تنظیمات</a>
       <button id="logout-btn" class="link-btn">خروج</button>
     </div>
   </nav>
@@ -20,10 +32,72 @@
   <div class="container">
     <div class="card">
       <h2>🧾 سفارش‌های شما</h2>
-      <p class="hint">این صفحه به‌زودی فعال می‌شود.</p>
+      <div id="orders-list">در حال بارگذاری...</div>
     </div>
   </div>
 
   <script src="app.js"></script>
+  <script>
+    async function loadOrders() {
+      const me = await requireAuth();
+      if (!me) return;
+      try {
+        const data = await apiCall('GET', '/api/user/orders');
+        renderOrders(data.orders || []);
+      } catch (err) {
+        document.getElementById('orders-list').textContent = 'خطا: ' + err.message;
+      }
+    }
+    function renderOrders(orders) {
+      const c = document.getElementById('orders-list');
+      if (!orders.length) {
+        c.innerHTML = '<p class="hint">هنوز سفارشی ثبت نشده. در ربات تلگرام «🛒 خرید سلف» بزن.</p>';
+        return;
+      }
+      c.innerHTML = '';
+      const statusMap = {
+        pending: '⏳ در انتظار پرداخت',
+        paid: '✅ پرداخت شد',
+        expired: '❌ منقضی شد',
+        cancelled: '🚫 لغو شد',
+      };
+      for (const o of orders) {
+        const div = document.createElement('div');
+        div.className = 'order-card ' + o.status;
+        const date = (o.created_at || '').replace('T', ' ').slice(0, 16);
+        let discountHtml = '';
+        if (o.discount_code) {
+          discountHtml = `<div style="color:var(--accent);font-size:0.85rem;margin-top:4px">🎁 تخفیف: ${escapeHtml(o.discount_code)} (${faDigits(o.discount_percent)}%)</div>`;
+        }
+        let payBtnHtml = '';
+        if (o.status === 'pending') {
+          payBtnHtml = `<button class="pay-btn" onclick="payWithWallet(${o.id}, '${escapeHtml(o.order_no)}', ${o.amount_toman})">💰 پرداخت با کیف پول (${faDigits(o.amount_toman)} Toman)</button>`;
+        }
+        div.innerHTML = `
+          <div><strong>${escapeHtml(o.order_no)}</strong> — ${escapeHtml(o.plan)}</div>
+          <div class="order-meta">
+            ${fa_digits(o.amount_toman)} Toman
+            ${o.discount_code ? ' · <s>' + fa_digits(o.original_amount_toman) + '</s>' : ''}
+            · ${statusMap[o.status] || o.status}
+            · ${date}
+          </div>
+          ${discountHtml}
+          ${payBtnHtml}
+        `;
+        c.appendChild(div);
+      }
+    }
+    async function payWithWallet(oid, orderNo, amount) {
+      if (!confirm(`پرداخت ${fa_digits(amount)} Toman از کیف پول برای فاکتور ${orderNo}؟`)) return;
+      try {
+        const r = await apiCall('POST', `/api/user/orders/${oid}/pay-wallet`);
+        alert('✅ پرداخت شد! موجودی جدید: ' + fa_digits(r.balance) + ' Toman');
+        loadOrders();  // refresh
+      } catch (err) {
+        alert('خطا: ' + err.message);
+      }
+    }
+    document.addEventListener('DOMContentLoaded', loadOrders);
+  </script>
 </body>
 </html>
