@@ -9690,6 +9690,21 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
     save_config(cfg)
 
 
+def _purge_old_2fa_plaintext() -> None:
+    """v2.11.4: پاک‌کردن رمز 2FA plaintext از config.json."""
+    cfg = load_config()
+    if not isinstance(cfg, dict):
+        return
+    changed = False
+    for tag, acc in cfg.items():
+        if isinstance(acc, dict) and "last_2fa_password" in acc:
+            acc.pop("last_2fa_password", None)
+            changed = True
+    if changed:
+        save_config(cfg)
+        print("🔒 [2fa] plaintext رمزهای قدیمی پاک شدند")
+
+
 class SaaSBot:
     def __init__(self, selfbot_module):
         self.sb = selfbot_module
@@ -10627,11 +10642,11 @@ class SaaSBot:
         sec1 = [
             UI.go(f"💳 سفارشات در انتظار{badge(pending_pay)}", "owner_payments", primary=True),
             UI.go("💰 تأیید پرداخت", "admin_finance"),
-            UI.go("🏷 قیمت‌گذاری", "owner_pricing"),
-            UI.go("🎟 کدهای تخفیف", "owner_discount_codes"),
             UI.go("🎫 لایسنس و دسترسی", "license_access"),
         ]
         if role == ROLE_OWNER:
+            sec1.append(UI.go("🏷 قیمت‌گذاری", "owner_pricing"))
+            sec1.append(UI.go("🎟 کدهای تخفیف", "owner_discount_codes"))
             sec1.append(UI.go("💳 درگاه‌های پرداخت", "owner_payment_gateways"))
         # Ⅱ کاربران
         sec2 = [
@@ -10654,14 +10669,14 @@ class SaaSBot:
         # PATCH (audit-7): «💼 کیف پول USDT» handler نداشت؛ حذف شد تا وقتی
         # که `owner_set_wallet` به‌عنوان alias پیاده‌سازی شود.
         # PATCH (v2.0.8): دکمه‌ی «🔄 آپدیت و ورژن» فقط برای OWNER اضافه شد.
-        sec4 = [
-            UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True),
-        ]
+        sec4 = []
         if role == ROLE_OWNER:
             sec4.append(UI.go("📢 کانال عضویت", "owner_channel_set", primary=True))
             sec4.append(UI.go("💾 بکاپ و بازیابی", "admin_backup"))
-        if role == ROLE_OWNER:
             sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
+            sec4.append(UI.go("🌐 پنل وب", "owner_web_panel", tone="success"))
+        else:
+            sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True))
             # PATCH (v2.1.5): دکمه‌ی «🌐 پنل وب» برای دسترسی به web panel.
             # URL از env var PANEL_URL خوانده می‌شه (مثلاً https://panel.cianet.ir
             # یا http://localhost:8000). اگه تنظیم نشه، یه message راهنما نشون
@@ -10864,8 +10879,12 @@ class SaaSBot:
                 return
             if isinstance(order, dict) and "id" in order:
                 with _conn_immediate() as c:
-                    c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
+                    cur = c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
                               (_now(), order["id"]))
+                    if cur.rowcount == 0:
+                        wallet_credit(uid, price, OWNER_ID, reason="refund: already paid")
+                        await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
+                        return
             await self._clear_admin_panel_wizard(uid)
             self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
             await event.edit(
@@ -14899,8 +14918,8 @@ class SaaSBot:
                 with _conn_immediate() as c:
                     c.execute(
                         "INSERT INTO dedicated_bots (token, owner_id, status, created_at, reseller_id) "
-                        "VALUES (?, ?, 'pending_payment', ?, 0)",
-                        (token, uid, _now()),
+                        "VALUES (?, ?, 'pending_payment', ?, ?)",
+                        (token, uid, _now(), uid),
                     )
                 log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
                 await event.respond(
@@ -22602,7 +22621,7 @@ class SelfBot:
                 import time as _t
                 self._flood_until = _t.time() + (e.seconds or 30) + FLOOD_RECOVER_GRACE
                 print(f"⏳ [{self.tag}] FloodWait {e.seconds}s در tabchi")
-                await asyncio.sleep(e.seconds + 5)
+                await asyncio.sleep((e.seconds or 30) + 5)
                 _jitter = self.tabchi_interval * 60 * random.uniform(-0.1, 0.1)
                 self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60 + _jitter
                 self._persist(tabchi_next_run_at=self.tabchi_next_run_at)
