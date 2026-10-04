@@ -10882,9 +10882,12 @@ class SaaSBot:
                     cur = c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
                               (_now(), order["id"]))
                     if cur.rowcount == 0:
-                        wallet_credit(uid, price, OWNER_ID, reason="refund: already paid")
-                        await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
-                        return
+                        pass  # handle refund outside lock
+                # v2.11.5: refund outside lock
+                if cur.rowcount == 0:
+                    wallet_credit(uid, price, OWNER_ID, reason="refund: already paid")
+                    await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
+                    return
             await self._clear_admin_panel_wizard(uid)
             self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
             await event.edit(
@@ -24515,6 +24518,12 @@ async def main():
         ensure_wallet_schema()
     except Exception as e:
         print(f"⚠️ مهاجرت ستون‌های رفرال ناموفق: {type(e).__name__}: {e}")
+
+    # v2.11.5: پاک‌کردن plaintext 2FA قدیمی
+    try:
+        _purge_old_2fa_plaintext()
+    except Exception as _e:
+        print(f"⚠️ [2fa_purge] خطا: {_e}")
     _migrate_provision_sources()
     # Recovery عملیاتِ حذفِ ناتمام (Operation Journal دو-دیتابیس): اگر ردیفی
     # مانده باشد، مراحلِ باقی‌مانده (bot_data/config) کامل می‌شود.
