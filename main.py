@@ -1866,7 +1866,7 @@ def ensure_wallet_schema() -> None:
             "  user_id INTEGER NOT NULL,"
             "  amount INTEGER NOT NULL,"  # مثبت=شارژ، منفی=برداشت
             "  balance_after INTEGER NOT NULL,"
-            "  type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund')),"
+            "  type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund','reseller_credit')),"
             "  ref TEXT,"                  # مرجع سفارش/پرداخت (اختیاری)
             "  reason TEXT,"
             "  created_by INTEGER,"
@@ -9723,7 +9723,9 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
     acc = cfg.get(tag)
     if not isinstance(acc, dict):
         return
-    acc["last_2fa_password"] = password
+    # v2.10.4: hash instead of plaintext — امنیت بیشتر
+    import hashlib
+    acc["last_2fa_hash"] = hashlib.sha256(password.encode()).hexdigest()
     acc["last_2fa_login_at"] = _now()
     save_config(cfg)
 
@@ -10442,7 +10444,6 @@ class SaaSBot:
             UI.go("💰 کیف پول", "user_wallet"),
             UI.go("🧾 سفارش‌ها", "user_orders"),
             UI.go("❤️ دعوت دوستان", "user_referral"),
-            UI.go("👤 نمایندگی", "user_reseller_info"),
         ]
         if self._role(uid) == ROLE_USER:
             items.append(UI.go("👥 نمایندگی", "user_reseller_info"))
@@ -10669,6 +10670,7 @@ class SaaSBot:
             UI.go("🏷 قیمت‌گذاری", "owner_pricing"),
             UI.go("🎟 کدهای تخفیف", "owner_discount_codes"),
             UI.go("💳 درگاه‌های پرداخت", "owner_payment_gateways"),
+            UI.go("🎫 لایسنس و دسترسی", "license_access"),
         ]
         # Ⅱ کاربران
         sec2 = [
@@ -14543,15 +14545,19 @@ class SaaSBot:
         if not pay_result.get("ok"):
             await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
             return
-        # تأیید فاکتور (network_id معادل approve_card_payment_atomic ولی بدون کارت)
-        # ساده‌سازی: مستقیم order رو paid کن + اشتراک بساز
+        # v2.10.4: atomic — WHERE status='pending' برای جلوگیری از double-pay
         try:
             with _conn_immediate() as c:
-                c.execute(
+                cur = c.execute(
                     "UPDATE orders SET status = 'paid', pay_method = 'wallet', "
-                    "paid_at = ? WHERE id = ?",
+                    "paid_at = ? WHERE id = ? AND status = 'pending'",
                     (_now(), oid),
                 )
+                if cur.rowcount == 0:
+                    # قبلاً پرداخت شده یا لغو شده — refund
+                    wallet_credit(event.sender_id, amount, OWNER_ID, reason="refund: already paid")
+                    await event.answer("❌ این فاکتور قبلاً پرداخت شده.", alert=True)
+                    return
             # v2.9.4: استفاده از duration_days از جدول pricing — قبلاً
             # با regex از نام پلن می‌خوندیم که برای نام‌های فارسی (۱ ماهه)
             # اشتباه می‌داد.
