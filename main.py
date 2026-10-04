@@ -8174,7 +8174,8 @@ class AdminBot:
              UI.go("HTTP", b"proxy_type:http")],
             [UI.neutral(UI.L_CANCEL, "cancel_wizard")],
         ]
-        await event.edit(title, buttons=buttons)
+        # v2.12.3: use respond instead of edit (avoid mix inline error)
+        await event.respond(title, buttons=buttons)
 
     async def _start_proxy_wizard(self, event, tag: str):
         self.wizards[event.sender_id] = {
@@ -8189,7 +8190,8 @@ class AdminBot:
             return
         wiz["data"]["proxy_type"] = proxy_type
         wiz["state"] = WIZ_PROXY_ADDR
-        await event.edit(
+        # v2.12.3: use respond
+        await event.respond(
             "آدرس (IP یا دامنه‌ی) پروکسی رو بفرست:",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
         )
