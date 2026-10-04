@@ -23106,6 +23106,12 @@ async def main():
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg == "all":
+            # v2.8.5: شروع web panel در همین event loop — برای دسترسی به Telethon
+            embed_panel_env = os.environ.get("CIANET_EMBED_PANEL", "1").strip().lower()
+            if embed_panel_env in ("1", "true", "yes"):
+                panel_port = int(os.environ.get("CIANET_PANEL_PORT", "8000"))
+                asyncio.create_task(_embed_web_panel(port=panel_port))
+                print(f"🌐 [embed_panel] web panel در همین پروسه روی port {panel_port} شروع شد")
             await _run_all_accounts(cfg)
             return
         elif arg in cfg:
@@ -23173,6 +23179,29 @@ def _run_forever():
                 import traceback
                 traceback.print_exc()
             time.sleep(wait_time)
+
+
+# ─── v2.8.5: Embed Web Panel into selfbot process ─────────────────────
+# این تابع uvicorn را در همین event loop اجرا می‌کند تا web panel
+# دسترسی مستقیم به ACCOUNTS dict و Telethon clients داشته باشد.
+
+async def _embed_web_panel(host: str = "127.0.0.1", port: int = 8000):
+    """شروع web panel در همین پروسه — برای دسترسی به Telethon clients."""
+    try:
+        import uvicorn
+        config = uvicorn.Config(
+            "web_panel:app",
+            host=host,
+            port=port,
+            log_level="warning",
+            workers=1,  # حتماً 1 — workers>1 پروسه‌های جدا می‌سازد
+        )
+        server = uvicorn.Server(config)
+        # در همین event loop اجرا کن — نه پروسه‌ی جدا
+        await server.serve()
+    except Exception as e:
+        print(f"⚠️ [embed_panel] خطا در شروع web panel: {e}")
+
 
 
 if __name__ == "__main__":

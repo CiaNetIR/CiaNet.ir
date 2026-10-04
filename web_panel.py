@@ -1453,6 +1453,178 @@ async def health():
     return {"status": "ok", "time": time.time()}
 
 
+
+# ─── v2.8.5: Account Settings + Chat API ─────────────────────────────
+# این endpoint‌ها به Telethon client زنده نیاز دارند — فقط وقتی کار می‌کنند
+# که web_panel در همین پروسه‌ی selfbot اجرا شود (embed mode).
+
+class AccountSettingsUpdate(BaseModel):
+    phone: Optional[str] = None
+    api_id: Optional[int] = None
+    api_hash: Optional[str] = None
+    proxy: Optional[dict] = None
+    disabled: Optional[bool] = None
+
+class SendMessageRequest(BaseModel):
+    text: str
+
+def _get_live_client(request: Request, tag: str = None):
+    """گرفتن Telethon client زنده برای tag فعال (یا tag داده‌شده)."""
+    uid = require_user_auth(request)
+    token = request.cookies.get("cianet_user_session")
+    if not token or token not in _user_sessions:
+        raise HTTPException(401, "Session نامعتبر")
+    s = _user_sessions[token]
+    active_tag = tag or s.get("active_tag")
+    if not active_tag:
+        raise HTTPException(400, "هیچ اکانتی در live session انتخاب نشده — اول /api/user/live-session را POST کن")
+    m = _main()
+    cfg = m.load_config()
+    acc = cfg.get(active_tag)
+    if not acc:
+        raise HTTPException(404, "اکانت پیدا نشد")
+    if not m.account_belongs_to(acc, active_tag, uid):
+        raise HTTPException(403, "این اکانت متعلق به شما نیست")
+    entry = getattr(m, "ACCOUNTS", {}).get(active_tag)
+    if entry is None:
+        raise HTTPException(503, "اکانت در حال حاضر متصل نیست — صبر کن یا /start بزن")
+    client = getattr(entry, "client", None) or getattr(entry, "bot", None)
+    if client is None or not getattr(client, "is_connected", False):
+        raise HTTPException(503, "اکانت هنوز وصل نشده — صبر کن")
+    return uid, active_tag, acc, client
+
+@app.get("/api/user/account/settings")
+async def user_get_account_settings(request: Request):
+    """نمایش تنظیمات اکانت فعال در live session."""
+    uid, tag, acc, client = _get_live_client(request)
+    # اطلاعات از config.json + اطلاعات زنده از Telethon
+    info = {
+        "tag": tag,
+        "phone": acc.get("phone"),
+        "api_id": acc.get("api_id"),
+        "api_hash": acc.get("api_hash"),
+        "proxy": acc.get("proxy"),
+        "disabled": bool(acc.get("disabled")),
+        "tg_user_id": acc.get("tg_user_id"),
+        "tg_username": acc.get("tg_username"),
+    }
+    # اطلاعات زنده از Telethon
+    try:
+        me = await client.get_me()
+        info["live_name"] = getattr(me, "first_name", None)
+        info["live_last_name"] = getattr(me, "last_name", None)
+        info["live_username"] = getattr(me, "username", None)
+        info["live_phone"] = getattr(me, "phone", None)
+        info["live_photo"] = bool(getattr(me, "photo", None))
+    except Exception as e:
+        info["live_error"] = str(e)[:100]
+    return info
+
+@app.patch("/api/user/account/settings")
+async def user_update_account_settings(req: AccountSettingsUpdate, request: Request):
+    """به‌روزرسانی تنظیمات اکانت فعال در live session."""
+    uid, tag, acc, client = _get_live_client(request)
+    m = _main()
+    cfg = m.load_config()
+    if tag not in cfg:
+        raise HTTPException(404, "اکانت در config نیست")
+    changes = []
+    if req.phone is not None:
+        cfg[tag]["phone"] = req.phone
+        changes.append("phone")
+    if req.api_id is not None:
+        cfg[tag]["api_id"] = req.api_id
+        changes.append("api_id")
+    if req.api_hash is not None:
+        cfg[tag]["api_hash"] = req.api_hash
+        changes.append("api_hash")
+    if req.proxy is not None:
+        # اعتبارسنجی فرمت پروکسی
+        p = req.proxy
+        if not isinstance(p, dict):
+            raise HTTPException(400, "proxy باید dict باشد")
+        valid_keys = {"proxy_type", "addr", "port", "rdns", "username", "password"}
+        invalid = set(p.keys()) - valid_keys
+        if invalid:
+            raise HTTPException(400, f"کلیدهای نامعتبر در proxy: {invalid}. کلیدهای مجاز: {valid_keys}")
+        cfg[tag]["proxy"] = p
+        changes.append("proxy")
+    if req.disabled is not None:
+        cfg[tag]["disabled"] = req.disabled
+        changes.append("disabled")
+    if not changes:
+        return {"ok": True, "changes": []}
+    m.save_config(cfg)
+    return {"ok": True, "changes": changes, "note": "برای اعمال تغییرات proxy/api_id، restart سرویس لازم است"}
+
+@app.get("/api/user/chats")
+async def user_list_chats(request: Request, limit: int = 50):
+    """لیست چت‌های اخیر اکانت فعال."""
+    uid, tag, acc, client = _get_live_client(request)
+    chats = []
+    try:
+        async for dialog in client.iter_dialogs(limit=limit):
+            entity = dialog.entity
+            chat_type = "private"
+            if hasattr(entity, "megagroup") and entity.megagroup:
+                chat_type = "channel"
+            elif hasattr(entity, "broadcast") and entity.broadcast:
+                chat_type = "channel"
+            elif hasattr(entity, "is_group") and entity.is_group:
+                chat_type = "group"
+            name = getattr(entity, "title", None) or getattr(entity, "first_name", "?")
+            username = getattr(entity, "username", None)
+            chats.append({
+                "id": dialog.id,
+                "name": name,
+                "username": username,
+                "type": chat_type,
+                "last_message_date": dialog.date.isoformat() if dialog.date else None,
+                "unread": dialog.unread_count or 0,
+            })
+    except Exception as e:
+        raise HTTPException(500, f"خطا در گرفتن چت‌ها: {e}")
+    return {"chats": chats, "count": len(chats)}
+
+@app.get("/api/user/chats/{chat_id}/messages")
+async def user_get_messages(chat_id: int, request: Request, limit: int = 50):
+    """پیام‌های یک چت."""
+    uid, tag, acc, client = _get_live_client(request)
+    messages = []
+    try:
+        entity = await client.get_entity(chat_id)
+        async for msg in client.iter_messages(entity, limit=limit):
+            sender_name = "?"
+            if msg.sender:
+                sender_name = getattr(msg.sender, "first_name", None) or getattr(msg.sender, "title", None) or "?"
+            messages.append({
+                "id": msg.id,
+                "text": msg.text or "",
+                "date": msg.date.isoformat() if msg.date else None,
+                "sender_id": msg.sender_id,
+                "sender_name": sender_name,
+                "out": bool(msg.out),
+            })
+    except Exception as e:
+        raise HTTPException(500, f"خطا: {e}")
+    # برعکس کن — قدیمی‌ها اول
+    messages.reverse()
+    return {"chat_id": chat_id, "messages": messages}
+
+@app.post("/api/user/chats/{chat_id}/send")
+async def user_send_message(chat_id: int, req: SendMessageRequest, request: Request):
+    """ارسال پیام به یک چت."""
+    uid, tag, acc, client = _get_live_client(request)
+    if not req.text or not req.text.strip():
+        raise HTTPException(400, "متن پیام خالی است")
+    try:
+        entity = await client.get_entity(chat_id)
+        result = await client.send_message(entity, req.text)
+        return {"ok": True, "message_id": result.id, "date": result.date.isoformat() if result.date else None}
+    except Exception as e:
+        raise HTTPException(500, f"خطا در ارسال: {e}")
+
+
 # ─── v2.8.4: Live Session API — user picks a selfbot & enters "control mode" ───
 # کاربر بعد از لاگین با لایسنس، اکانت‌های self خودش رو می‌بینه. روی هر کدام
 # بزنه تا وارد «حالت کنترل» بشه — بدون نیاز به کد تلگرام یا لایسنس دوباره.
