@@ -2274,6 +2274,71 @@ def create_zarinpal_payment(order_id: int, callback_url: str) -> dict:
         return {"error": f"zarinpal_request_failed: {e}"}
 
 
+# v2.10.2: درگاه Zibal
+def create_zibal_payment(order_id: int, callback_url: str) -> dict:
+    """ساخت پرداخت Zibal — redirect URL برمی‌گردونه."""
+    import urllib.request, json as _json
+    merchant = (get_setting("zibal_merchant") or "").strip()
+    if not merchant:
+        return {"error": "zibal_merchant ست نشده"}
+    order = get_order(order_id)
+    if not order:
+        return {"error": "order_not_found"}
+    amount = int(order["amount_toman"])
+    try:
+        payload = _json.dumps({
+            "merchant": merchant,
+            "amount": amount * 10,
+            "callbackUrl": callback_url,
+            "description": f"CiaNet {order['plan']}",
+        }).encode()
+        req = urllib.request.Request(
+            "https://gateway.zibal.ir/v1/request",
+            data=payload, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = _json.loads(r.read().decode())
+        if resp.get("result") == 100:
+            track_id = resp.get("trackId")
+            with _conn_immediate() as c:
+                c.execute(
+                    "UPDATE orders SET pay_method = 'zibal', txid = ? WHERE id = ?",
+                    (str(track_id), order_id),
+                )
+            url = f"https://gateway.zibal.ir/start/{track_id}"
+            return {"ok": True, "url": url, "track_id": track_id}
+        return {"error": f"zibal_error: {resp}"}
+    except Exception as e:
+        return {"error": f"zibal_request_failed: {e}"}
+
+
+def verify_zibal_payment(track_id: str, amount_toman: int) -> dict:
+    """تأیید پرداخت Zibal."""
+    import urllib.request, json as _json
+    merchant = (get_setting("zibal_merchant") or "").strip()
+    if not merchant:
+        return {"error": "zibal_merchant ست نشده"}
+    try:
+        payload = _json.dumps({
+            "merchant": merchant,
+            "trackId": int(track_id),
+            "amount": amount_toman * 10,
+        }).encode()
+        req = urllib.request.Request(
+            "https://gateway.zibal.ir/v1/verify",
+            data=payload, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = _json.loads(r.read().decode())
+        if resp.get("result") in (100, 101):
+            return {"ok": True, "ref_id": resp.get("refId")}
+        return {"error": f"verify_failed: result={resp.get('result')}"}
+    except Exception as e:
+        return {"error": f"verify_request_failed: {e}"}
+
+
 def verify_zarinpal_payment(authority: str, amount_toman: int) -> dict:
     """تأیید پرداخت Zarinpal بعد از redirect به callback."""
     import urllib.request, json as _json
@@ -11378,7 +11443,7 @@ class SaaSBot:
         «🎫 لایسنس و دسترسی‌ها» انجام می‌شود."""
         pending = list_pending_payments()
         card = get_setting("card_number")
-        wallet = get_setting("trc20_wallet")
+        wallet = get_setting("usdt_wallet")
         items = [
             UI.item(f"💳 پرداخت‌های در انتظار ({len(pending)})",
                     "pending" if pending else "none", "owner_payments"),
@@ -13583,6 +13648,40 @@ class SaaSBot:
             buttons=buttons,
         )
 
+    async def _owner_show_payment_gateways(self, event):
+        """v2.10.2: درگاه‌های پرداخت — فعال/غیرفعال."""
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط OWNER", alert=True)
+            return
+        zarinpal_on = get_setting("pay_zarinpal_enabled", "0") == "1"
+        zibal_on = get_setting("pay_zibal_enabled", "0") == "1"
+        card_on = get_setting("pay_card_enabled", "1") == "1"
+        trc20_on = get_setting("pay_trc20_enabled", "1") == "1"
+        zarinpal_m = (get_setting("zarinpal_merchant") or "").strip()
+        zibal_m = (get_setting("zibal_merchant") or "").strip()
+        body = [
+            "💳 **درگاه‌های پرداخت**\n",
+            f"🟡 زرین‌پال: {'✅ فعال' if zarinpal_on else '❌ غیرفعال'}" + (f" — مرچنت: `{zarinpal_m[:8]}...`" if zarinpal_m else " — مرچنت ست نشده"),
+            f"🟢 زیبال: {'✅ فعال' if zibal_on else '❌ غیرفعال'}" + (f" — مرچنت: `{zibal_m[:8]}...`" if zibal_m else " — مرچنت ست نشده"),
+            f"💳 کارت به کارت: {'✅ فعال' if card_on else '❌ غیرفعال'}",
+            f"💵 تتر TRC20: {'✅ فعال' if trc20_on else '❌ غیرفعال'}",
+            f"💰 کیف پول: ✅ همیشه فعال",
+        ]
+        buttons = [
+            [UI.go(("🔴 " if zarinpal_on else "🟢 ") + "زرین‌پال", b"toggle_pay:zarinpal")],
+            [UI.go(("🔴 " if zibal_on else "🟢 ") + "زیبال", b"toggle_pay:zibal")],
+            [UI.go(("🔴 " if card_on else "🟢 ") + "کارت به کارت", b"toggle_pay:card")],
+            [UI.go(("🔴 " if trc20_on else "🟢 ") + "تتر TRC20", b"toggle_pay:trc20")],
+            [UI.go("🔑 مرچنت زرین‌پال", b"set_merchant:zarinpal")],
+            [UI.go("🔑 مرچنت زیبال", b"set_merchant:zibal")],
+            UI.nav_row(),
+        ]
+        await event.edit(
+            UI.screen("💳 درگاه‌های پرداخت", body=body,
+                      subtitle="فعال/غیرفعال‌کردن درگاه‌ها."),
+            buttons=buttons,
+        )
+
     async def _owner_show_license_hub(self, event):
         """🎫 لایسنس و دسترسی‌ها — ساخت لایسنس + مدیریت نقش‌ها."""
         lines = ["🎫 **لایسنس و دسترسی‌ها**\n\nاز اینجا لایسنس بساز و نقش‌ها را مدیریت کن:"]
@@ -14359,22 +14458,26 @@ class SaaSBot:
             f"بعد از واریز، «پرداخت با تتر» را بزن و هش تراکنش را بفرست — "
             f"به‌صورت خودکار تایید می‌شود."
         )
-        buttons = [
-            [UI.go("💵 پرداخت با تتر (TRC20)", f"order_tron:{order['id']}".encode())],
-            [UI.go("💳 پرداخت با کارت", f"order_card:{order['id']}".encode())],
-        ]
-        # v2.9.0: دکمه‌ی «پرداخت با کیف پول» اگه موجودی کافی باشه
+                # v2.10.2: فقط درگاه‌های فعال
+        buttons = []
+        if get_setting("pay_trc20_enabled", "1") == "1":
+            buttons.append([UI.go("ф плат с тер (TRC20)", f"order_tron:{order['id']}".encode())])
+        if get_setting("pay_card_enabled", "1") == "1":
+            buttons.append([UI.go("плат с карт", f"order_card:{order['id']}".encode())])
+        if get_setting("pay_zarinpal_enabled", "0") == "1" and (get_setting("zarinpal_merchant") or "").strip():
+            buttons.append([UI.go("🟡 плат анлайн (زرین‌پال)", f"order_zarinpal:{order['id']}".encode())])
+        if get_setting("pay_zibal_enabled", "0") == "1" and (get_setting("zibal_merchant") or "").strip():
+            buttons.append([UI.go("🟢 плат анлайн (زیبال)", f"order_zibal:{order['id']}".encode())])
         try:
             bal = get_wallet_balance(order["user_id"])
             if bal >= int(order["amount_toman"]):
-                buttons.append([UI.go(f"💰 پرداخت با کیف پول ({fa_digits(bal)} Toman)",
+                buttons.append([UI.go(f"💰 плат бاه کیف پول ({fa_digits(bal)} Toman)",
                                        f"order_wallet:{order['id']}".encode(), tone="success")])
         except Exception:
             pass
-        # v2.9.0: دکمه‌ی «کد تخفیف» اگه هنوز تخفیف داده نشده
         if not order.get("discount_code"):
-            buttons.append([UI.go("🎁 کد تخفیف داری؟", f"order_discount:{order['id']}".encode())])
-        buttons.append([UI.go("🧾 سفارش‌های من", b"user_orders")])
+            buttons.append([UI.go("🎀 кد تخفیف داری؟", f"order_discount:{order['id']}".encode())])
+        buttons.append([UI.go("سفارش‌های من", b"user_orders")])
         buttons.append([UI.danger("لغو فاکتور", f"order_cancel:{order['id']}")])
         buttons.append(UI.nav_row())
         # فاکتور همیشه از یک callback می‌آید → edit. (event.query همان
@@ -14702,6 +14805,17 @@ class SaaSBot:
             return True
 
         # v2.10.1: max_uses for single license
+        if state == "set_merchant":
+            gw = wiz["data"].get("gw", "")
+            merchant = (text or "").strip()
+            if not merchant or len(merchant) < 5:
+                await event.respond("❌ کد معتبر نیست. دوباره بفرست:")
+                return True
+            self.wizards.pop(event.sender_id, None)
+            set_setting(f"{gw}_merchant", merchant)
+            await event.respond(f"✅ مرچنت {gw} تنظیم شد\n🔑 `{merchant[:10]}...`\nحالا از پنل فعالش کن.")
+            return True
+
         if state == WIZ_CL_MAX_USES:
             try:
                 mu = _to_int(text)
@@ -16686,6 +16800,58 @@ class SaaSBot:
                         "درصد تخفیف رو بفرست (۱ تا ۱۰۰):",
                         buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
                     )
+                    return
+                # v2.10.2: درگاه‌های پرداخت
+                if data == "owner_payment_gateways" and role == ROLE_OWNER:
+                    await self._owner_show_payment_gateways(event)
+                    return
+                if data.startswith("toggle_pay:") and role == ROLE_OWNER:
+                    gw = data.split(":", 1)[1]
+                    key_map = {"zarinpal": "pay_zarinpal_enabled", "zibal": "pay_zibal_enabled",
+                               "card": "pay_card_enabled", "trc20": "pay_trc20_enabled"}
+                    setting_key = key_map.get(gw)
+                    if setting_key:
+                        current = get_setting(setting_key, "1" if gw in ("card", "trc20") else "0")
+                        set_setting(setting_key, "0" if current == "1" else "1")
+                    await self._owner_show_payment_gateways(event)
+                    return
+                if data.startswith("set_merchant:") and role == ROLE_OWNER:
+                    gw = data.split(":", 1)[1]
+                    await self._clear_admin_panel_wizard(event.sender_id)
+                    self._start_own_wizard(event.sender_id, "set_merchant", {"gw": gw})
+                    await event.respond(f"🔑 **مرچنت {gw}**\n\nکد مرچنت رو بفرست:")
+                    return
+                if data.startswith("order_zarinpal:"):
+                    oid = safe_callback_int(data.split(":", 1)[1], 0)
+                    order = get_order(oid)
+                    if not order or order["user_id"] != event.sender_id:
+                        await event.answer("❌ فاکتور پیدا نشد.", alert=True)
+                        return
+                    import os as _os
+                    panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
+                    cb = f"{panel_url}/api/payment/zarinpal/callback" if panel_url else "https://panel.cianet.ir/api/payment/zarinpal/callback"
+                    result = create_zarinpal_payment(oid, cb)
+                    if result.get("ok"):
+                        await event.respond(f"🟡 **زرین‌پال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
+                            buttons=[UI.nav_row()])
+                    else:
+                        await event.answer(f"❌ {result.get('error', 'خطا')}", alert=True)
+                    return
+                if data.startswith("order_zibal:"):
+                    oid = safe_callback_int(data.split(":", 1)[1], 0)
+                    order = get_order(oid)
+                    if not order or order["user_id"] != event.sender_id:
+                        await event.answer("❌ فاکتور پیدا نشد.", alert=True)
+                        return
+                    import os as _os
+                    panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
+                    cb = f"{panel_url}/api/payment/zibal/callback" if panel_url else "https://panel.cianet.ir/api/payment/zibal/callback"
+                    result = create_zibal_payment(oid, cb)
+                    if result.get("ok"):
+                        await event.respond(f"🟢 **زیبال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
+                            buttons=[UI.nav_row()])
+                    else:
+                        await event.answer(f"❌ {result.get('error', 'خطا')}", alert=True)
                     return
                 if data == "owner_create_license_batch" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
                     await self._clear_admin_panel_wizard(event.sender_id)

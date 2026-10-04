@@ -1869,6 +1869,52 @@ async def affiliate_commissions_api(request: Request):
 
 # ─── End Phase 5 ────────────────────────────────────────────────────────
 
+
+# v2.10.2: Zibal gateway
+@app.post("/api/payment/zibal/create/{order_id}")
+async def zibal_create_payment(order_id: int, request: Request):
+    uid = require_user_auth(request)
+    m = _main()
+    order = m.get_order(order_id)
+    if not order or order["user_id"] != uid:
+        raise HTTPException(404, "فاکتور پیدا نشد")
+    if order["status"] != "pending":
+        raise HTTPException(400, "قابل پرداخت نیست")
+    import os as _os
+    panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
+    cb = f"{panel_url}/api/payment/zibal/callback" if panel_url else str(request.url_for("zibal_callback"))
+    result = m.create_zibal_payment(order_id, cb)
+    if result.get("ok"):
+        return {"ok": True, "url": result["url"]}
+    raise HTTPException(400, result.get("error", "zibal_failed"))
+
+@app.get("/api/payment/zibal/callback")
+async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
+    m = _main()
+    if status not in ("1", "100"):
+        return JSONResponse({"ok": False, "error": "cancelled"})
+    with m._conn() as c:
+        row = c.execute("SELECT * FROM orders WHERE txid = ?", (trackId,)).fetchone()
+    if not row:
+        return JSONResponse({"ok": False, "error": "order_not_found"})
+    order = dict(row)
+    verify_result = m.verify_zibal_payment(trackId, int(order["amount_toman"]))
+    if verify_result.get("ok"):
+        with m._conn_immediate() as c:
+            cur = c.execute(
+                "UPDATE orders SET status = 'paid', pay_method = 'zibal', paid_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (m._now(), order["id"]),
+            )
+            if cur.rowcount == 0:
+                return JSONResponse({"ok": True, "message": "already_processed"})
+        plan_name = order["plan"]
+        pricing = m.get_pricing(plan_name)
+        days = int(pricing["duration_days"] or 30) if pricing else 30
+        m.create_subscription(order["user_id"], plan_name, days)
+        return JSONResponse({"ok": True, "ref_id": verify_result.get("ref_id")})
+    return JSONResponse({"ok": False, "error": verify_result.get("error")})
+
 # ─── v2.8.5: Account Settings + Chat API ─────────────────────────────
 # این endpoint‌ها به Telethon client زنده نیاز دارند — فقط وقتی کار می‌کنند
 # که web_panel در همین پروسه‌ی selfbot اجرا شود (embed mode).
