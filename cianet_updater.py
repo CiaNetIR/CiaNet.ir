@@ -30,6 +30,19 @@ log = logging.getLogger("cianet.updater")
 REPO_URL = "https://github.com/DLSDT/CiaNet.ir.git"
 BRANCH = os.environ.get("CIANET_BRANCH", "main")
 INSTALL_DIR = os.environ.get("CIANET_INSTALL_DIR", "/opt/cianet")
+
+# v2.8.13: Set safe.directory at module load time (not inside apply_update).
+# این جلوی خطای "dubious ownership" رو می‌گیره وقتی سرویس با user=cianet
+# اجرا می‌شه ولی repo با root clone شده. قبلاً فقط داخل apply_update این
+# کار انجام می‌شد، ولی check_for_update قبل از apply_update اجرا می‌شد و
+# شکست می‌خورد.
+try:
+    subprocess.run(
+        ["git", "config", "--global", "--add", "safe.directory", INSTALL_DIR],
+        capture_output=True, text=True, timeout=5,
+    )
+except Exception as _e:
+    log.warning("initial safe.directory setup failed: %s", _e)
 LOCAL_COMMIT_FILE = Path(INSTALL_DIR) / ".last_seen_commit"
 LOCK_FILE = Path("/tmp/cianet-update.lock")
 STATE_FILE = Path(INSTALL_DIR) / "data" / ".updater_state.json"
@@ -63,6 +76,9 @@ def get_local_commit(repo_dir: str = None) -> Optional[str]:
         )
         if result.returncode == 0:
             return result.stdout.strip()
+        # v2.8.13: لاگ کردن stderr به‌جای بلعیدن سایلنت
+        log.warning("get_local_commit git failed (rc=%d): %s",
+                    result.returncode, result.stderr.strip()[:200])
     except Exception as e:
         log.warning("get_local_commit failed: %s", e)
     return None
@@ -73,16 +89,22 @@ def get_remote_commit(repo_dir: str = None) -> Optional[str]:
     if repo_dir is None:
         repo_dir = INSTALL_DIR
     try:
-        subprocess.run(
+        fetch_result = subprocess.run(
             ["git", "fetch", "origin", BRANCH, "--quiet"],
             cwd=repo_dir, capture_output=True, text=True, timeout=30,
         )
+        # v2.8.13: لاگ stderr اگه fetch شکست خورد
+        if fetch_result.returncode != 0:
+            log.warning("get_remote_commit fetch failed (rc=%d): %s",
+                        fetch_result.returncode, fetch_result.stderr.strip()[:200])
         result = subprocess.run(
             ["git", "rev-parse", f"origin/{BRANCH}"],
             cwd=repo_dir, capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
             return result.stdout.strip()
+        log.warning("get_remote_commit rev-parse failed (rc=%d): %s",
+                    result.returncode, result.stderr.strip()[:200])
     except Exception as e:
         log.warning("get_remote_commit failed: %s", e)
     return None
@@ -425,15 +447,33 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
                         continue
             if not svc_name:
                 svc_name = "cianet"  # fallback
+            # v2.8.13: به‌جای silent systemctl restart، از SIGTERM استفاده می‌کنیم.
+            # این باعث می‌شه systemd (با Restart=always) خودش پروسه رو دوباره
+            # بسازه با کد جدید. قبلاً Popen سایلنت بود و اگه کاربر non-root بود،
+            # restart نمی‌شد ولی ربات می‌گفت «آپدیت شد».
             try:
-                subprocess.Popen(
+                # اول تلاش با systemctl
+                rc = subprocess.run(
                     ["systemctl", "restart", svc_name],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=10,
                 )
-                msg += f"\n🔄 سلف در حال restart (service: {svc_name})..."
+                if rc.returncode == 0:
+                    msg += f"\n🔄 سرویس در حال restart ({svc_name})..."
+                else:
+                    # fallback: SIGTERM به خودمون — systemd دوباره می‌سازه
+                    log.warning("systemctl restart failed (rc=%d): %s — fallback to SIGTERM",
+                                rc.returncode, rc.stderr.strip()[:200])
+                    msg += f"\n⚠️ systemctl restart ناموفق — استفاده از SIGTERM..."
+                    import signal as _signal
+                    os.kill(os.getpid(), _signal.SIGTERM)
             except Exception as e:
-                log.warning("systemctl restart %s failed: %s", svc_name, e)
-                msg += f"\n⚠️ restart ناموفق (service: {svc_name}): {e}\nدستی: sudo systemctl restart {svc_name}"
+                log.warning("restart failed: %s — fallback to SIGTERM", e)
+                msg += f"\n⚠️ restart ناموفق ({e}) — استفاده از SIGTERM..."
+                try:
+                    import signal as _signal
+                    os.kill(os.getpid(), _signal.SIGTERM)
+                except Exception:
+                    msg += f"\n❌ SIGTERM هم ناموفق — دستی بزن: sudo systemctl restart {svc_name}"
 
         return True, msg
 

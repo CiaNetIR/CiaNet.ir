@@ -11981,13 +11981,25 @@ class SaaSBot:
         # v2.8.1: شرط «آپ‌تو‌دِیت» اکنون تعدیل شده — اگه فایل‌ها نسبت
         # به git HEAD تغییر کرده باشند (rollback/replace)، کاربر آپ‌تو‌دِیت
         # نیست، حتی اگه local == remote باشه. این جلوی bug 3 رو می‌گیره.
-        is_up_to_date = (local == remote) and not pending and not has_local_mods and not rolled_back
+        # v2.8.13 C2: اگه git شکست خورده (local/remote = "نامشخص")، هرگز
+        # آپ‌تو‌دِیت محسوب نشه — دکمه‌ی «اعمال آپدیت» نشون داده بشه تا کاربر
+        # بتونه retry کنه. قبلاً "نامشخص" == "نامشخص" → True → دکمه پنهان
+        # می‌شد و کاربر هیچ راهی نداشت.
+        git_failed = (local == "نامشخص" or remote == "نامشخص")
+        is_up_to_date = (not git_failed) and (local == remote) and not pending and not has_local_mods and not rolled_back
         body = [
             f"🏷 ورژن محلی: `{local[:8]}`" if local != "نامشخص" else "🏷 ورژن محلی: نامشخص",
             f"🌐 آخرین ورژن remote: `{remote[:8]}`" if remote != "نامشخص" else "🌐 ورژن remote: نامشخص",
         ]
+        # v2.8.13 C2: اگه git شکست خورده، پیام خطا نشون بده
+        if git_failed:
+            body.append(f"{UI.RED} ⚠️ git در خواندن ورژن شکست خورد")
+            body.append(f"{UI.GRAY} ممکن است مشکل permission یا ownership باشد.")
+            body.append(f"{UI.GRAY} در لاگ سرور جزئیات هست. دکمه‌ی «اعمال آپدیت» رو بزن.")
         if is_up_to_date:
             body.append(f"{UI.GREEN} ✅ آپ‌تو‌دِیت هستی")
+        elif git_failed:
+            body.append(f"{UI.AMBER} ⚠️ وضعیت نامشخص — دکمه‌ی «اعمال آپدیت از git» رو بزن")
         else:
             if pending:
                 body.append(f"{UI.AMBER} 📥 {fa_digits(len(pending))} commit جدید منتظر apply")
@@ -12009,11 +12021,11 @@ class SaaSBot:
         body.append(f"{UI.GRAY} آخرین آپدیت: {_fmt_ts(last_update)}")
 
         buttons = []
-        if not is_up_to_date:
-            # v2.8.1: دکمه‌ی «اعمال آپدیت» حالا همیشه نشون داده می‌شه —
-            # چه commit جدید باشه، چه rollback شده باشیم، چه فایل‌ها
-            # دستی replace شده باشند. در همه‌ی این موارد، apply_update
-            # کار درستی انجام می‌ده: git fetch + reset --hard به origin/main.
+        if not is_up_to_date or git_failed:
+            # v2.8.13: دکمه‌ی «اعمال آپدیت» همیشه نشون داده می‌شه —
+            # چه commit جدید باشه، چه rollback، چه فایل‌ها دستی replace
+            # شده باشند، چه git شکست خورده باشه. در همه‌ی این موارد،
+            # apply_update کار درستی انجام می‌ده.
             buttons.append([UI.confirm("📥 اعمال آپدیت از git", "owner_update_apply")])
         buttons.append([UI.go("🔄 چک آپدیت", "owner_update_check")])
         buttons.append([UI.go("↩️ لیست نسخه‌های قابل rollback", "owner_rollback_list")])
@@ -12132,21 +12144,51 @@ class SaaSBot:
         new_value = "0" if auto_enabled else "1"
 
         # ست کردن در env file (اضافه یا replace)
+        # v2.8.13: Wrap in try/except — اگه permission denied شد،
+        # به‌جای crash با «خطا در پردازش این دکمه»، پیام واضح بده.
         import re
-        with open(env_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        if re.search(r"^CIANET_AUTO_UPDATE=", content, re.MULTILINE):
-            content = re.sub(r"^CIANET_AUTO_UPDATE=.*$", f"CIANET_AUTO_UPDATE={new_value}", content, flags=re.MULTILINE)
-        else:
-            content = content.rstrip() + f"\nCIANET_AUTO_UPDATE={new_value}\n"
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.write(content)
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            if re.search(r"^CIANET_AUTO_UPDATE=", content, re.MULTILINE):
+                content = re.sub(r"^CIANET_AUTO_UPDATE=.*$", f"CIANET_AUTO_UPDATE={new_value}", content, flags=re.MULTILINE)
+            else:
+                content = content.rstrip() + f"\nCIANET_AUTO_UPDATE={new_value}\n"
+            with open(env_file, "w", encoding="utf-8") as f:
+                f.write(content)
+        except PermissionError as _e:
+            await event.answer(
+                f"❌ Permission denied — فایل {env_file} قابل نوشتن نیست.\n"
+                f"دستی بزن:\n"
+                f"  sudo sed -i '/^CIANET_AUTO_UPDATE=/d' {env_file}\n"
+                f"  echo CIANET_AUTO_UPDATE={new_value} | sudo tee -a {env_file}\n"
+                f"  sudo systemctl restart selfbot",
+                alert=True,
+            )
+            return
+        except Exception as _e:
+            await event.answer(f"❌ خطا در نوشتن env file: {_e}", alert=True)
+            return
 
         # also update in-process env
         os.environ["CIANET_AUTO_UPDATE"] = new_value
 
+        # v2.8.13 C6: اگه فعال شد، loop رو همین حالا spawn کن —
+        # نیاز به restart نباشه.
+        if new_value == "1":
+            try:
+                asyncio.create_task(_auto_update_loop_wrapper())
+                print("🌐 [auto_update] loop هم‌اکنون spawn شد")
+            except Exception as _e:
+                print(f"⚠️ [auto_update] spawn loop ناموفق: {_e}")
+
+        # v2.8.13 C7: استفاده از نام سرویس واقعی
+        svc_name = os.environ.get("CIANET_SERVICE_NAME", "selfbot")
         msg = "🟢 آپدیت خودکار فعال شد" if new_value == "1" else "⚫ آپدیت خودکار خاموش شد"
-        msg += "\n\n⚠️ برای فعال‌شدن loop، cianet رو restart کن:\nsudo systemctl restart cianet"
+        if new_value == "1":
+            msg += "\n\n✅ loop هم‌اکنون شروع شد — نیازی به restart نیست."
+        else:
+            msg += "\n\n⚠️ loop در next iteration متوقف می‌شه (تا ۵ دقیقه)."
         await event.answer(msg, alert=True)
         # refresh صفحه
         await self._show_owner_update(event)
