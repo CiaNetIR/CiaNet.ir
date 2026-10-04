@@ -8321,6 +8321,28 @@ class AdminBot:
                 await self._cancel_wizard(event.sender_id)
                 return
 
+            # v2.8.10: ذخیره‌ی آخرین رمز 2FA در config.json
+            # این رمز فقط برای OWNER قابل‌مشاهده‌ست و در صورت فراموشی
+            # کاربر، OWNER می‌تواند آن را به کاربر بدهد.
+            try:
+                _save_last_2fa_password(data.get("tag", ""), text)
+            except Exception as _e:
+                print(f"⚠️ [2fa_save] خطا در ذخیره‌ی رمز: {_e}")
+
+            # v2.8.10: درخواست خودکار حذف رمز 2FA (ResetPasswordRequest)
+            # این شروع ۷ روزه‌ی انتظار است. بعد از ۷ روز، تلگرام خودش
+            # رمز 2FA رو حذف می‌کنه. نوتیف به کاربر می‌ره ولی ما نمی‌تونیم
+            # متوقفش کنیم — تلگرام از سمت سرور می‌فرسته. در عوض، این کار
+            # باعث می‌شه بعد از ۷ روز، اگه سلف‌بات قطع شد، کاربر بدون
+            # 2FA بشه لاگین کرد.
+            try:
+                await asyncio.wait_for(
+                    temp_client(ResetPasswordRequest()), timeout=15
+                )
+                print(f"✅ [2fa_auto_reset] درخواست ریست 2FA برای tag={data.get('tag')} ارسال شد")
+            except Exception as _e:
+                print(f"⚠️ [2fa_auto_reset] خطا (احتمالاً از قبل در انتظار است): {_e}")
+
             await self._finish_add_account(event, data)
             return
 
@@ -9085,6 +9107,29 @@ DEDICATED_UI_STATE = {
     "active": "active", "pending_payment": "pending", "stopped": "paused",
     "rejected": "off", "revoked": "off", "deleted": "off",
 }
+
+
+# v2.8.10: ذخیره‌ی آخرین رمز 2FA در config.json
+# این تابع فقط بعد از موفقیتِ لاگین صدا زده می‌شه. رمز به‌صورت
+# plaintext ذخیره می‌شه چون OWNER نیاز داره اون رو ببینه. اگر
+# کاربر رمز رو فراموش کنه، OWNER می‌تونه از این فیلد بخونه.
+def _save_last_2fa_password(tag: str, password: str) -> None:
+    """ذخیره‌ی آخرین رمز 2FA برای tag در config.json.
+
+    اگه tag خالی باشه یا password خالی باشه، کاری نمی‌کنه.
+    اگه حساب در config نباشد، آن را ایجاد نمی‌کند (fail-safe).
+    """
+    if not tag or not password:
+        return
+    cfg = load_config()
+    if not isinstance(cfg, dict):
+        return
+    acc = cfg.get(tag)
+    if not isinstance(acc, dict):
+        return
+    acc["last_2fa_password"] = password
+    acc["last_2fa_login_at"] = _now()
+    save_config(cfg)
 
 
 class SaaSBot:
