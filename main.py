@@ -7396,7 +7396,7 @@ class AdminBot:
             # فقط در لاگِ سرور — هرگز به کاربر نمی‌رود.
             print(f"⚠️ [tfa:{tag}] خواندن 2FA شکست خورد: {err_code} "
                   f"({st.get('error_ident', '?')}) actor={event.sender_id}")
-            await event.edit(
+            await event.respond(
                 UI.screen("🔐 رمز دو مرحله‌ای", body=body,
                           subtitle=f"«{tag}»",
                           hint="اگر چند بار تکرار شد، اکانت ممکن است قطع شده باشد."),
@@ -7410,7 +7410,7 @@ class AdminBot:
             body.append(f"{UI.GRAY} رمز دو مرحله‌ای روی این اکانت فعال نیست.")
             if st["email_pattern"]:
                 body.append(f"{UI.AMBER} یک ایمیل در انتظارِ تأیید است: {st['email_pattern']}")
-            await event.edit(
+            await event.respond(
                 UI.screen(f"🔐 رمز دو مرحله‌ای", body=body,
                           subtitle=f"«{tag}» · {phone_hint}"),
                 buttons=[[UI.refresh(f"tfa:{tag}")], UI.nav_row()],
@@ -7465,7 +7465,7 @@ class AdminBot:
         buttons.append([UI.refresh(f"tfa:{tag}")])
         buttons.append(UI.nav_row())
 
-        await event.edit(
+        await event.respond(
             UI.screen(f"🔐 رمز دو مرحله‌ای", body=body,
                       subtitle=f"«{tag}» · {phone_hint}",
                       hint=("هرچه زودتر درخواست بدهی، زودتر تمام می‌شود — انتظار از لحظه‌ی درخواست شروع می‌شود."
@@ -7497,7 +7497,7 @@ class AdminBot:
             await self._show_2fa(event, tag)
             return
 
-        await event.edit(
+        await event.respond(
             UI.screen(
                 "⚠️ بازنشانی رمز دو مرحله‌ای",
                 body=[
@@ -7742,7 +7742,7 @@ class AdminBot:
                 hrs = max(1, res["fresh_seconds"] // 3600)
                 hintline = (f"رمز به‌تازگی عوض شده؛ تلگرام تا حدود "
                             f"{fa_digits(hrs)} ساعت اجازه‌ی بازنشانی نمی‌دهد.")
-            await event.edit(
+            await event.respond(
                 UI.screen("🔐 بازنشانی رمز",
                           body=[f"{UI.RED} درخواست انجام نشد. دوباره تلاش کن."]
                                 + ([f"{UI.GRAY} {hintline}"] if hintline else [])),
