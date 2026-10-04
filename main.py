@@ -6791,6 +6791,75 @@ class AdminBot:
             buttons=buttons,
         )
 
+    async def _show_sessions(self, event, tag: str, page: int = 0, flash: str = ""):
+        """🔒 دستگاه‌های لاگین‌شده — v2.10.10: بازسازی شده."""
+        allowed, _r = await self._authorize_security(event, tag)
+        if not allowed:
+            try:
+                await event.answer("⛔ دسترسی ندارید", alert=True)
+            except Exception:
+                pass
+            return
+        entry = self.sb.ACCOUNTS.get(tag)
+        if not entry:
+            await self._nav_heal(event, "این اکانت الان روشن نیست.")
+            return
+        try:
+            sessions = await entry.bot.list_sessions()
+        except Exception as e:
+            print(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}")
+            await event.answer("گرفتن فهرست دستگاه‌ها ناموفق بود.", alert=True)
+            return
+        current = None
+        others = []
+        for s in sessions:
+            if s.get("current"):
+                current = s
+            else:
+                others.append(s)
+        PER_PAGE = 8
+        total_pages = max(1, (len(others) + PER_PAGE - 1) // PER_PAGE)
+        if page >= total_pages:
+            page = total_pages - 1
+        start = page * PER_PAGE
+        page_others = others[start:start + PER_PAGE]
+        body = []
+        if flash:
+            body.append(f"{UI.GREEN} {flash}")
+            body.append(UI.SEP)
+        if current:
+            body.append(f"{UI.GREEN} این سلف — {self._sess_line(current)}")
+            body.append(f"     {UI.GRAY} نشستِ فعلی است؛ بسته نمی‌شود.")
+        else:
+            body.append(f"{UI.AMBER} نشستِ فعلی پیدا نشد.")
+        body.append(UI.SEP)
+        buttons = []
+        if not others:
+            body.append(f"{UI.GRAY} هیچ دستگاه دیگری لاگین نیست. ✅")
+        else:
+            for i, s in enumerate(page_others):
+                global_idx = start + i
+                loc = f" · {s['country']}" if s.get("country") else ""
+                body.append(f"{UI.RED} {self._sess_line(s)}{loc} · {entry.bot._rel_time(s.get('last'))}")
+                buttons.append([UI.btn(f"{self._sess_line(s)[:28]}",
+                                       f"sesstog:{tag}:{global_idx}", style="primary")])
+        buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
+        buttons.append([UI.refresh(f"sessions:{tag}")])
+        buttons.append(UI.nav_row())
+        await event.edit(
+            UI.screen("🔒 دستگاه‌های لاگین‌شده", body=body,
+                      subtitle=f"«{tag}» روی {fa_digits(len(sessions))} دستگاه فعال است."),
+            buttons=buttons,
+        )
+
+    async def _authorize_security(self, event, tag: str) -> tuple:
+        """v2.10.10: بازسازی شده — بررسی مجوز دسترسی به ابزارهای امنیتی."""
+        # ساده: فقط OWNER و ADMIN مجازند
+        role = self._role(event.sender_id) if hasattr(self, '_role') else 'USER'
+        if role in ('OWNER', 'ADMIN'):
+            return True, None
+        return False, "⛔ دسترسی ندارید"
+
     async def _show_connection(self, event, tag: str):
         """🌐 اتصال و پروکسی — v2.10.9: فقط پروکسی + قابلیت‌ها.
         2FA/sessions/login-code حذف شدن — از مدیریت اکانت قابل دسترسی‌اند.
@@ -10606,7 +10675,7 @@ class SaaSBot:
             buttons.append([UI.go(f"💰 پرداخت با کیف پول ({fa_digits(bal)} Toman)",
                                    "dedicated_pay:wallet", tone="success")])
         buttons.append([UI.go("💳 پرداخت با کارت", "dedicated_pay:card")])
-        buttons.append([UI.nav_back()])
+        buttons.append([UI.nav_row()])
         await event.edit(
             UI.screen("🤖 ربات اختصاصی", body=body,
                       subtitle="ربات اختصاصی با توکن خودت."),
