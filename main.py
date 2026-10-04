@@ -12525,6 +12525,14 @@ class SaaSBot:
                         except Exception:
                             size = 0
                         candidates.append((f.name, "backup خودکار", f, size))
+                # v2.10.8: فایل‌های pre-rollback هم اضافه شد
+                for f in sorted(versions_dir.glob("main.py.pre-rollback.*"), reverse=True):
+                    if f.is_file():
+                        try:
+                            size = f.stat().st_size
+                        except Exception:
+                            size = 0
+                        candidates.append((f.name, "backup قبل rollback", f, size))
                 # ۲. فایل‌های v*.py (نسخه‌های قدیمی‌تر)
                 for f in sorted(versions_dir.glob("v*.py"), reverse=True):
                     if f.is_file():
