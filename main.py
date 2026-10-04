@@ -6792,12 +6792,8 @@ class AdminBot:
         )
 
     async def _show_connection(self, event, tag: str):
-        """
-        🌐 اتصال و امنیت — یک صفحه، دو بخشِ مشخص.
-
-        بخشِ «اتصال» (پروکسی/وضعیت) برای همه‌ی کسانی که اکانت را می‌بینند.
-        بخشِ «امنیت» (دستگاه‌ها/رمز دومرحله‌ای/کد ورود) فقط برای کسی که
-        مجوز دارد — پنهان‌سازی کامل، نه دکمه‌ی «غیرفعال».
+        """🌐 اتصال و پروکسی — v2.10.9: فقط پروکسی + قابلیت‌ها.
+        2FA/sessions/login-code حذف شدن — از مدیریت اکانت قابل دسترسی‌اند.
         """
         cfg = self.sb.load_config()
         acc = cfg.get(tag, {})
@@ -6810,19 +6806,16 @@ class AdminBot:
         else:
             body.append(f"{UI.GRAY} پروکسی: تنظیم نشده (اتصال مستقیم)")
 
-        # مجوز را برای *این اکانت* چک می‌کنیم — نه فقط یک بولیِ کلی.
-        can_sec = self._can_view_security_tools(tag, event.sender_id)
-                # v2.10.7: 2FA/sessions moved to account management
-
-        buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
-        buttons.append([UI.refresh(f"sessions:{tag}")])
-        buttons.append(UI.nav_row())
-
+        buttons = [
+            [UI.go("🌐 تنظیم پروکسی", b"proxy_type:" + tag.encode())],
+            [UI.go("⚡ قابلیت‌ها", b"feat:" + tag.encode())],
+            [UI.go("🎨 ظاهر", b"appear:" + tag.encode())],
+            [UI.go("📊 وضعیت", b"status:" + tag.encode())],
+            UI.nav_row(),
+        ]
         await event.edit(
-            UI.screen("🔒 دستگاه‌های لاگین‌شده", body=body,
-                      subtitle=f"«{tag}» روی {fa_digits(len(sessions))} دستگاه فعال است.",
-                      hint=("تیکِ چند دستگاه را بزن، بعد «بستنِ انتخاب‌شده‌ها»؛ یا «خروج از همه»."
-                            if others else "🔐 برای تنظیمات رمز دو مرحله‌ای، روی دکمه‌ی پایین بزن.")),
+            UI.screen("🌐 اتصال و پروکسی", body=body,
+                      subtitle=f"«{tag}»"),
             buttons=buttons,
         )
 
