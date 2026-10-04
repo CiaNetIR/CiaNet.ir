@@ -10655,9 +10655,11 @@ class SaaSBot:
         # که `owner_set_wallet` به‌عنوان alias پیاده‌سازی شود.
         # PATCH (v2.0.8): دکمه‌ی «🔄 آپدیت و ورژن» فقط برای OWNER اضافه شد.
         sec4 = [
-            UI.go("📢 کانال عضویت", "owner_channel_set", primary=True),
-            UI.go("💾 بکاپ و بازیابی", "admin_backup"),
+            UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True),
         ]
+        if role == ROLE_OWNER:
+            sec4.append(UI.go("📢 کانال عضویت", "owner_channel_set", primary=True))
+            sec4.append(UI.go("💾 بکاپ و بازیابی", "admin_backup"))
         if role == ROLE_OWNER:
             sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
             # PATCH (v2.1.5): دکمه‌ی «🌐 پنل وب» برای دسترسی به web panel.
@@ -10818,7 +10820,7 @@ class SaaSBot:
     async def _start_dedicated_bot_purchase(self, event):
         """کاربر ربات اختصاصی می‌خره."""
         uid = event.sender_id
-        price = int(get_setting("dedicated_bot_price", "500000") or "500000")
+        price = dedicated_bot_price()
         bal = get_wallet_balance(uid)
         body = [
             "🤖 **ربات اختصاصی**\n",
@@ -10845,17 +10847,21 @@ class SaaSBot:
     async def _process_dedicated_bot_payment(self, event, method: str):
         """پرداخت ربات اختصاصی."""
         uid = event.sender_id
-        price = int(get_setting("dedicated_bot_price", "500000") or "500000")
+        price = dedicated_bot_price()
         if method == "wallet":
             bal = get_wallet_balance(uid)
             if bal < price:
                 await event.answer("❌ موجودی کافی نیست.", alert=True)
                 return
+            # v2.11.3: اول order بساز، بعد پول کم کن
+            order = create_order(uid, "ربات اختصاصی", price, 0.0)
+            if not isinstance(order, dict) or "id" not in order:
+                await event.answer("❌ خطا در ساخت سفارش.", alert=True)
+                return
             pay_result = wallet_pay_from_balance(uid, price, ref="dedicated_bot")
             if not pay_result.get("ok"):
-                await event.answer(f"❌ خطا: {pay_result.get('error')}", alert=True)
+                await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
                 return
-            order = create_order(uid, "ربات اختصاصی", price, 0.0)
             if isinstance(order, dict) and "id" in order:
                 with _conn_immediate() as c:
                     c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
