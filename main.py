@@ -1823,6 +1823,21 @@ def ensure_wallet_schema() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_user ON wallet_transactions(user_id, created_at DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_created ON wallet_transactions(created_at DESC)")
+        # v2.8.12: جدول کدهای تخفیف
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS discount_codes ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  code TEXT UNIQUE NOT NULL,"
+            "  percent INTEGER NOT NULL CHECK(percent > 0 AND percent <= 100),"
+            "  max_uses INTEGER NOT NULL DEFAULT 1,"
+            "  used_count INTEGER NOT NULL DEFAULT 0,"
+            "  expires_at TEXT,"  # ISO timestamp یا None برای بدون انقضا
+            "  created_by INTEGER NOT NULL,"
+            "  created_at TEXT NOT NULL,"
+            "  is_active INTEGER NOT NULL DEFAULT 1"
+            ")"
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_discount_code ON discount_codes(code)")
 
 
 def referral_link(bot_username: str, user_id: int) -> str:
@@ -1935,8 +1950,17 @@ def wallet_credit(user_id: int, amount: int, created_by: int,
         return {"error": "invalid_amount"}
     # نقشِ سازنده را از DB بخوان — اعتماد به callback نیست
     actor_role = get_role(created_by, OWNER_ID)
-    if actor_role not in (ROLE_OWNER, ROLE_ADMIN):
+    # v2.8.12: RESELLER هم می‌تونه کیف پول مشتری‌های خودش رو شارژ کنه
+    # ولی فقط اگه user_id یکی از مشتری‌های خودش باشه (reseller_id == created_by)
+    if actor_role not in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
         return {"error": "permission_denied"}
+    if actor_role == ROLE_RESELLER:
+        # چک کن که آیا user_id یکی از مشتری‌های این نماینده است
+        with _conn() as _check_c:
+            _u = _check_c.execute("SELECT reseller_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if _u is None or _u["reseller_id"] != created_by:
+            return {"error": "permission_denied"}
+        # RESELLER فقط credit می‌تونه بده (نه debit) — برای debit OWNER/ADMIN لازم است
     with _conn_immediate() as c:
         row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if row is None:
@@ -1945,11 +1969,13 @@ def wallet_credit(user_id: int, amount: int, created_by: int,
         new_balance = current + amount
         c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?",
                   (new_balance, user_id))
+        # v2.8.12: اگه RESELLER شارژ کرده، type = "reseller_credit"
+        actual_tx_type = "reseller_credit" if actor_role == ROLE_RESELLER else tx_type
         cur = c.execute(
             "INSERT INTO wallet_transactions "
             "(user_id, amount, balance_after, type, reason, created_by, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, amount, new_balance, tx_type, reason, created_by, _now()),
+            (user_id, amount, new_balance, actual_tx_type, reason, created_by, _now()),
         )
         tx_id = cur.lastrowid
     log_action(created_by, "wallet_credit",
@@ -2029,6 +2055,85 @@ def list_wallet_transactions(user_id: int, limit: int = 20) -> list:
             "SELECT * FROM wallet_transactions WHERE user_id = ? "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
             (user_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# v2.8.12: کدهای تخفیف
+def _generate_discount_code() -> str:
+    """تولید کد تخفیف ۸-کاراکتری."""
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # بدون ا chars مبهم
+    return "".join(secrets.choice(chars) for _ in range(8))
+
+
+def create_discount_code(percent: int, created_by: int,
+                          max_uses: int = 1, expires_at: str = None) -> dict:
+    """ساخت کد تخفیف جدید — فقط OWNER/ADMIN."""
+    if not isinstance(percent, int) or percent <= 0 or percent > 100:
+        return {"error": "invalid_percent"}
+    if not isinstance(max_uses, int) or max_uses <= 0:
+        return {"error": "invalid_max_uses"}
+    actor_role = get_role(created_by, OWNER_ID)
+    if actor_role not in (ROLE_OWNER, ROLE_ADMIN):
+        return {"error": "permission_denied"}
+    code = _generate_discount_code()
+    with _conn() as c:
+        # اگه کد تصادفی تکراری بود، retry کن
+        for _ in range(10):
+            exists = c.execute("SELECT 1 FROM discount_codes WHERE code = ?", (code,)).fetchone()
+            if not exists:
+                break
+            code = _generate_discount_code()
+        c.execute(
+            "INSERT INTO discount_codes (code, percent, max_uses, used_count, expires_at, "
+            "created_by, created_at, is_active) VALUES (?, ?, ?, 0, ?, ?, ?, 1)",
+            (code, percent, max_uses, expires_at, created_by, _now()),
+        )
+    log_action(created_by, "create_discount_code", f"code={code}, percent={percent}%")
+    return {"ok": True, "code": code}
+
+
+def get_discount_code(code: str) -> dict:
+    """گرفتن کد تخفیف با کد."""
+    with _conn() as c:
+        row = c.execute("SELECT * FROM discount_codes WHERE code = ? AND is_active = 1", (code,)).fetchone()
+    return dict(row) if row else None
+
+
+def apply_discount_code(code: str, original_amount: int) -> dict:
+    """اعمال کد تخفیف — مبلغ بعد از تخفیف رو برمی‌گردونه.
+
+    بازگشت:
+      {"ok": True, "amount": new_amount, "percent": p}
+      {"error": "not_found"}
+      {"error": "expired"}
+      {"error": "max_uses_reached"}
+    """
+    with _conn_immediate() as c:
+        row = c.execute("SELECT * FROM discount_codes WHERE code = ? AND is_active = 1", (code,)).fetchone()
+        if row is None:
+            return {"error": "not_found"}
+        d = dict(row)
+        if d["used_count"] >= d["max_uses"]:
+            return {"error": "max_uses_reached"}
+        if d["expires_at"]:
+            try:
+                from datetime import datetime
+                exp = datetime.fromisoformat(d["expires_at"])
+                if datetime.utcnow() > exp:
+                    return {"error": "expired"}
+            except Exception:
+                pass
+        new_amount = max(1, int(original_amount * (100 - d["percent"]) / 100))
+        c.execute("UPDATE discount_codes SET used_count = used_count + 1 WHERE code = ?", (code,))
+    return {"ok": True, "amount": new_amount, "percent": d["percent"]}
+
+
+def list_discount_codes(limit: int = 50) -> list:
+    """لیست کدهای تخفیف — برای OWNER/ADMIN."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM discount_codes ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -6487,6 +6592,10 @@ class AdminBot:
                 if page < total_pages - 1:
                     nav_row.append(UI.neutral("صفحه‌ی بعد ▶️", f"sesspage:{tag}:{page + 1}"))
                 buttons.append(nav_row)
+        # v2.8.11: دکمه‌ی «🔐 رمز دو مرحله‌ای» اضافه شد تا کاربر از
+        # لیست دستگاه‌ها بتونه مستقیم به پنل 2FA بره — قبلاً اینجا
+        # هیچ راهی نبود و کاربر در بن‌بست می‌ماند.
+        buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
         buttons.append([UI.refresh(f"sessions:{tag}")])
         buttons.append(UI.nav_row())
 
@@ -6494,7 +6603,7 @@ class AdminBot:
             UI.screen("🔒 دستگاه‌های لاگین‌شده", body=body,
                       subtitle=f"«{tag}» روی {fa_digits(len(sessions))} دستگاه فعال است.",
                       hint=("تیکِ چند دستگاه را بزن، بعد «بستنِ انتخاب‌شده‌ها»؛ یا «خروج از همه»."
-                            if others else None)),
+                            if others else "🔐 برای تنظیمات رمز دو مرحله‌ای، روی دکمه‌ی پایین بزن.")),
             buttons=buttons,
         )
 
@@ -9059,6 +9168,9 @@ WIZ_PAYMENT_RECEIPT = "awaiting_payment_receipt"
 WIZ_CL_RESELLER_LIMIT = "cl_reseller_limit"
 WIZ_CL_BATCH_RESELLER_LIMIT = "cl_batch_reseller_limit"
 WIZ_CL_BATCH_QTY = "cl_batch_qty"
+# v2.8.12: کدهای تخفیف
+WIZ_DISCOUNT_PERCENT = "discount_pending_percent"
+WIZ_DISCOUNT_MAX_USES = "discount_pending_max_uses"
 WIZ_WALLET_CREDIT_AMOUNT = "wallet_credit_amount"
 WIZ_WALLET_CREDIT_REASON = "wallet_credit_reason"
 WIZ_WALLET_DEBIT_AMOUNT = "wallet_debit_amount"
@@ -9819,12 +9931,16 @@ class SaaSBot:
         else:
             sub_line = "ندارد"
 
+        # v2.8.12: موجودی کیف پول اضافه شد تا کاربر بدون کلیک روی «💰 کیف پول»
+        # موجودی رو ببینه.
+        balance = get_wallet_balance(uid)
         now = iran_now()
         body = [
             f"👤 شناسه کاربری: `{uid}`",
             f"📅 تاریخ عضویت: {joined}",
             f"{UI.state_dot(sub_state)} اشتراک: {sub_line}",
             f"🤖 سلف: {fa_digits(n_active)} فعال از {fa_digits(n_bots)}",
+            f"💰 موجودی کیف پول: **{fa_digits(balance)} Toman**",
             f"🎁 دعوت‌های موفق: {fa_digits(ref['invited'])}",
             UI.SEP,
             f"🗓 {fa_weekday(now)} · {jalali_long(now)}",
@@ -10063,11 +10179,13 @@ class SaaSBot:
 
         # ── ۵ بخش با ساختار یکدست ──
         # Ⅰ فروش
+        # v2.8.12: دکمه‌ی «🎟 کدهای تخفیف» اضافه شد
         sec1 = [
             UI.go(f"💳 سفارشات در انتظار{badge(pending_pay)}", "owner_payments", primary=True),
             UI.go("🏷 قیمت‌گذاری", "owner_pricing"),
             UI.go("🎫 لایسنس و دسترسی", "license_access"),
             UI.go("💰 تأیید پرداخت", "admin_finance"),
+            UI.go("🎟 کدهای تخفیف", "owner_discount_codes"),
         ]
         # Ⅱ کاربران
         sec2 = [
@@ -11373,14 +11491,19 @@ class SaaSBot:
                 UI.go("📊 وضعیت", _act("status")),
             ],
         ]
-        # PATCH (v2.6.3): دکمه‌های 2FA/دستگاه‌ها فقط برای OWNER
-        # کاربر عادی نباید ببینه — فقط مالک اصلی
+        # v2.8.11: دکمه‌های امنیتی برای OWNER و ADMIN
+        # (قبلاً فقط OWNER بود — ADMIN نمی‌دید)
+        # v2.8.11: دکمه‌ی «🔒 دستگاه‌ها/2FA» فقط دستگاه‌ها رو باز می‌کرد
+        # ولی ظاهرش قول 2FA هم می‌داد. حالا به دو دکمه‌ی جدا تقسیم شده:
+        #   "📱 دستگاه‌ها" — فقط دستگاه‌های لاگین‌شده
+        #   "🔐 2FA" — رمز دو مرحله‌ای (تغییر/حذف/ریست)
         viewer_role = self._role(event.sender_id)
-        if viewer_role == ROLE_OWNER:
+        if viewer_role in (ROLE_OWNER, ROLE_ADMIN):
             buttons.append([
-                UI.go("📨 ارسال پیام", _act("send")),
-                UI.go("🔒 دستگاه‌ها/2FA", _act("sess")),
+                UI.go("📱 دستگاه‌ها", _act("sess")),
+                UI.go("🔐 2FA", _act("tfa")),
             ])
+            buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
         else:
             buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
         # عملیات حالت‌دار: سبز برای فعال‌سازی (اگر disabled)، خاکستری برای
@@ -11399,7 +11522,7 @@ class SaaSBot:
                 f"🚀 اکشن‌های سریع — {tag}",
                 body=body,
                 subtitle="یک کلیک تا هر عملیات — بدون ورود به هاب.",
-                hint="🔒 برای تنظیمات حساس (دستگاه‌ها/2FA) رو «🔒 دستگاه‌ها/2FA» بزن.",
+                hint="📱 برای دستگاه‌های لاگین‌شده و 🔐 برای رمز دو مرحله‌ای.",
             ),
             buttons=buttons,
         )
@@ -12937,6 +13060,34 @@ class SaaSBot:
         """callbak قدیمی — برای سازگاری، به هاب «لایسنس و دسترسی‌ها» می‌رود."""
         await self._owner_show_license_hub(event)
 
+    # v2.8.12: کدهای تخفیف
+    async def _owner_show_discount_codes(self, event):
+        """🎟 کدهای تخفیف — لیست + ساخت + حذف."""
+        if self._role(event.sender_id) not in (ROLE_OWNER, ROLE_ADMIN):
+            await event.answer("⛔ فقط OWNER/ADMIN", alert=True)
+            return
+        codes = list_discount_codes(limit=20)
+        body = []
+        if not codes:
+            body.append(f"{UI.GRAY} هنوز هیچ کد تخفیفی ساخته نشده.")
+        else:
+            body.append(f"📦 {fa_digits(len(codes))} کد تخفیف:")
+            body.append("")
+            for c in codes:
+                used = c["used_count"]
+                mx = c["max_uses"]
+                act = "🟢" if c["is_active"] else "⚫"
+                body.append(f"{act} `{c['code']}` — {fa_digits(c['percent'])}% · {fa_digits(used)}/{fa_digits(mx)}")
+        buttons = [
+            [UI.go("➕ ساخت کد تخفیف", b"owner_discount_create", tone="success")],
+            UI.nav_row(),
+        ]
+        await event.edit(
+            UI.screen("🎟 کدهای تخفیف", body=body,
+                      subtitle="کدهای تخفیف برای کاربران هنگام خرید اشتراک."),
+            buttons=buttons,
+        )
+
     async def _owner_show_license_hub(self, event):
         """🎫 لایسنس و دسترسی‌ها — ساخت لایسنس + مدیریت نقش‌ها."""
         lines = ["🎫 **لایسنس و دسترسی‌ها**\n\nاز اینجا لایسنس بساز و نقش‌ها را مدیریت کن:"]
@@ -14086,6 +14237,45 @@ class SaaSBot:
                     "user_not_found": "❌ کاربر پیدا نشد.",
                     "invalid_amount": "❌ مبلغ نامعتبر.",
                     "insufficient_balance": "❌ موجودی کاربر کافی نیست.",
+                }
+                await event.respond(err_map.get(r.get("error"), "❌ خطای ناشناخته."))
+            return True
+
+        # v2.8.12: کدهای تخفیف
+        if state == WIZ_DISCOUNT_PERCENT:
+            try:
+                pct = int(text)
+                assert 1 <= pct <= 100
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد بین ۱ و ۱۰۰ بفرست (درصد تخفیف):")
+                return True
+            wiz["data"]["percent"] = pct
+            wiz["state"] = WIZ_DISCOUNT_MAX_USES
+            await event.respond("🔢 تعداد استفاده‌های مجاز رو بفرست (مثلاً ۱ یا ۱۰):")
+            return True
+
+        if state == WIZ_DISCOUNT_MAX_USES:
+            try:
+                mx = int(text)
+                assert mx > 0
+            except (ValueError, AssertionError):
+                await event.respond("❌ یه عدد مثبت بفرست (تعداد استفاده‌ها):")
+                return True
+            pct = wiz["data"].get("percent", 0)
+            self.wizards.pop(event.sender_id, None)
+            r = create_discount_code(percent=pct, created_by=event.sender_id, max_uses=mx)
+            if r.get("ok"):
+                await event.respond(
+                    f"✅ کد تخفیف ساخته شد\n"
+                    f"🎟 کد: `{r['code']}`\n"
+                    f"📊 درصد: {fa_digits(pct)}%\n"
+                    f"🔢 استفاده‌های مجاز: {fa_digits(mx)}"
+                )
+            else:
+                err_map = {
+                    "permission_denied": "⛔ شما مجاز نیستید.",
+                    "invalid_percent": "❌ درصد نامعتبر.",
+                    "invalid_max_uses": "❌ تعداد نامعتبر.",
                 }
                 await event.respond(err_map.get(r.get("error"), "❌ خطای ناشناخته."))
             return True
@@ -15806,6 +15996,19 @@ class SaaSBot:
                                      buttons=[UI.nav_row()])
                     return
                 # ──────── ساخت گروهی لایسنس (v2.7.0) ────────
+                # v2.8.12: کدهای تخفیف
+                if data == "owner_discount_codes" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._owner_show_discount_codes(event)
+                    return
+                if data == "owner_discount_create" and role in (ROLE_OWNER, ROLE_ADMIN):
+                    await self._clear_admin_panel_wizard(event.sender_id)
+                    self._start_own_wizard(event.sender_id, "discount_pending_percent", {})
+                    await event.edit(
+                        "🎟 **ساخت کد تخفیف**\n\n"
+                        "درصد تخفیف رو بفرست (۱ تا ۱۰۰):",
+                        buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                    )
+                    return
                 if data == "owner_create_license_batch" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
                     await self._clear_admin_panel_wizard(event.sender_id)
                     self._start_own_wizard(event.sender_id, "cl_batch_pending_type", {})
@@ -15879,11 +16082,13 @@ class SaaSBot:
                 if data == "user_wallet_tx":
                     await self._user_show_wallet_tx(event)
                     return
-                if data.startswith("user_wallet_admin:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                # v2.8.12: RESELLER هم می‌تونه کیف پول مشتری‌های خودش رو ببینه
+                if data.startswith("user_wallet_admin:") and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
                     target_uid = safe_callback_int(data.split(":", 1)[1], 0)
                     await self._admin_show_user_wallet(event, target_uid)
                     return
-                if data.startswith("user_wallet_credit:") and role in (ROLE_OWNER, ROLE_ADMIN):
+                # v2.8.12: RESELLER هم می‌تونه شارژ کنه
+                if data.startswith("user_wallet_credit:") and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
                     target_uid = safe_callback_int(data.split(":", 1)[1], 0)
                     await self._admin_wallet_credit_start(event, target_uid)
                     return
