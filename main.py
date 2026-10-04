@@ -6791,78 +6791,9 @@ class AdminBot:
             buttons=buttons,
         )
 
-    async def _show_sessions(self, event, tag: str, page: int = 0, flash: str = ""):
-        """🔒 دستگاه‌های لاگین‌شده — v2.10.10: بازسازی شده."""
-        allowed, _r = await self._authorize_security(event, tag)
-        if not allowed:
-            try:
-                await event.answer("⛔ دسترسی ندارید", alert=True)
-            except Exception:
-                pass
-            return
-        entry = self.sb.ACCOUNTS.get(tag)
-        if not entry:
-            await self._nav_heal(event, "این اکانت الان روشن نیست.")
-            return
-        try:
-            sessions = await entry.bot.list_sessions()
-        except Exception as e:
-            print(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}")
-            await event.answer("گرفتن فهرست دستگاه‌ها ناموفق بود.", alert=True)
-            return
-        current = None
-        others = []
-        for s in sessions:
-            if s.get("current"):
-                current = s
-            else:
-                others.append(s)
-        PER_PAGE = 8
-        total_pages = max(1, (len(others) + PER_PAGE - 1) // PER_PAGE)
-        if page >= total_pages:
-            page = total_pages - 1
-        start = page * PER_PAGE
-        page_others = others[start:start + PER_PAGE]
-        body = []
-        if flash:
-            body.append(f"{UI.GREEN} {flash}")
-            body.append(UI.SEP)
-        if current:
-            body.append(f"{UI.GREEN} این سلف — {self._sess_line(current)}")
-            body.append(f"     {UI.GRAY} نشستِ فعلی است؛ بسته نمی‌شود.")
-        else:
-            body.append(f"{UI.AMBER} نشستِ فعلی پیدا نشد.")
-        body.append(UI.SEP)
-        buttons = []
-        if not others:
-            body.append(f"{UI.GRAY} هیچ دستگاه دیگری لاگین نیست. ✅")
-        else:
-            for i, s in enumerate(page_others):
-                global_idx = start + i
-                loc = f" · {s['country']}" if s.get("country") else ""
-                body.append(f"{UI.RED} {self._sess_line(s)}{loc} · {entry.bot._rel_time(s.get('last'))}")
-                buttons.append([UI.btn(f"{self._sess_line(s)[:28]}",
-                                       f"sesstog:{tag}:{global_idx}", style="primary")])
-        buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
-        buttons.append([UI.refresh(f"sessions:{tag}")])
-        buttons.append(UI.nav_row())
-        await event.edit(
-            UI.screen("🔒 دستگاه‌های لاگین‌شده", body=body,
-                      subtitle=f"«{tag}» روی {fa_digits(len(sessions))} دستگاه فعال است."),
-            buttons=buttons,
-        )
-
-    async def _authorize_security(self, event, tag: str) -> tuple:
-        """v2.10.10: بازسازی شده — بررسی مجوز دسترسی به ابزارهای امنیتی."""
-        # ساده: فقط OWNER و ADMIN مجازند
-        role = self._role(event.sender_id) if hasattr(self, '_role') else 'USER'
-        if role in ('OWNER', 'ADMIN'):
-            return True, None
-        return False, "⛔ دسترسی ندارید"
-
     async def _show_connection(self, event, tag: str):
-        """🌐 اتصال و پروکسی — v2.10.9: فقط پروکسی + قابلیت‌ها.
-        2FA/sessions/login-code حذف شدن — از مدیریت اکانت قابل دسترسی‌اند.
+        """🌐 اتصال و پروکسی — v2.11: فقط پروکسی + قابلیت‌ها.
+        2FA/sessions/login-code به مدیریت اکانت منتقل شد.
         """
         cfg = self.sb.load_config()
         acc = cfg.get(tag, {})
@@ -6885,6 +6816,237 @@ class AdminBot:
         await event.edit(
             UI.screen("🌐 اتصال و پروکسی", body=body,
                       subtitle=f"«{tag}»"),
+            buttons=buttons,
+        )
+
+
+    async def _authorize_security(self, event, tag: str, quiet: bool = False):
+        """
+        (allowed, reason) — آیا همین کاربرِ همین لحظه می‌تواند روی همین
+        اکانت عملیاتِ حساس انجام دهد؟
+
+        این متد *در هر فراخوانی* مجدداً ارزیابی می‌شود — یعنی یک دکمه‌ی
+        کهنه بعد از سلبِ مجوز یا تغییرِ مالکیتِ اکانت دیگر کار نمی‌کند.
+
+        reason برای لاگِ داخلی است؛ پیامِ کاربر کوتاه و بدون جزئیات است.
+        quiet=True یعنی هیچ پیامی به کاربر نده (فراخوانی‌های داخلی که خودشان
+        پیام می‌دهند).
+        """
+        allowed, reason = authorize_sensitive_account_action(event.sender_id, tag)
+        if not allowed and not quiet:
+            # پیامِ کوتاه و عمومی — بدون افشای نامِ مجوز، مسیر یا دلیلِ رد.
+            answer = getattr(event, "answer", None)
+            if callable(answer):
+                try:
+                    await event.answer(
+                        "این قابلیت برای حساب شما فعال نشده است.", alert=True
+                    )
+                except Exception:
+                    pass
+        return allowed, reason
+
+    def _can_view_security_tools(self, tag: str, sender_id: int) -> bool:
+        """
+        آیا این کاربر *می‌بیند* که ابزارهای امنیتی برای این اکانت وجود
+        دارند؟ (برای پنهان‌کردن کامل از دیدِ کاربرانِ غیرمجاز). فقط داشتنِ
+        مجوز کافی است — دامنه در زمانِ کلیک دوباره چک می‌شود.
+        """
+        if self._viewer_is_main_owner(sender_id):
+            return True
+        try:
+            return bool(get_active_grants(sender_id, CAP_ACCOUNT_SECURITY))
+        except Exception:
+            return False
+
+
+    def _viewer_owns_account(self, acc: dict, sender_id: int) -> bool:
+        """
+        آیا بیننده اختیارِ «مالک‌سطح» روی این اکانت دارد؟ مبنای نمایشِ
+        اطلاعاتِ حساس (شماره‌ی تلفن) و عملیاتِ نشست‌ها (بستنِ دستگاه‌ها).
+
+        سه حالت مجاز است:
+          ۱) standalone — admin_bot.py به‌تنهایی، یک ادمینِ واحد.
+          ۲) OWNER/ADMINِ سیستم — در این پنل با owner_filter=None شناخته
+             می‌شوند (دسترسیِ کاملِ سیستمی). اپراتورِ ربات باید بتواند هر
+             اکانتی، از جمله اکانتِ به‌مشکل‌خورده یا بدونِ مالک، را کامل
+             مدیریت کند.
+          ۳) مالکِ واقعیِ همان اکانت (owner_user_id == خودش) — برای وقتی
+             کاربر/نماینده اکانتِ خودش را مدیریت می‌کند.
+
+        نماینده‌ای که صرفاً اکانتِ مشتری را مدیریت می‌کند (نه OWNER/ADMIN و
+        نه صاحبِ اکانت) اختیارِ بستنِ دستگاه‌ها یا دیدنِ شماره را ندارد.
+        """
+        if getattr(self, "standalone", False):
+            return True
+        # نکته‌ی امنیتی: getattr با نگهبانِ غیر-None. اگر به هر دلیلی
+        # owner_filter تنظیم نشده باشد، *نباید* مثل OWNER/ADMIN رفتار شود —
+        # آن مسیر fail-open بود. با این نگهبان، به چکِ صریحِ مالکیت می‌افتیم
+        # که fail-safe است.
+        _missing = object()
+        scope = getattr(self, "owner_filter", _missing)
+        if scope is None:                  # OWNER/ADMINِ سیستم
+            return True
+        owner = acc.get("owner_user_id")
+        return owner is not None and owner == sender_id
+
+    # نامِ قدیمی برای سازگاری — عملِ نشست‌ها همان معیارِ مالکیت را دارد.
+    def _can_wipe_sessions(self, acc: dict, sender_id: int) -> bool:
+        return self._viewer_owns_account(acc, sender_id)
+
+    @staticmethod
+    def _sess_line(s) -> str:
+        """توصیفِ یک‌خطیِ یک نشست: دستگاه/اپ."""
+        dev = " ".join(x for x in (s.get("device"), s.get("platform")) if x)
+        app = s.get("app") or ""
+        if app and s.get("app_ver"):
+            app = f"{app} {s['app_ver']}"
+        return " — ".join(x for x in (dev, app) if x) or "دستگاه نامشخص"
+
+    # ── انتخابِ چنددستگاهی ──────────────────────────────────────────
+    _SESS_SEL_MAX = 300
+    _SESS_PAGE_SIZE = 8        # دکمه در هر صفحه از فهرستِ دستگاه‌ها
+
+    def _sec_lock(self, tag: str) -> "asyncio.Lock":
+        """
+        قفلِ هم‌زمانی برای عملیاتِ حساسِ یک اکانت — در برابر کلیکِ
+        دوباره/هم‌زمان محافظت می‌کند (دو بار بازنشانی، دو بار خروج از همه،
+        چند گوش‌دهنده‌ی هم‌زمان).
+        """
+        return self._sec_locks.setdefault(tag, asyncio.Lock())
+
+    def _sel_set(self, sender_id: int, tag: str) -> set:
+        return self._sess_sel.setdefault((sender_id, tag), set())
+
+    def _clear_sel(self, sender_id: int, tag: str) -> None:
+        self._sess_sel.pop((sender_id, tag), None)
+
+    async def _show_sessions(self, event, tag: str, flash: str = None, page: int = 0):
+        """
+        🔒 فهرست دستگاه‌های لاگین‌شده.
+
+        هر دستگاهِ دیگر یک دکمه‌ی تیک‌دار است؛ چند تا را انتخاب کن و
+        «بستنِ انتخاب‌شده‌ها» را بزن، یا «خروج از همه». نشستِ خودِ سلف
+        همیشه نمایش داده می‌شود و هرگز بسته نمی‌شود.
+
+        صفحه‌بندی: تلگرام می‌تواند ۳۰+ دستگاه داشته باشد؛ دیوارِ دکمه
+        غیرقابل‌استفاده می‌شود، پس هر صفحه حداکثر _SESS_PAGE_SIZE دکمه
+        نشان می‌دهد.
+
+        flash: بنرِ نتیجه که بعد از یک عمل بالای فهرست نشان داده می‌شود.
+        """
+        # گاردِ مرکزی: مجوز + دامنه + وجودِ اکانت، در همین لحظه.
+        allowed, _r = await self._authorize_security(event, tag)
+        if not allowed:
+            return
+        entry = self.sb.ACCOUNTS.get(tag)
+        if not entry:
+            # اکانت ممکن است هنوز در حال start باشد یا fail شده باشد
+            cfg = self.sb.load_config()
+            if tag in cfg:
+                # NOTE: قبلاً `_RUNTIME_STATUS` استفاده می‌شد که در کل ماژول تعریف
+                # نشده بود → NameError در callback و هندلر با swallow در WARNING
+                # بی‌صدا از بین می‌رفت (همان «اسپینر سپس هیچی»). رجیستریِ واقعی
+                # `BOT_STATUS` است (موجودیتِ per-tag وضعیت runtime).
+                status = _status_human(BOT_STATUS.get(tag, "unknown"))
+                await event.answer(
+                    f"اکانت «{tag}» هنوز آماده نیست (وضعیت: {status}). "
+                    f"چند ثانیه صبر کن و دوباره تلاش کن.", alert=True)
+            else:
+                await event.answer("این اکانت وجود ندارد.", alert=True)
+            return
+        try:
+            await event.answer("در حال گرفتن فهرست دستگاه‌ها...")
+        except Exception:
+            pass
+        try:
+            sessions = await entry.bot.list_sessions()
+        except Exception as e:
+            # پیامِ عمومی به کاربر؛ جزئیات فقط در لاگ سرور.
+            print(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}: {e}")
+            await event.edit(
+                UI.screen("🔒 دستگاه‌های لاگین‌شده",
+                          body=[f"{UI.RED} گرفتن فهرست دستگاه‌ها ناموفق بود. دوباره تلاش کن."]),
+                buttons=[[UI.refresh(f"sessions:{tag}")], UI.nav_row()],
+            )
+            return
+
+        others = [s for s in sessions if not s["current"]]
+        current = next((s for s in sessions if s["current"]), None)
+
+        # انتخاب را با نشست‌های موجود هماهنگ کن (هرچی دیگه نیست حذف)
+        live_hashes = {s["hash"] for s in others}
+        sel = self._sel_set(event.sender_id, tag) & live_hashes
+        self._sess_sel[(event.sender_id, tag)] = sel
+
+        # صفحه‌بندی
+        total_pages = max(1, (len(others) + self._SESS_PAGE_SIZE - 1) // self._SESS_PAGE_SIZE)
+        page = max(0, min(page, total_pages - 1))
+        start = page * self._SESS_PAGE_SIZE
+        page_others = others[start:start + self._SESS_PAGE_SIZE]
+
+        body = []
+        if flash:
+            body.append(f"{UI.GREEN} {flash}")
+            body.append(UI.SEP)
+        if current:
+            body.append(f"{UI.GREEN} این سلف — {self._sess_line(current)}")
+            body.append(f"     {UI.GRAY} نشستِ فعلی است؛ بسته نمی‌شود.")
+        else:
+            # نباید اتفاق بیفتد، ولی اگر نشستِ فعلی پیدا نشد، می‌گوییم تا
+            # مبادا کسی فکر کند همه‌چیز سالم است.
+            body.append(f"{UI.AMBER} نشستِ فعلی پیدا نشد — list_sessions ناقص برگشت.")
+        body.append(UI.SEP)
+
+        buttons = []
+        if not others:
+            body.append(f"{UI.GRAY} هیچ دستگاه دیگری لاگین نیست. ✅")
+        else:
+            n_sel_page = 0
+            for i, s in enumerate(page_others):
+                global_idx = start + i
+                loc = f" · {s['country']}" if s.get("country") else ""
+                body.append(f"{UI.RED} {self._sess_line(s)}{loc} · {entry.bot._rel_time(s.get('last'))}")
+                on = s["hash"] in sel
+                if on:
+                    n_sel_page += 1
+                mark = "☑️" if on else "⬜️"
+                buttons.append([UI.btn(f"{mark} {self._sess_line(s)[:28]}",
+                                       f"sesstog:{tag}:{global_idx}", style="primary")])
+            # خلاصه‌ی انتخاب + عملیاتِ گروهی (چسبیده به پایینِ صفحه)
+            # اگر اکانت شماره‌ی خارج/مجازی داشته باشد، یک 🛡️ به دکمه‌ها
+            # اضافه می‌کنیم تا کاربر متوجه Anti-Ban بودن عملیات شود.
+            entry_for_antiban = self.sb.ACCOUNTS.get(tag)
+            antiban_mark = ""
+            if entry_for_antiban and is_dangerous_account(entry_for_antiban.acc):
+                antiban_mark = " 🛡️"
+            action_row = []
+            if sel:
+                action_row.append(UI.danger(
+                    f"بستنِ انتخاب‌شده‌ها ({len(sel)}){antiban_mark}", f"sesskill:{tag}"))
+            action_row.append(UI.danger(
+                f"خروج از همه ({len(others)}){antiban_mark}", f"sesswipe:{tag}"))
+            buttons.append(action_row)
+            # نوارِ صفحه‌بندی (فقط اگر بیش از یک صفحه است)
+            if total_pages > 1:
+                nav_row = []
+                if page > 0:
+                    nav_row.append(UI.neutral("◀️ صفحه‌ی قبل", f"sesspage:{tag}:{page - 1}"))
+                nav_row.append(UI.noop(f"صفحه {fa_digits(page + 1)} از {fa_digits(total_pages)}"))
+                if page < total_pages - 1:
+                    nav_row.append(UI.neutral("صفحه‌ی بعد ▶️", f"sesspage:{tag}:{page + 1}"))
+                buttons.append(nav_row)
+        # v2.8.11: دکمه‌ی «🔐 رمز دو مرحله‌ای» اضافه شد تا کاربر از
+        # لیست دستگاه‌ها بتونه مستقیم به پنل 2FA بره — قبلاً اینجا
+        # هیچ راهی نبود و کاربر در بن‌بست می‌ماند.
+        buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
+        buttons.append([UI.refresh(f"sessions:{tag}")])
+        buttons.append(UI.nav_row())
+
+        await event.edit(
+            UI.screen("🔒 دستگاه‌های لاگین‌شده", body=body,
+                      subtitle=f"«{tag}» روی {fa_digits(len(sessions))} دستگاه فعال است.",
+                      hint=("تیکِ چند دستگاه را بزن، بعد «بستنِ انتخاب‌شده‌ها»؛ یا «خروج از همه»."
+                            if others else "🔐 برای تنظیمات رمز دو مرحله‌ای، روی دکمه‌ی پایین بزن.")),
             buttons=buttons,
         )
 
@@ -10654,7 +10816,7 @@ class SaaSBot:
         except Exception:
             return False
 
-    # v2.10.7: خرید ربات اختصاصی
+    # v2.11: خرید ربات اختصاصی
     async def _start_dedicated_bot_purchase(self, event):
         """کاربر ربات اختصاصی می‌خره."""
         uid = event.sender_id
@@ -10701,7 +10863,7 @@ class SaaSBot:
                     c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
                               (_now(), order["id"]))
             await self._clear_admin_panel_wizard(uid)
-            self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid, "price": price})
+            self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
             await event.edit(
                 "✅ **پرداخت موفق!**\n\n"
                 f"💰 موجودی جدید: {fa_digits(pay_result['balance'])} Toman\n\n"
@@ -10779,7 +10941,8 @@ class SaaSBot:
         # دکمه‌ها: درخواست (اصلی) + انصراف
         buttons = []
         if not row or row["status"] in ("rejected",):
-            buttons.append([UI.confirm("✋ درخواست نمایندگی", "user_reseller_apply")])
+            buttons.append([UI.go("🤖 ربات اختصاصی", "dedicated_bot_buy", tone="success")],
+            [UI.go("🤝 درخواست نمایندگی", "user_reseller_apply", tone="success")])
         buttons.append([UI.go("🔙 بازگشت به منو", NAV_HOME)])
 
         await event.edit(text, buttons=buttons)
@@ -12587,14 +12750,6 @@ class SaaSBot:
                         except Exception:
                             size = 0
                         candidates.append((f.name, "backup خودکار", f, size))
-                # v2.10.8: فایل‌های pre-rollback هم اضافه شد
-                for f in sorted(versions_dir.glob("main.py.pre-rollback.*"), reverse=True):
-                    if f.is_file():
-                        try:
-                            size = f.stat().st_size
-                        except Exception:
-                            size = 0
-                        candidates.append((f.name, "backup قبل rollback", f, size))
                 # ۲. فایل‌های v*.py (نسخه‌های قدیمی‌تر)
                 for f in sorted(versions_dir.glob("v*.py"), reverse=True):
                     if f.is_file():
@@ -14681,57 +14836,6 @@ class SaaSBot:
             return True
 
         # v2.10.1: max_uses for single license
-        # v2.10.6: دریافت توکن ربات اختصاصی
-        if state == "dedicated_bot_token":
-            token = (text or "").strip()
-            if not token or len(token) < 20 or ":" not in token:
-                await event.respond("❌ توکن معتبر نیست. از @BotFather بگیر و بفرست:")
-                return True
-            uid = wiz["data"].get("user_id")
-            self.wizards.pop(event.sender_id, None)
-            # ثبت در dedicated_bots table
-            try:
-                with _conn_immediate() as c:
-                    c.execute(
-                        "INSERT INTO dedicated_bots (bot_token, owner_user_id, status, created_at) "
-                        "VALUES (?, ?, 'pending', ?)",
-                        (token, uid, _now()),
-                    )
-                log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
-                await event.respond(
-                    f"✅ **ربات اختصاصی ثبت شد!**\n\n"
-                    f"🤖 توکن: `{token[:20]}...`\n"
-                    f"⏳ OWNER باید فعالش کنه. به زودی آماده می‌شه."
-                )
-            except Exception as e:
-                await event.respond(f"❌ خطا: {e}")
-            return True
-
-        # v2.10.7: دریافت توکن ربات اختصاصی
-        if state == "dedicated_bot_token":
-            token = (text or "").strip()
-            if not token or len(token) < 20 or ":" not in token:
-                await event.respond("❌ توکن معتبر نیست. از @BotFather بگیر و بفرست:")
-                return True
-            uid = wiz["data"].get("user_id")
-            self.wizards.pop(event.sender_id, None)
-            try:
-                with _conn_immediate() as c:
-                    c.execute(
-                        "INSERT INTO dedicated_bots (bot_token, owner_user_id, status, created_at) "
-                        "VALUES (?, ?, 'pending', ?)",
-                        (token, uid, _now()),
-                    )
-                log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
-                await event.respond(
-                    f"✅ **ربات اختصاصی ثبت شد!**\n\n"
-                    f"🤖 توکن: `{token[:20]}...`\n"
-                    f"⏳ OWNER باید فعالش کنه. به زودی آماده می‌شه."
-                )
-            except Exception as e:
-                await event.respond(f"❌ خطا: {e}")
-            return True
-
         if state == "set_merchant":
             gw = wiz["data"].get("gw", "")
             merchant = (text or "").strip()
@@ -14771,6 +14875,31 @@ class SaaSBot:
             await event.respond(
                 "🔢 حالا تعداد لایسنس‌ها رو بفرست (۱ تا ۱۰۰):",
             )
+            return True
+
+        # v2.11: دریافت توکن ربات اختصاصی
+        if state == "dedicated_bot_token":
+            token = (text or "").strip()
+            if not token or len(token) < 20 or ":" not in token:
+                await event.respond("❌ توکن معتبر نیست. از @BotFather بگیر و بفرست:")
+                return True
+            uid = wiz["data"].get("user_id")
+            self.wizards.pop(event.sender_id, None)
+            try:
+                with _conn_immediate() as c:
+                    c.execute(
+                        "INSERT INTO dedicated_bots (token, owner_id, status, created_at, reseller_id) "
+                        "VALUES (?, ?, 'pending', ?, 0)",
+                        (token, uid, _now()),
+                    )
+                log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
+                await event.respond(
+                    f"✅ **ربات اختصاصی ثبت شد!**\n\n"
+                    f"🤖 توکن: `{token[:20]}...`\n"
+                    f"⏳ OWNER باید فعالش کنه."
+                )
+            except Exception as e:
+                await event.respond(f"❌ خطا: {e}")
             return True
 
         if state == WIZ_CL_BATCH_RESELLER_LIMIT:
@@ -17007,7 +17136,7 @@ class SaaSBot:
                 # می‌شود). چون اولی return دارد، اینجا هیچ‌وقت اجرا نمی‌شود
                 # ولی برای اطمینان از ناپدید شدنِ تله‌ی fallthrough، آن
                 # را حذف کردیم. `user_reseller_apply` معتبر است و باقی مانده.
-                # v2.10.7: خرید ربات اختصاصی
+                # v2.11: خرید ربات اختصاصی
                 if data == "dedicated_bot_buy":
                     await self._start_dedicated_bot_purchase(event)
                     return
