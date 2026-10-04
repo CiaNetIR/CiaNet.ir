@@ -6807,7 +6807,7 @@ class AdminBot:
             body.append(f"{UI.GRAY} پروکسی: تنظیم نشده (اتصال مستقیم)")
 
         buttons = [
-            [UI.go("🌐 تنظیم پروکسی", b"proxy_type:" + tag.encode())],
+            [UI.go("🌐 تنظیم پروکسی", b"proxy_start:" + tag.encode())],
             [UI.go("📊 وضعیت", b"status:" + tag.encode())],
             UI.nav_row(),
         ]
@@ -10939,9 +10939,9 @@ class SaaSBot:
         # دکمه‌ها: درخواست (اصلی) + انصراف
         buttons = []
         if not row or row["status"] in ("rejected",):
-            buttons.append([UI.go("🤖 ربات اختصاصی", "dedicated_bot_buy", tone="success")],
-            [UI.go("🤝 درخواست نمایندگی", "user_reseller_apply", tone="success")])
-        buttons.append([UI.go("🔙 بازگشت به منو", NAV_HOME)])
+            buttons.append([UI.go("🤖 ربات اختصاصی", "dedicated_bot_buy", tone="success")])
+            buttons.append([UI.go("🤝 درخواست نمایندگی", "user_reseller_apply", tone="success")])
+        buttons.append(UI.nav_row())
 
         await event.edit(text, buttons=buttons)
 
@@ -22593,6 +22593,9 @@ class SelfBot:
             except asyncio.CancelledError:
                 raise
             except errors.FloodWaitError as e:
+                import time as _t
+                self._flood_until = _t.time() + (e.seconds or 30) + FLOOD_RECOVER_GRACE
+                print(f"⏳ [{self.tag}] FloodWait {e.seconds}s در tabchi")
                 await asyncio.sleep(e.seconds + 5)
                 _jitter = self.tabchi_interval * 60 * random.uniform(-0.1, 0.1)
                 self.tabchi_next_run_at = time.time() + self.tabchi_interval * 60 + _jitter
