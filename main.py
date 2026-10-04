@@ -20703,7 +20703,8 @@ class SelfBot:
             return 0
 
         self.enabled = state.get("enabled", self.enabled)
-        self.time_enabled = state.get("time_enabled", self.time_enabled)
+        # v2.12.5: همیشه خاموش شروع کنه — کاربر خودش روشن کنه
+        self.time_enabled = False
         self.online_enabled = state.get("online_enabled", self.online_enabled)
         self.auto_read_pv = state.get("auto_read_pv", self.auto_read_pv)
         self.auto_read_group = state.get("auto_read_group", self.auto_read_group)
@@ -22780,7 +22781,7 @@ class SelfBot:
                 if not self.enabled:
                     await event.edit("❌ ابتدا `سلف روشن` بزنید")
                     return
-                self.time_enabled = True
+                self.time_enabled = False  # v2.12.5: default off
                 await self._start_time_loops()
                 self._persist(time_enabled=True)
                 sample = apply_font("12:34", self.current_font)
@@ -22827,7 +22828,7 @@ class SelfBot:
                         self.base_bio = full.full_user.about or ""
                     except Exception:
                         pass
-                self.bio_enabled = True
+                self.bio_enabled = False  # v2.12.5: default off
                 await self._start_bio_loop()
                 self._persist(bio_enabled=True, base_bio=self.base_bio)
                 sample = apply_font("12:34", self.current_font)
