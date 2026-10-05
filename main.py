@@ -6547,6 +6547,75 @@ class AdminBot:
         # قابل مشاهده است اما به کسی «تعلق» ندارد.
         self.default_owner_id = default_owner_id
 
+    # ─────────────────────────────────────────────────────────────────
+    # v2.12.12 (QA4-DEBUG/EXPERT/OWNER): async helpers با timeout برای
+    # event.respond و event.edit. قبلاً ۱۷ مکان در جریان 2FA (و sessions)
+    # بدون timeout بودن و وقتی تلگرام FloodWait می‌داد یا entity cache
+    # گرم نبود، بی‌نهایت hang می‌کردن → کل admin panel تحت _panel_lock
+    # قفل می‌شد. حالا همه‌ی این مکان‌ها از این helper‌ها استفاده می‌کنن.
+    # ─────────────────────────────────────────────────────────────────
+    _RESPOND_TIMEOUT_SEC = 15
+    _EDIT_TIMEOUT_SEC = 10
+
+    async def _respond_safe(self, event, text: str, buttons=None,
+                            link_preview: bool = False) -> bool:
+        """event.respond با timeout. اگه timeout خورد یا خطا داد، fallback
+        به event.answer با alert. برمی‌گرداند: True اگه respond موفق بود."""
+        try:
+            await asyncio.wait_for(
+                event.respond(text, buttons=buttons, link_preview=link_preview),
+                timeout=self._RESPOND_TIMEOUT_SEC,
+            )
+            return True
+        except asyncio.TimeoutError:
+            print(f"⚠️ [respond_safe] timeout after {self._RESPOND_TIMEOUT_SEC}s", flush=True)
+            try:
+                await event.answer("⏳ تلگرام پاسخ نداد. دوباره بزن.", alert=True)
+            except Exception:
+                pass
+            return False
+        except Exception as _e:
+            print(f"⚠️ [respond_safe] {type(_e).__name__}: {_e}", flush=True)
+            try:
+                await event.answer("❌ خطا در نمایش. دوباره بزن.", alert=True)
+            except Exception:
+                pass
+            return False
+
+    async def _edit_safe(self, event, text: str = None, buttons=None,
+                         link_preview: bool = False) -> bool:
+        """event.edit با timeout. اگه timeout خورد، fallback به respond.
+        اگه text مقدار نداشته باشه (None)، فقط message با buttons رو edit کن."""
+        try:
+            kwargs = {}
+            if text is not None:
+                kwargs["text"] = text
+            if buttons is not None:
+                kwargs["buttons"] = buttons
+            kwargs["link_preview"] = link_preview
+            await asyncio.wait_for(
+                event.edit(**kwargs),
+                timeout=self._EDIT_TIMEOUT_SEC,
+            )
+            return True
+        except asyncio.TimeoutError:
+            print(f"⚠️ [edit_safe] timeout after {self._EDIT_TIMEOUT_SEC}s", flush=True)
+            if text is not None:
+                return await self._respond_safe(event, text, buttons=buttons,
+                                                 link_preview=link_preview)
+            return False
+        except Exception as _e:
+            print(f"⚠️ [edit_safe] {type(_e).__name__}: {_e}", flush=True)
+            if "MessageNotModified" in type(_e).__name__:
+                return True
+            if text is not None:
+                try:
+                    return await self._respond_safe(event, text, buttons=buttons,
+                                                    link_preview=link_preview)
+                except Exception:
+                    pass
+            return False
+
     def _account_visible(self, acc: dict) -> bool:
         """
         آیا این اکانت (بر اساس owner_user_id ذخیره‌شده در config) برای
@@ -6597,6 +6666,18 @@ class AdminBot:
             connection_retries=3, retry_delay=2, flood_sleep_threshold=10,
         )
         await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        # v2.12.12: pre-warm dialog cache (مشابه SaaSBot.start)
+        try:
+            print("🔄 [admin_bot] pre-warming dialog cache (limit=100)...")
+            _warmup_count = 0
+            async for _ in self.client.iter_dialogs(limit=100):
+                _warmup_count += 1
+                if _warmup_count >= 100:
+                    break
+            print(f"✅ [admin_bot] dialog cache warmed ({_warmup_count} dialogs)")
+        except Exception as _e:
+            print(f"⚠️ [admin_bot] dialog cache warmup failed (continuing): "
+                  f"{type(_e).__name__}: {_e}")
         self._register_handlers()
 
         # PATCH (v2.0.10): reference به client رو در ماژول نگه دار تا
@@ -7045,7 +7126,8 @@ class AdminBot:
         except Exception as e:
             # پیامِ عمومی به کاربر؛ جزئیات فقط در لاگ سرور.
             print(f"⚠️ [sessions:{tag}] list_sessions ناموفق: {type(e).__name__}: {e}")
-            await event.edit(
+            await self._edit_safe(
+                event,
                 UI.screen("🔒 دستگاه‌های لاگین‌شده",
                           body=[f"{UI.RED} گرفتن فهرست دستگاه‌ها ناموفق بود. دوباره تلاش کن."]),
                 buttons=[[UI.refresh(f"sessions:{tag}")], UI.nav_row()],
@@ -7124,7 +7206,8 @@ class AdminBot:
         buttons.append([UI.refresh(f"sessions:{tag}")])
         buttons.append(UI.nav_row())
 
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen("🔒 دستگاه‌های لاگین‌شده", body=body,
                       subtitle=f"«{tag}» روی {fa_digits(len(sessions))} دستگاه فعال است.",
                       hint=("تیکِ چند دستگاه را بزن، بعد «بستنِ انتخاب‌شده‌ها»؛ یا «خروج از همه»."
@@ -7250,7 +7333,8 @@ class AdminBot:
             f"{UI.GRAY} اگر مطمئنی ادامه بده، دکمه‌ی زیر را بزن.",
             f"{UI.GRAY} در غیر این صورت، انصراف بزن.",
         ]
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen("🛡️ محافظت Anti-Ban", body=body,
                       hint="این تأیید فقط ۲ دقیقه معتبر است."),
             buttons=[
@@ -7273,7 +7357,8 @@ class AdminBot:
 
         if data.startswith("abno:"):
             await event.answer("لغو شد.")
-            await event.edit(
+            await self._edit_safe(
+                event,
                 f"{UI.GRAY}عملیات لغو شد.",
                 buttons=[[UI.neutral(UI.L_BACK, f"conn:{tag}")]],
             )
@@ -7306,7 +7391,8 @@ class AdminBot:
             await event.answer("تأیید شد — در حال ارسال درخواست...")
             await self._do_2fa_reset(event, tag, skip_antiban=True)
         else:
-            await event.edit(
+            await self._edit_safe(
+                event,
                 f"{UI.GREEN} تأیید شد. دوباره عملیات را از منو انجام بده.",
                 buttons=[[UI.neutral(UI.L_BACK, f"conn:{tag}")]],
             )
@@ -7335,7 +7421,8 @@ class AdminBot:
             body.append(f"   • … و {fa_digits(len(others) - 8)} دستگاهِ دیگر")
         body.append("")
         body.append(f"{UI.GREEN} نشستِ خودِ این سلف روشن می‌ماند و بسته نمی‌شود.")
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen("⚠️ خروج از همه‌ی دستگاه‌ها", body=body,
                       hint="این کار برگشت‌ناپذیر است؛ دستگاه‌ها باید دوباره لاگین کنند."),
             buttons=[
@@ -7480,7 +7567,8 @@ class AdminBot:
             # فقط در لاگِ سرور — هرگز به کاربر نمی‌رود.
             print(f"⚠️ [tfa:{tag}] خواندن 2FA شکست خورد: {err_code} "
                   f"({st.get('error_ident', '?')}) actor={event.sender_id}")
-            await event.respond(
+            await self._respond_safe(
+                event,
                 UI.screen("🔐 رمز دو مرحله‌ای", body=body,
                           subtitle=f"«{tag}»",
                           hint="اگر چند بار تکرار شد، اکانت ممکن است قطع شده باشد."),
@@ -7494,7 +7582,8 @@ class AdminBot:
             body.append(f"{UI.GRAY} رمز دو مرحله‌ای روی این اکانت فعال نیست.")
             if st["email_pattern"]:
                 body.append(f"{UI.AMBER} یک ایمیل در انتظارِ تأیید است: {st['email_pattern']}")
-            await event.respond(
+            await self._respond_safe(
+                event,
                 UI.screen(f"🔐 رمز دو مرحله‌ای", body=body,
                           subtitle=f"«{tag}» · {phone_hint}"),
                 buttons=[[UI.refresh(f"tfa:{tag}")], UI.nav_row()],
@@ -7549,7 +7638,8 @@ class AdminBot:
         buttons.append([UI.refresh(f"tfa:{tag}")])
         buttons.append(UI.nav_row())
 
-        await event.respond(
+        await self._respond_safe(
+            event,
             UI.screen(f"🔐 رمز دو مرحله‌ای", body=body,
                       subtitle=f"«{tag}» · {phone_hint}",
                       hint=("هرچه زودتر درخواست بدهی، زودتر تمام می‌شود — انتظار از لحظه‌ی درخواست شروع می‌شود."
@@ -7581,7 +7671,8 @@ class AdminBot:
             await self._show_2fa(event, tag)
             return
 
-        await event.respond(
+        await self._respond_safe(
+            event,
             UI.screen(
                 "⚠️ بازنشانی رمز دو مرحله‌ای",
                 body=[
@@ -7610,7 +7701,8 @@ class AdminBot:
             "data": {"tag": tag, "mode": mode, "back": f"tfa:{tag}"},
         }
         title = "🔑 تغییر رمز دو مرحله‌ای" if mode == "change" else "🗑 حذف رمز دو مرحله‌ای"
-        await event.respond(
+        await self._respond_safe(
+            event,
             f"**{title}**\n\nرمز فعلی را بفرست:\n"
             f"(برای امنیت، پیام شما پس از استفاده حذف می‌شود)",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
@@ -7625,7 +7717,8 @@ class AdminBot:
             "state": WIZ_2FA_OLD_PASS,
             "data": {"tag": tag, "mode": "email", "back": f"tfa:{tag}"},
         }
-        await event.respond(
+        await self._respond_safe(
+            event,
             "**📧 تغییر ایمیل بازیابی**\n\nرمز فعلی را بفرست:\n"
             "(برای امنیت، پیام شما پس از استفاده حذف می‌شود)",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
@@ -7647,7 +7740,7 @@ class AdminBot:
 
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
-            await event.respond("❌ اکانت دیگر روشن نیست.")
+            await self._respond_safe(event, "❌ اکانت دیگر روشن نیست.")
             self.wizards.pop(event.sender_id, None)
             return
 
@@ -7655,7 +7748,8 @@ class AdminBot:
             data["old_pass"] = text
             if mode == "change":
                 wiz["state"] = WIZ_2FA_NEW_PASS
-                await event.respond(
+                await self._respond_safe(
+                    event,
                     "رمز جدید را بفرست:\n(خالی = حذف رمز، فقط «حذف» بنویس)",
                     buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
                 )
@@ -7664,7 +7758,8 @@ class AdminBot:
                 await self._execute_2fa_change(event, tag, data, new_pass="", hint="")
             elif mode == "email":
                 wiz["state"] = WIZ_2FA_EMAIL
-                await event.respond(
+                await self._respond_safe(
+                    event,
                     "📧 ایمیل بازیابی جدید را بفرست:\n(خالی = حذف ایمیل، فقط «حذف» بنویس)",
                     buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
                 )
@@ -7676,7 +7771,8 @@ class AdminBot:
             else:
                 data["new_pass"] = text
                 wiz["state"] = WIZ_2FA_NEW_HINT
-                await event.respond(
+                await self._respond_safe(
+                    event,
                     "💡 راهنمای رمز (اختیاری) — خالی بفرست تا بدون راهنما باشد:",
                     buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
                 )
@@ -7698,9 +7794,9 @@ class AdminBot:
         self.wizards.pop(event.sender_id, None)
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
-            await event.respond("❌ اکانت روشن نیست.")
+            await self._respond_safe(event, "❌ اکانت روشن نیست.")
             return
-        await event.respond("⏳ در حال اعمال تغییرات...")
+        await self._respond_safe(event, "⏳ در حال اعمال تغییرات...")
         try:
             res = await entry.bot.change_2fa_password(
                 old_pass=data.get("old_pass", ""),
@@ -7709,9 +7805,9 @@ class AdminBot:
             )
             if res.get("ok"):
                 if res.get("action") == "removed":
-                    await event.respond("✅ رمز دو مرحله‌ای حذف شد.")
+                    await self._respond_safe(event, "✅ رمز دو مرحله‌ای حذف شد.")
                 else:
-                    await event.respond("✅ رمز دو مرحله‌ای تغییر کرد.")
+                    await self._respond_safe(event, "✅ رمز دو مرحله‌ای تغییر کرد.")
                 log_action(event.sender_id, "2fa_password_changed",
                            f"tag={tag} action={res.get('action', 'changed')}")
             else:
@@ -7720,18 +7816,18 @@ class AdminBot:
                     "invalid_password": "❌ رمز فعلی اشتباه است.",
                     "no_password": "❌ رمزی روی این اکانت فعال نیست.",
                 }.get(err, f"❌ خطا: {err}")
-                await event.respond(msg)
+                await self._respond_safe(event, msg)
         except Exception as e:
-            await event.respond(f"❌ خطا: {type(e).__name__}")
+            await self._respond_safe(event, f"❌ خطا: {type(e).__name__}")
 
     async def _execute_2fa_email_change(self, event, tag: str, data: dict, email: str):
         """اجرای تغییر ایمیل بازیابی 2FA."""
         self.wizards.pop(event.sender_id, None)
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
-            await event.respond("❌ اکانت روشن نیست.")
+            await self._respond_safe(event, "❌ اکانت روشن نیست.")
             return
-        await event.respond("⏳ در حال اعمال تغییرات...")
+        await self._respond_safe(event, "⏳ در حال اعمال تغییرات...")
         try:
             res = await entry.bot.change_2fa_email(
                 old_pass=data.get("old_pass", ""),
@@ -7739,9 +7835,9 @@ class AdminBot:
             )
             if res.get("ok"):
                 if email:
-                    await event.respond(f"✅ ایمیل بازیابی به‌روزرسانی شد: {email}")
+                    await self._respond_safe(event, f"✅ ایمیل بازیابی به‌روزرسانی شد: {email}")
                 else:
-                    await event.respond("✅ ایمیل بازیابی حذف شد.")
+                    await self._respond_safe(event, "✅ ایمیل بازیابی حذف شد.")
                 log_action(event.sender_id, "2fa_email_changed", f"tag={tag}")
             else:
                 err = res.get("error", "unknown")
@@ -7749,9 +7845,9 @@ class AdminBot:
                     "invalid_password": "❌ رمز فعلی اشتباه است.",
                     "no_password": "❌ رمزی روی این اکانت فعال نیست.",
                 }.get(err, f"❌ خطا: {err}")
-                await event.respond(msg)
+                await self._respond_safe(event, msg)
         except Exception as e:
-            await event.respond(f"❌ خطا: {type(e).__name__}")
+            await self._respond_safe(event, f"❌ خطا: {type(e).__name__}")
 
     async def _do_2fa_reset(self, event, tag: str, skip_antiban: bool = False):
         """اجرای درخواست بازنشانی، بازخوانیِ وضعیت از تلگرام، و گزارش."""
@@ -7826,7 +7922,8 @@ class AdminBot:
                 hrs = max(1, res["fresh_seconds"] // 3600)
                 hintline = (f"رمز به‌تازگی عوض شده؛ تلگرام تا حدود "
                             f"{fa_digits(hrs)} ساعت اجازه‌ی بازنشانی نمی‌دهد.")
-            await event.respond(
+            await self._respond_safe(
+                event,
                 UI.screen("🔐 بازنشانی رمز",
                           body=[f"{UI.RED} درخواست انجام نشد. دوباره تلاش کن."]
                                 + ([f"{UI.GRAY} {hintline}"] if hintline else [])),
@@ -7884,7 +7981,8 @@ class AdminBot:
             body.append("")
             body.append(f"{UI.GREEN} گوش‌دادن فعال است{left_txt}.")
             body.append("به‌محضِ رسیدنِ کدِ بعدی، اینجا برایت فرستاده می‌شود.")
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen("🔑 کد ورود", body=body,
                       subtitle=f"اکانت «{tag}»",
                       hint="اگر کد را قبلاً گرفته‌ای، «دریافت کد» همان را هم پیدا می‌کند."),
@@ -7910,7 +8008,8 @@ class AdminBot:
         log_action(event.sender_id, "login_code_fetched",
                    f"tag={tag} ok={bool(res.get('ok'))}")
         if not res.get("ok"):
-            await event.edit(
+            await self._edit_safe(
+                event,
                 UI.screen("🔑 کد ورود",
                           body=[f"{UI.RED} {res.get('error') or 'کدی پیدا نشد.'}",
                                 "",
@@ -7934,7 +8033,8 @@ class AdminBot:
             body.append(f"{UI.AMBER} این کد {entry.bot._rel_time_secs(age)} صادر شده — "
                         f"ممکن است منقضی شده باشد.")
             body.append("اگر کار نکرد، از دستگاه جدید دوباره کد بخواه و این دکمه را بزن.")
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen("🔑 کد ورود", body=body,
                       hint="این کد را فقط خودت وارد کن؛ به هیچ‌کس نده."),
             buttons=[
@@ -9901,6 +10001,25 @@ class SaaSBot:
         # هندلر جداگانه ثبت نمی‌کند (فقط متدهایش مستقیماً فراخوانی می‌شوند)
         self.admin_panel.client = self.client
 
+        # v2.12.12 (QA4-DEBUG/OWNER): pre-warm dialog cache برای جلوگیری از
+        # hang در event.respond / event.edit. وقتی کاربر روی دکمه می‌زنه و
+        # event.respond صدا زده می‌شه، telethon داخلی get_input_chat() رو
+        # صدا می‌زنه که اگه entity cache گرم نباشه، iter_dialogs(100) رو
+        # فراخوانی می‌کنه که می‌تونه hang کنه. اینجا در startup، cache رو
+        # گرم می‌کنیم تا در runtime این مشکل پیش نیاد. best-effort — اگه
+        # ناموفق بود، ربات بالا میاد ولی ممکنه بعضی callbackها کند باشن.
+        try:
+            print("🔄 [saas_bot] pre-warming dialog cache (limit=100)...")
+            _warmup_count = 0
+            async for _ in self.client.iter_dialogs(limit=100):
+                _warmup_count += 1
+                if _warmup_count >= 100:
+                    break
+            print(f"✅ [saas_bot] dialog cache warmed ({_warmup_count} dialogs)")
+        except Exception as _e:
+            print(f"⚠️ [saas_bot] dialog cache warmup failed (continuing): "
+                  f"{type(_e).__name__}: {_e}")
+
         self._register_handlers()
 
         if self._expiry_task is None or self._expiry_task.done():
@@ -10308,6 +10427,15 @@ class SaaSBot:
         # «💰 کیف پول» است) کاملاً unreachable بود.
         buttons.append([UI.go("👤 حساب کاربری", "user_account")])
 
+        # v2.12.12: دکمه‌ی «🤖 سلف من» — کاربرِ معمولی بعد از لاگین اکانت،
+        # به این دکمه نیاز داره تا به مدیریتِ اکانتش (toggle time/bio، تغییر
+        # proxy، 2FA، sessions و...) دسترسی داشته باشه. در v2.12.11 موقتاً
+        # حذف شده بود چون صفحات 2FA hang می‌کردن؛ حالا با _respond_safe و
+        # pre-warm cache، اون مشکل رفع شده و این دکمه برمی‌گرده.
+        if n_bots > 0:
+            _bots_label = f"🤖 سلف من ({fa_digits(n_active)}/{fa_digits(n_bots)})"
+            buttons.append([UI.go(_bots_label, "user_my_bots")])
+
         # ── ردیف ۴ (تکی): خرید با لایسنس
         buttons.append([UI.go("🔑 خرید با لایسنس", "user_activate_license")])
 
@@ -10558,7 +10686,8 @@ class SaaSBot:
         )
 
     async def _admin_show_user_wallet(self, event, target_uid: int):
-        """💰 کیف پول یک کاربر از دید OWNER/ADMIN — موجودی + تراکنش‌ها + شارژ/کسر."""
+        """💰 کیف پول یک کاربر از دید OWNER/ADMIN/RESELLER — موجودی +
+        تراکنش‌ها + شارژ/کسر. RESELLER فقط می‌تونه شارژ کنه (کسر ممنوع)."""
         u = get_user(target_uid)
         if not u:
             await self._nav_heal(event, "این کاربر پیدا نشد.")
@@ -10580,14 +10709,23 @@ class SaaSBot:
                 t_short = (tx["created_at"] or "")[:16].replace("T", " ")
                 reason = (tx.get("reason") or tx.get("ref") or "")[:30]
                 body.append(f"{sign}{fa_digits(amt)} · {t_short} · {reason}")
+        # v2.12.12 (QA4-RESELLER): دکمه‌ی «➖ کسر» فقط برای OWNER/ADMIN.
+        # قبلاً برای RESELLER هم نمایش داده می‌شد ولی callback رد می‌شد →
+        # silent no-op. حالا با viewer_role چک می‌کنیم.
+        _viewer_role = self._role(event.sender_id)
+        _wallet_buttons = [
+            [UI.go("➕ شارژ", f"user_wallet_credit:{target_uid}", tone="success")],
+        ]
+        if _viewer_role in (ROLE_OWNER, ROLE_ADMIN):
+            _wallet_buttons.append(
+                [UI.go("➖ کسر", f"user_wallet_debit:{target_uid}", tone="danger")])
+        _wallet_buttons.append(UI.nav_row())
         await event.edit(
             UI.screen("💰 کیف پول کاربر", body=body,
-                      hint="با دکمه‌های زیر می‌توانی شارژ کنی یا کسر کنی."),
-            buttons=[
-                [UI.go("➕ شارژ", f"user_wallet_credit:{target_uid}", tone="success")],
-                [UI.go("➖ کسر", f"user_wallet_debit:{target_uid}", tone="danger")],
-                UI.nav_row(),
-            ],
+                      hint="با دکمه‌های زیر می‌توانی شارژ کنی" +
+                           (" یا کسر کنی." if _viewer_role in (ROLE_OWNER, ROLE_ADMIN)
+                            else ".")),
+            buttons=_wallet_buttons,
         )
 
     async def _admin_wallet_credit_start(self, event, target_uid: int):
@@ -10778,10 +10916,13 @@ class SaaSBot:
         buttons.append([UI.section_header(2)])
         for row in UI.admin_section_buttons(0, sec3):
             buttons.append(row)
-        # سربرگ Ⅳ سیستم
-        buttons.append([UI.section_header(3)])
-        for row in UI.admin_section_buttons(0, sec4):
-            buttons.append(row)
+        # سربرگ Ⅳ سیستم (اگه sec4 دکمه‌ای داشته باشه — v2.12.12: قبلاً
+        # برای ADMIN یه header خالی نشون می‌داد چون sec4 خالی بود ولی
+        # header همیشه append می‌شد. حالا فقط اگه sec4 پر باشه.)
+        if sec4:
+            buttons.append([UI.section_header(3)])
+            for row in UI.admin_section_buttons(0, sec4):
+                buttons.append(row)
         # سربرگ Ⅴ امنیت (اگه OWNER)
         if sec5:
             buttons.append([UI.section_header(4)])
@@ -14142,7 +14283,7 @@ class SaaSBot:
                 f"`{lic['code']}` — {tname} — مصرف: {lic['used_count']}/{lic['max_uses']} — {status} — 🕐 {lic['created_at']}"
             )
         lines.append("")
-        lines.append("🔒 همه‌ی لایسنس‌های جدید یک‌بارمصرف‌اند (max_uses=1).")
+        lines.append("🔒 هر لایسنس تا max_uses بار قابل‌استفاده است (پیش‌فرض ۱ = یک‌بارمصرف).")
         buttons = [UI.nav_row()]
         await event.edit("\n".join(lines), buttons=buttons)
 
@@ -17914,7 +18055,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.11"
+BUILD_VERSION = "2026-10-05-v2.12.12"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
