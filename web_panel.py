@@ -1763,9 +1763,26 @@ async def zarinpal_create_payment(order_id: int, request: Request):
 # قبل از این patch، کاربر بعد از پرداخت Zarinpal/Zibal یه صفحه‌ی سفید با
 # JSON خام می‌دید — حالا یه صفحه‌ی حرفه‌ای فارسی می‌بینه و توی تلگرام هم
 # تایید می‌گیره.
+# v2.12.10 (QA2-EXPERT/QA2-DEBUG UX2): ref_id و reason با html.escape
+# پوشانده می‌شن تا اگه Zarinpal/Zibal رشته‌ی حاوی HTML کاراکتر برگردوند،
+# صفحه XSS نشه. None هم به‌جای نمایش «None»، «-» نشون داده می‌شه.
 from starlette.responses import HTMLResponse as _HTMLResponse
+import html as _html_module
+
+def _safe_ref(ref_id) -> str:
+    """v2.12.10: ref_id رو به‌صورت امن برای HTML escape کن."""
+    if ref_id is None:
+        return "-"
+    return _html_module.escape(str(ref_id), quote=True)
+
+def _safe_reason(reason) -> str:
+    """v2.12.10: reason رو به‌صورت امن برای HTML escape کن."""
+    if reason is None:
+        return ""
+    return _html_module.escape(str(reason), quote=True)
 
 def _payment_success_html(ref_id: str) -> _HTMLResponse:
+    _ref = _safe_ref(ref_id)
     return _HTMLResponse(f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1787,12 +1804,13 @@ p {{ color: #475569; line-height: 1.7; margin: 8px 0; }}
 <div class="ok">✓</div>
 <h1>پرداخت شما با موفقیت ثبت شد</h1>
 <p>اشتراک شما فعال شد.</p>
-<div class="ref">کد پیگیری: {ref_id}</div>
+<div class="ref">کد پیگیری: {_ref}</div>
 <p class="note">می‌توانید این صفحه را ببندید و به ربات تلگرام برگردید.<br>
 پیام تایید نیز برای شما در تلگرام ارسال شد.</p>
 </div></body></html>""")
 
 def _payment_failed_html(reason: str) -> _HTMLResponse:
+    _r = _safe_reason(reason)
     return _HTMLResponse(f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1813,7 +1831,7 @@ p {{ color: #475569; line-height: 1.7; margin: 8px 0; }}
 </style></head><body><div class="card">
 <div class="x">✕</div>
 <h1>پرداخت ناموفق</h1>
-<div class="reason">{reason}</div>
+<div class="reason">{_r}</div>
 <p class="note">اگر مبلغ از حسابتان کسر شده، در سریع‌ترین زمان ممکن بازمی‌گردد.<br>
 در صورت نیاز با پشتیبانی در تلگرام تماس بگیرید.</p>
 </div></body></html>""", status_code=400)
@@ -1885,12 +1903,37 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
 
 @app.post("/api/user/auto-renew")
 async def toggle_auto_renew(request: Request):
-    """فعال/غیرفعال‌کردن تمدید خودکار از کیف پول."""
+    """فعال/غیرفعال‌کردن تمدید خودکار از کیف پول.
+    v2.12.10: این endpoint فقط فلگ auto_renew_enabled رو toggle می‌کنه —
+    خودِ تمدید در _expiry_loopِ ربات (ساعتی) انجام می‌شه. قبلاً این endpoint
+    همون لحظه auto_renew_subscription رو صدا می‌زد که یعنی کاربر با فعال‌کردن،
+    بلافاصله پول می‌داد و یه اشتراک جدید می‌ساخت — یعنی toggle واقعاً
+    "buy now" بود. حالا درست شده.
+    """
     uid = require_user_auth(request)
     m = _main()
-    # تست: آیا می‌تونه تمدید کنه؟
-    result = m.auto_renew_subscription(uid)
-    return {"result": result}
+    try:
+        req = await request.json()
+    except Exception:
+        req = {}
+    enable = bool(req.get("enable", True))
+    ok = m.set_auto_renew_enabled(uid, enable)
+    enabled = m.get_auto_renew_enabled(uid)
+    return {
+        "ok": ok,
+        "auto_renew_enabled": enabled,
+        "message": (
+            "تمدید خودکار فعال شد" if enabled
+            else "تمدید خودکار غیرفعال شد"
+        ),
+    }
+
+@app.get("/api/user/auto-renew")
+async def get_auto_renew(request: Request):
+    """v2.12.10: گرفتن وضعیت auto-renewal."""
+    uid = require_user_auth(request)
+    m = _main()
+    return {"auto_renew_enabled": m.get_auto_renew_enabled(uid)}
 
 # ─── End Phase 4 ────────────────────────────────────────────────────────
 

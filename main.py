@@ -1702,7 +1702,18 @@ def get_role(user_id: int, owner_id: int) -> str:
             "یعنی متغیر محیطی ADMIN_ID تنظیم نشده. تا وقتی این مقدار درست "
             "نشود، هیچ‌کس (حتی صاحب اصلی ربات) OWNER تشخیص داده نمی‌شود."
         )
-    if user_id == owner_id:
+    # v2.12.10 (QA2-EXPERT/QA2-OWNER C7 / AUDIT-10-D HIGH#1): قبلاً فقط
+    # user_id == owner_id چک می‌شد (یعنی فقط ADMIN_ID اصلی). اگه کسی در
+    # OWNER_IDS env var اضافه شده بود، is_owner_bypass و notify_owner_global
+    # او را به‌عنوان OWNER می‌شناختن ولی get_role نه → تو منوی ربات، فقط
+    # USER می‌دید و به هیچ OWNER-only صفحات دسترسی نداشت. حالا OWNER_IDS
+    # هم چک می‌شه (defensive: در زمان تعریفِ تابع OWNER_IDS هنوز موجود
+    # نیست ولی در زمان فراخوانی هست — Python late-binding).
+    try:
+        _extra_owners = OWNER_IDS
+    except NameError:
+        _extra_owners = set()
+    if user_id == owner_id or (_extra_owners and user_id in _extra_owners):
         return ROLE_OWNER
     with _conn() as c:
         row = c.execute("SELECT role FROM admins WHERE user_id = ?", (user_id,)).fetchone()
@@ -1872,6 +1883,14 @@ def ensure_wallet_schema() -> None:
         if "wallet_balance" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN wallet_balance INTEGER NOT NULL DEFAULT 0")
             print("✅ [wallet] ستون wallet_balance به users اضافه شد")
+        # v2.12.10 (QA2-USER C8 / AUDIT-10-C C1): ستون auto_renew_enabled
+        # روی users — برای auto-renewal واقعی. قبلاً auto_renew_subscription
+        # وجود داشت ولی هیچ scheduler ای صداش نمی‌زد و هیچ فلگی هم ذخیره
+        # نمی‌شد. حالا فلگ رو ذخیره می‌کنیم و در _expiry_loop قبل از انقضا
+        # صدا می‌زنیمش.
+        if "auto_renew_enabled" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN auto_renew_enabled INTEGER NOT NULL DEFAULT 0")
+            print("✅ [auto_renew] ستون auto_renew_enabled به users اضافه شد")
         # ۲) جدول تراکنش‌ها
         c.execute(
             "CREATE TABLE IF NOT EXISTS wallet_transactions ("
@@ -2038,6 +2057,44 @@ def get_wallet_balance(user_id: int) -> int:
     with _conn() as c:
         row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
     return int(row["wallet_balance"]) if row and row["wallet_balance"] is not None else 0
+
+
+# v2.12.10 (QA2-USER C8 / AUDIT-10-C C1): getter/setter برای auto_renew_enabled.
+def get_auto_renew_enabled(user_id: int) -> bool:
+    """آیا auto-renewal برای این کاربر فعاله؟ (ستون auto_renew_enabled در users)"""
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT auto_renew_enabled FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return bool(row and row["auto_renew_enabled"])
+    except Exception:
+        return False
+
+
+def set_auto_renew_enabled(user_id: int, enabled: bool) -> bool:
+    """تنظیم فلگ auto-renewal برای کاربر. بازگشت: True اگه ست شد."""
+    try:
+        with _conn() as c:
+            # اگه کاربر هنوز در جدول users نیست، upsert کن
+            existing = c.execute(
+                "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if not existing:
+                c.execute(
+                    "INSERT INTO users (user_id, auto_renew_enabled, created_at) VALUES (?, ?, ?)",
+                    (user_id, 1 if enabled else 0, _now()),
+                )
+            else:
+                c.execute(
+                    "UPDATE users SET auto_renew_enabled = ? WHERE user_id = ?",
+                    (1 if enabled else 0, user_id),
+                )
+            c.commit()
+        return True
+    except Exception as _e:
+        print(f"⚠️ [auto_renew] set failed for uid={user_id}: {_e}")
+        return False
 
 
 def wallet_credit(user_id: int, amount: int, created_by: int,
@@ -10224,6 +10281,17 @@ class SaaSBot:
         # «💰 کیف پول» است) کاملاً unreachable بود.
         buttons.append([UI.go("👤 حساب کاربری", "user_account")])
 
+        # v2.12.10 (QA2-USER/QA2-EXPERT C9 / AUDIT-10-H CRITICAL#1): دکمه‌ی
+        # «🤖 سلف من» — از v1.4.0 از منوی USER حذف شده بود. callback handler
+        # (user_my_bots → _show_user_own_bots، line ~16463) و renderer
+        # (_build_my_bots_view) هر دو وجود داشتن ولی هیچ دکمه‌ای بهشون
+        # وصل نبود. کاربرِ معمولی بعد از لاگین اکانت، هیچ راهی برای مدیریتِ
+        # اکانتش (toggle time/bio، تغییر proxy، 2FA، sessions و...) نداشت.
+        # حالا اگه n_bots > 0 باشه، دکمه اضافه می‌شه. عنوان شامل شمارنده‌ست.
+        if n_bots > 0:
+            _bots_label = f"🤖 سلف من ({fa_digits(n_active)}/{fa_digits(n_bots)})"
+            buttons.append([UI.go(_bots_label, "user_my_bots")])
+
         # ── ردیف ۴ (تکی): خرید با لایسنس
         buttons.append([UI.go("🔑 خرید با لایسنس", "user_activate_license")])
 
@@ -15691,6 +15759,42 @@ class SaaSBot:
                     mark_warned(sub["id"])
 
                 for sub in list_expired_subscriptions():
+                    # v2.12.10 (QA2-USER C8 / AUDIT-10-C C1): قبل از انقضای
+                    # واقعی، اگه auto-renewal فعاله و کیف پول کافیه، اشتراک رو
+                    # خودکار تمدید کن. قبلاً این قابلیت در README تبلیغ می‌شد
+                    # ولی هیچ scheduler ای صداش نمی‌زد.
+                    try:
+                        if get_auto_renew_enabled(sub["user_id"]):
+                            _rn = auto_renew_subscription(sub["user_id"])
+                            if _rn.get("renewed"):
+                                try:
+                                    await self.client.send_message(
+                                        sub["user_id"],
+                                        f"🔄 اشتراک شما به‌صورت خودکار تمدید شد!\n\n"
+                                        f"🧾 پلن: {_rn.get('plan', '?')}\n"
+                                        f"📅 مدت: {_rn.get('days', 0)} روز\n"
+                                        f"💰 موجودی باقی‌مانده: {_rn.get('balance', 0):,} تومان\n\n"
+                                        f"SelfBot شما روشن می‌ماند.",
+                                    )
+                                except Exception:
+                                    pass
+                                continue  # تمدید شد — به expire_subscription نرو
+                            else:
+                                # تمدید ناموفق (مثلاً موجودی کم) — به کاربر اطلاع بده
+                                _reason = _rn.get("reason", "unknown")
+                                try:
+                                    if _reason == "insufficient_balance":
+                                        await self.client.send_message(
+                                            sub["user_id"],
+                                            "⚠️ تمدید خودکار ناموفق بود — موجودی کیف پول کافی نیست.\n"
+                                            "برای جلوگیری از توقف سلف، کیف پولت رو شارژ کن یا دستی تمدید کن.",
+                                        )
+                                except Exception:
+                                    pass
+                                # fall through به انقضای معمولی
+                    except Exception as _e:
+                        print(f"⚠️ [expiry_loop] auto_renew check failed uid={sub['user_id']}: {_e}")
+                        # fall through به انقضای معمولی
                     expire_subscription(sub["id"])
                     # رفتار واقعی با پیام هماهنگ است: سلف‌بات متوقف و
                     # disabled می‌شود (نه حذف) — تنظیمات و سشن‌ها حفظ می‌شوند
@@ -15721,13 +15825,48 @@ class SaaSBot:
                 await self._sweep_expired_dedicated_bots()
 
                 # فاکتورهای در انتظاری که انقضایشان گذشته → باطل + اطلاع
+                # v2.12.10 (QA2-USER C10 / AUDIT-10-C M2): قبلاً هر فاکتورِ
+                # pending بعد از ۲۴ ساعت منقضی می‌شد، حتی اگه کاربر عکسِ رسید
+                # رو آپلود کرده بود ولی OWNER هنوز تایید نکرده بود. این یعنی
+                # کاربر پول داده ولی فاکتور باطل می‌شد. حالا اگه payment_id
+                # ست شده (یعنی رسید آپلود شده و در صفِ بررسی OWNER است)،
+                # انقضا رو ۷ روز اکستند می‌کنیم به‌جای باطل کردن. فقط فاکتورهای
+                # بدون رسید (که کاربر کلاً پرداخت نکرده) بعد از ۲۴ ساعت باطل
+                # می‌شن.
+                _EXTEND_SECONDS = 7 * 24 * 3600  # 7 روز
+                _now_ts = _now()
                 for order in list_expired_orders():
+                    # اگه رسید آپلود شده (payment_id ست)، فاکتور رو نگه دار
+                    if order.get("payment_id"):
+                        try:
+                            with _conn() as c:
+                                c.execute(
+                                    "UPDATE orders SET expires_at = ? WHERE id = ? AND status = 'pending'",
+                                    (_now_ts + _EXTEND_SECONDS, order["id"]),
+                                )
+                                c.commit()
+                            print(f"⏰ [expiry_loop] فاکتور {order['order_no']} انقضاش اکستند شد "
+                                  f"(رسید آپلود شده، در صفِ بررسی OWNER)")
+                            try:
+                                await self.client.send_message(
+                                    order["user_id"],
+                                    f"⏰ فاکتور `{order['order_no']}` هنوز در صفِ بررسیِ "
+                                    f"مدیریت است. ۷ روز به انقضای فاکتور اضافه شد. "
+                                    f"پس از تایید، اشتراک شما فعال می‌شود.",
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        except Exception as _e:
+                            print(f"⚠️ [expiry_loop] extend failed for {order['order_no']}: {_e}")
+                            # اگه extend ناموفق بود، fall through به expire
+                    # وگرنه: فاکتور بدون رسید → باطل
                     expire_order(order["id"])
                     try:
                         await self.client.send_message(
                             order["user_id"],
                             f"⏳ فاکتور `{order['order_no']}` منقضی شد و باطل شد. "
-                            "برای خرید دوباره از «💳 تمدید اشتراک» اقدام کن.",
+                            "برای خرید دوباره از «🛒 خرید سلف» اقدام کن.",
                         )
                     except Exception:
                         pass
@@ -17613,11 +17752,50 @@ _FATAL_AUTH_ERROR_TYPES = tuple(
     ) if t is not None
 )
 
+# v2.12.10 (QA2-EXPERT/QA2-DEBUG C6): تفکیکِ خطاهای احرازِ هویت به دو دسته:
+#   • _PERMANENT_BAN_TYPES: اکانت واقعاً بن/غیرفعال/حذف شده — DISABLE دائمی
+#     لازمه چون retry فایده نداره و فقط ریسکِ api_id رو بالا می‌بره.
+#   • _SESSION_EXPIRED_TYPES: سشن از دستگاه دیگه logout شده یا auth key
+#     باطل شده — این‌ها می‌تونن transient باشن (مثلاً سرور تلگرام کوتاه‌مدت
+#     مشکل داشته). DISABLE دائمی اینجا خیلی تهاجمیه: یه hiccup از تلگرام
+#     می‌تونست همه‌ی اکانت‌های روی یه api_id مشترک رو همزمان disable کنه.
+#     حالا این دسته فقط stop می‌شه (و OWNER notify می‌شه) ولی disabled=True
+#     در config ست نمی‌شه، تا retry بعدی خودکار صورت بگیره.
+_PERMANENT_BAN_TYPES = tuple(
+    t for t in (
+        getattr(errors, "UserDeactivatedError", None),
+        getattr(errors, "UserDeactivatedBanError", None),
+        getattr(errors, "AuthUnregisteredError", None),
+        getattr(errors, "PhoneNumberBannedError", None),
+    ) if t is not None
+)
+_SESSION_EXPIRED_TYPES = tuple(
+    t for t in (
+        getattr(errors, "AuthKeyError", None),
+        getattr(errors, "AuthKeyDuplicatedError", None),
+        getattr(errors, "UnauthorizedError", None),
+    ) if t is not None
+)
+
 
 def _is_fatal_auth_error(exc: BaseException) -> bool:
     if not _FATAL_AUTH_ERROR_TYPES:
         return False
     return isinstance(exc, _FATAL_AUTH_ERROR_TYPES)
+
+
+def _is_permanent_ban_error(exc: BaseException) -> bool:
+    """v2.12.10: آیا این خطا یعنی اکانت واقعاً بن/حذف شده (دائمی)؟"""
+    if not _PERMANENT_BAN_TYPES:
+        return False
+    return isinstance(exc, _PERMANENT_BAN_TYPES)
+
+
+def _is_session_expired_error(exc: BaseException) -> bool:
+    """v2.12.10: آیا این خطا یعنی سشن منقضی شده (ممکنه transient باشه)؟"""
+    if not _SESSION_EXPIRED_TYPES:
+        return False
+    return isinstance(exc, _SESSION_EXPIRED_TYPES)
 
 
 # PATCH (v2.0.10): Notify OWNER از طریق ربات مدیریت (اگه بالا هست) یا حداقل
@@ -17706,7 +17884,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.9"
+BUILD_VERSION = "2026-10-05-v2.12.10"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -20274,6 +20452,17 @@ class SelfBot:
         threshold سه هرگز محقق نمی‌شد و auto-disable عملاً dead-code بود.
         حالا همون اولین خطا رو disabled می‌کنه — چون fatal-auth واقعاً
         non-recoverable هست و retry فقط ریسکِ api_id رو بیشتر می‌کنه.
+
+        v2.12.10 (QA2-EXPERT/QA2-DEBUG C6): v2.12.9 روی همه‌ی fatal-auth
+        ها (حتی AuthKeyError که می‌تونه transient باشه) DISABLE دائمی
+        می‌کرد. این خیلی تهاجمی بود: یه hiccup موقت از تلگرام می‌تونست
+        همه‌ی اکانت‌های روی یه api_id مشترک رو همزمان disable کنه. حالا
+        تفکیک می‌کنیم:
+          • PERMANENT_BAN (UserDeactivated/UserDeactivatedBan/AuthUnregistered/
+            PhoneNumberBanned): DISABLE دائمی + stop. (بن واقعی)
+          • SESSION_EXPIRED (AuthKeyError/AuthKeyDuplicated/Unauthorized):
+            فقط stop + notify OWNER، بدون DISABLE. (ممکنه transient باشه)
+        OWNER می‌تونه دستی re-login کنه یا صبر کنه تلگرام به‌حال بیاد.
         """
         try:
             import time as _time
@@ -20286,35 +20475,54 @@ class SelfBot:
                 self.ban_first_seen = now
             self.ban_count += 1
 
+            # detect type of error از error_msg (به‌سادگی: بر اساس رشته‌ی
+            # خطا). اگه error_msg حاوی نام کلاس‌های ban دائمی بود، disable
+            # دائمی؛ وگرنه فقط stop.
+            _msg_lower = (error_msg or "").lower()
+            _is_permanent = any(_w in _msg_lower for _w in (
+                "userdeactivated", "userdeactivatedban",
+                "authunregistered", "phonenumberbanned",
+                "user deactivated", "phone number banned",
+                "phone_number_banned",
+            ))
+
             # notify OWNER
             short_err = error_msg[:200] if error_msg else "unknown"
             notify_text = (
-                f"🛑 اکانت «{self.tag}» به خطای احراز هویتِ غیرقابل‌بازیابی خورد.\n\n"
+                f"🛑 اکانت «{self.tag}» به خطای احراز هویت خورد.\n\n"
                 f"⚠️ خطا: `{short_err}`\n"
                 f"📊 تعداد در ۳۰ روز اخیر: {self.ban_count}\n"
             )
-            # v2.12.9: همون اولین fatal-auth رو disabled می‌کنه (threshold
-            # سه dead-code بود — توضیح در docstring بالا)
-            notify_text += (
-                f"\n🔒 اکانت خودکار disabled شد — برای جلوگیری از retry بی‌نهایت "
-                f"و حفاظت از api_id مشترک."
-            )
+            if _is_permanent:
+                notify_text += (
+                    f"\n🔒 اکانت دائماً disabled شد — این خطا non-recoverable "
+                    f"است (بن واقعی) و retry فایده نداره."
+                )
+            else:
+                notify_text += (
+                    f"\n⏸️ اکانت موقتاً stop شد (بدون DISABLE). این خطا ممکنه "
+                    f"transient باشه (مثلاً سشن از دستگاه دیگه logout شده). "
+                    f"در restart بعدی خودکار retry می‌شه. اگه دوباره تکرار شد، "
+                    f"می‌تونی دستی re-login کنی."
+                )
             try:
                 await _owner_notify_async(notify_text)
             except Exception:
                 pass
 
-            # v2.12.9: اکانت رو همین حالا disabled کن (اولین خطا کافیه)
-            try:
-                cfg = load_config()
-                if self.tag in cfg and isinstance(cfg[self.tag], dict):
-                    if not cfg[self.tag].get("disabled"):
-                        cfg[self.tag]["disabled"] = True
-                        cfg[self.tag]["disabled_reason"] = "auto_ban_counter"
-                        save_config(cfg)
-                        print(f"✅ [{self.tag}] اکانت disabled شد (auto_ban_counter)")
-            except Exception as e:
-                print(f"⚠️ [{self.tag}] خطا در disable خودکار اکانت: {e}")
+            # v2.12.10: فقط برای permanent ban ها، اکانت رو disabled کن.
+            # برای session-expired، صبر کن تا restart بعدی.
+            if _is_permanent:
+                try:
+                    cfg = load_config()
+                    if self.tag in cfg and isinstance(cfg[self.tag], dict):
+                        if not cfg[self.tag].get("disabled"):
+                            cfg[self.tag]["disabled"] = True
+                            cfg[self.tag]["disabled_reason"] = "auto_ban_counter"
+                            save_config(cfg)
+                            print(f"✅ [{self.tag}] اکانت disabled شد (permanent ban)")
+                except Exception as e:
+                    print(f"⚠️ [{self.tag}] خطا در disable خودکار اکانت: {e}")
         except Exception as e:
             # هرگز نباید این تابع exception بده — بهترین تلاش
             print(f"⚠️ [{self.tag}] خطا در _on_fatal_auth: {e}")
@@ -20614,17 +20822,50 @@ class SelfBot:
                         pass
                 # اگه warning حاوی "deleted" یا "banned" بود، account رو disable کن
                 _low = text.lower()
-                # v2.12.9 (QA-DEBUG C5/B1): اضافه‌شدنِ کلمات فارسی — قبلاً فقط
-                # انگلیسی چک می‌شد و پیام‌های فارسیِ تلگرام (مثل «حذف می‌شود»،
-                # «مسدود شد») اصلاً تشخیص داده نمی‌شدن. حالا فارسی هم چک می‌شه.
-                _CRITICAL_WARN_KEYWORDS_EN = ("deleted", "banned", "terminated", "violated")
-                _CRITICAL_WARN_KEYWORDS_FA = (
-                    "حذف", "حذف می", "حذف خواهد", "حذف گردید",
-                    "مسدود", "محدود", "غیرفعال", "بسته شد",
-                    "خروج از تلگرام", "خلاف", "نقض",
+                # v2.12.10 (QA2-EXPERT/QA2-DEBUG C5): v2.12.9 از substring
+                # matching استفاده می‌کرد که false-positive می‌داد: «حذف نشد»
+                # با «حذف» match می‌شد، «not deleted» با «deleted» match می‌شد.
+                # حالا به‌جای substring، phrase-level matching می‌کنیم با
+                # exclusion صریحِ negationها. کلماتِ مثبت (حذف شده/has been
+                # deleted) فعال می‌شن، negationها (حذف نشد/not deleted) نه.
+                _CRITICAL_WARN_PHRASES_EN = (
+                    "account has been deleted",
+                    "your account was deleted",
+                    "is deleted",
+                    "account is banned",
+                    "account has been banned",
+                    "account has been terminated",
+                    "your account has been terminated",
+                    "violated telegram's terms",
                 )
-                if (any(_w in _low for _w in _CRITICAL_WARN_KEYWORDS_EN)
-                        or any(_w in text for _w in _CRITICAL_WARN_KEYWORDS_FA)):
+                _CRITICAL_WARN_PHRASES_FA = (
+                    "حساب شما حذف شده",
+                    "اکانت شما حذف شده",
+                    "حساب شما حذف گردید",
+                    "حساب شما حذف خواهد شد",
+                    "حساب شما مسدود شد",
+                    "اکانت شما مسدود شد",
+                    "حساب شما محدود شد",
+                    "حساب شما غیرفعال شد",
+                    "حساب شما بسته شد",
+                    "حساب شما نقض",
+                    "حساب شما خلاف",
+                    "از تلگرام حذف",
+                    "از تلگرام خارج",
+                )
+                _NEGATION_HINTS = (
+                    "حذف نشد", "حذف نشده", "حذف نخواهد شد",
+                    "not deleted", "wasn't deleted", "was not deleted",
+                    "not banned", "isn't banned", "is not banned",
+                    "not terminated", "isn't terminated",
+                    "تماس با پشتیبانی",  # support contact info — always benign
+                )
+                # اول چک کن negation هست — اگه هست، یقین false-positive است
+                if (any(_n in _low for _n in _NEGATION_HINTS)
+                        or any(_n in text for _n in _NEGATION_HINTS)):
+                    print(f"⚠️ [{self.tag}] warning با negation شناسایی شد — ignored: {text[:80]}")
+                elif (any(_p in _low for _p in _CRITICAL_WARN_PHRASES_EN)
+                        or any(_p in text for _p in _CRITICAL_WARN_PHRASES_FA)):
                     print(f"⛔ [{self.tag}] warning بحرانی — غیرفعال‌سازی خودکار")
                     # v2.9.4: self.sb در SelfBot تعریف نشده — از
                     # module-level load_config/save_config استفاده می‌کنیم
