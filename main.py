@@ -18116,7 +18116,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.17"
+BUILD_VERSION = "2026-10-05-v2.12.18"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -21415,6 +21415,117 @@ class SelfBot:
     COPY_TIMEOUT = 300
     COPY_MAX_BYTES = 2 * 1024 * 1024 * 1024      # ۲ گیگابایت (سقفِ خودِ تلگرام)
 
+    async def _do_broadcast(self, event, reply_msg, target_type: str) -> None:
+        """
+        v2.12.18: بدنه‌ی واقعیِ broadcast. خارج از پوششِ ۹۰ ثانیه‌ی
+        _safe_handler اجرا می‌شه (با _spawn_bg صدا زده شده) تا بتونه
+        ۱۰۰۰ تا ارسال رو در ۳۰+ دقیقه انجام بده.
+
+        anti-ban features:
+        - respect _gate_outbound (daily cap 200، cooldown، flood_until)
+        - delay تصادفی ۱-۳ ثانیه بین هر ارسال
+        - FloodWait handling با _flood_until coordination
+        - skip self/bot/non-matching dialogs
+
+        گزارش نهایی به event.edit ارسال می‌شه.
+        """
+        sent_ok = 0
+        sent_fail = 0
+        skipped = 0
+        import time as _t
+        import random as _random
+
+        try:
+            dialogs = await self.client.get_dialogs(limit=1000)
+        except Exception as _e:
+            try:
+                await event.edit(f"❌ خطا در گرفتن لیست: {_e}")
+            except Exception:
+                pass
+            return
+
+        for d in dialogs:
+            # فیلتر کردن بر اساس نوع
+            if target_type == "pv":
+                if not d.is_user:
+                    skipped += 1
+                    continue
+                if d.entity and getattr(d.entity, "is_self", False):
+                    skipped += 1
+                    continue
+                if d.entity and getattr(d.entity, "bot", False):
+                    skipped += 1
+                    continue
+            else:  # group
+                if not (d.is_group or d.is_megagroup):
+                    skipped += 1
+                    continue
+
+            # v2.12.18: respect anti-ban gate. اگه gate اجازه نداد (FloodWait
+            # recovery، daily cap، cooldown)، skip کن.
+            if not self._gate_outbound():
+                skipped += 1
+                continue
+
+            # ارسال (forward)
+            try:
+                await reply_msg.forward_to(d.id)
+                sent_ok += 1
+                # delay تصادفی ۱-۳ ثانیه برای anti-ban
+                _delay = 1.0 + _random.random() * 2.0
+                await asyncio.sleep(_delay)
+            except errors.FloodWaitError as _fwe:
+                # صبر کن تا FloodWait تموم بشه
+                _wait_sec = (_fwe.seconds or 30) + 2
+                # v2.12.18: _flood_until رو coordination کن تا بقیه‌ی
+                # featureها هم FloodWait رو رعایت کنن.
+                self._flood_until = _t.time() + _wait_sec
+                print(f"⏳ [broadcast:{self.tag}] FloodWait {_wait_sec}s "
+                      f"(flood_until coordinated)")
+                await asyncio.sleep(_wait_sec)
+                # retry یک‌بار
+                try:
+                    await reply_msg.forward_to(d.id)
+                    sent_ok += 1
+                except Exception as _e:
+                    sent_fail += 1
+                    print(f"⚠️ [broadcast:{self.tag}] retry fail to {d.id}: "
+                          f"{type(_e).__name__}")
+            except Exception as _e:
+                sent_fail += 1
+                print(f"⚠️ [broadcast:{self.tag}] send fail to {d.id}: "
+                      f"{type(_e).__name__}: {str(_e)[:80]}")
+                continue
+
+        # گزارشِ نهایی
+        _total = sent_ok + sent_fail + skipped
+        try:
+            await event.edit(
+                f"✅ ارسال به {'پیوی' if target_type == 'pv' else 'گروه'}‌ها تمام شد!\n\n"
+                f"📊 آمار:\n"
+                f"• ✅ موفق: {fa_digits(sent_ok)}\n"
+                f"• ❌ ناموفق: {fa_digits(sent_fail)}\n"
+                f"• ⏭ رد شده: {fa_digits(skipped)}\n"
+                f"• 📋 مجموع: {fa_digits(_total)}"
+            )
+        except Exception as _e:
+            # اگه event.edit fail شد (مثلاً پیام پاک شده)، از send_message استفاده کن
+            print(f"⚠️ [broadcast:{self.tag}] final report edit failed: "
+                  f"{type(_e).__name__}")
+            try:
+                await self.client.send_message(
+                    "me",
+                    f"✅ ارسال به {'پیوی' if target_type == 'pv' else 'گروه'}‌ها "
+                    f"تمام شد!\n\n"
+                    f"📊 آمار:\n"
+                    f"• ✅ موفق: {fa_digits(sent_ok)}\n"
+                    f"• ❌ ناموفق: {fa_digits(sent_fail)}\n"
+                    f"• ⏭ رد شده: {fa_digits(skipped)}\n"
+                    f"• 📋 مجموع: {fa_digits(_total)}"
+                )
+            except Exception:
+                pass
+
     async def _do_copy(self, event, ch_ref, msg_id) -> None:
         """
         دریافتِ یک پیام از روی لینک و کپیِ آن به Saved Messages — با
@@ -24046,23 +24157,21 @@ class SelfBot:
             # v2.12.17 (USER-REQUEST): ارسال دسته‌جمعی به همه‌ی پیوی/گروه‌ها
             # کاربر روی یه پیام ریپلای می‌کنه و می‌نویسه «ارسال به پیوی» یا
             # «ارسال به گروه». ربات اون پیام رو به همه‌ی PVها یا گروه‌های
-            # کاربر فوروارد می‌کنه. فقط برای OWNER/ADMIN/RESELLER، با
-            # rate limit و FloodWait handling.
+            # کاربر فوروارد می‌کنه.
+            # v2.12.18 (QA6-BROADCAST): FIX critical bugs:
+            #   1. wrap در _spawn_bg تا از ۹۰ثانیه‌ی _safe_handler cancel نشه
+            #   2. cooldown رو بلافاصله بعد از check ست کن (نه آخرِ loop)
+            #   3. از _gate_outbound برای respect کردنِ anti-ban gate استفاده کن
+            #   4. _flood_until رو در FloodWait به‌روز کن
+            #   5. فقط در chat خودِ کاربر (is_private) کار کنه
+            #   6. delay تصادفی ۱-۳ ثانیه
             elif text in ("ارسال به پیوی", "ارسال به گروه", "ارسال به pv", "ارسال به gp"):
-                # v2.12.17: این دستور فقط برای privileged users. اگه
-                # کاربر عادی بزنه، reject می‌شه.
-                _saas_ref = getattr(self, "saas", None) if hasattr(self, "saas") else None
-                # SelfBot خودش saas رو نداره؛ ولی _handle از طریق SaaSBot
-                # فراخوانی می‌شه که self.saas رو روی AdminBot ست کرده. ولی
-                # اینجا تو SelfBot هستیم. پس از یه متغیر global استفاده می‌کنیم.
-                # در واقع، SelfBot به selfbot_module دسترسی داره (از طریق
-                # self.sb) ولی saas_bot جدا هست. برای سادگی، اجازه می‌دیم همه
-                # کاربرا این دستور رو بزنن — چون این دستور از داخلِ chat
-                # خودِ کاربر (Saved Messages یا PV خودش) اجرا می‌شه و اگه
-                # کسی به اونجا دسترسی داشته باشه یعنی صاحب اکانت هست.
-                # security از طریق access به session file محفوظه.
-                _ = _saas_ref  # placeholder
-
+                # فقط در PV خودِ کاربر (Saved Messages یا PV با خودش) کار کنه.
+                # این دستور در گروه‌ها نباید کار کنه چون متنِ دستور رو بقیه
+                # می‌بینن.
+                if not getattr(event, "is_private", False):
+                    await event.edit("ℹ️ این دستور فقط در پیوی خودت (Saved Messages) کار می‌کنه.")
+                    return
                 if not event.is_reply:
                     await event.edit("ℹ️ روی پیام مدنظر ریپلای کن و بنویس:\n• `ارسال به پیوی` (همه PV)\n• `ارسال به گروه` (همه گروه‌ها)")
                     return
@@ -24074,89 +24183,33 @@ class SelfBot:
                 # تعیین نوع: pv یا group
                 _target_type = "pv" if "پیوی" in text or "pv" in text.lower() else "group"
 
-                # rate limit: ۳۰ ثانیه cooldown بین هر بار استفاده از این
+                # rate limit: ۶۰ ثانیه cooldown بین هر بار استفاده از این
                 # دستور. اگه کمتر از این فاصله دوباره بزنه، reject می‌شه.
+                # v2.12.18: cooldown بلافاصله ست می‌شه (نه آخرِ loop) تا اگه
+                # broadcast وسط کار cancel بشه، کاربر نتونه فوراً دوباره بزنه.
                 import time as _time_mod
                 _now = _time_mod.time()
                 _last_broadcast = getattr(self, "_last_broadcast_at", 0.0)
-                _BROADCAST_COOLDOWN = 30.0
+                _BROADCAST_COOLDOWN = 60.0
                 if _now - _last_broadcast < _BROADCAST_COOLDOWN:
                     _remain = int(_BROADCAST_COOLDOWN - (_now - _last_broadcast))
                     await event.edit(f"⏳ لطفاً {_remain} ثانیه دیگر صبر کن و دوباره امتحان کن.")
                     return
-
-                # شروع broadcast
-                await event.edit(
-                    f"📨 شروع ارسال به {'پیوی‌ها' if _target_type == 'pv' else 'گروه‌ها'}...\n"
-                    f"⏳ صبر کن، ممکنه چند دقیقه طول بکشه."
-                )
-
-                # گرفتن لیستِ dialog ها (PV یا group)
-                sent_ok = 0
-                sent_fail = 0
-                skipped = 0
-                try:
-                    dialogs = await self.client.get_dialogs(limit=1000)
-                except Exception as _e:
-                    await event.edit(f"❌ خطا در گرفتن لیست: {_e}")
-                    return
-
-                for d in dialogs:
-                    # فیلتر کردن بر اساس نوع
-                    if _target_type == "pv":
-                        # فقط PV (user dialog)، نه گروه/کانال
-                        if not d.is_user:
-                            skipped += 1
-                            continue
-                        # skip self (Saved Messages)
-                        if d.entity and getattr(d.entity, "is_self", False):
-                            skipped += 1
-                            continue
-                        # skip bots
-                        if d.entity and getattr(d.entity, "bot", False):
-                            skipped += 1
-                            continue
-                    else:  # group
-                        # فقط گروه/سوپرگروه، نه PV/کانال
-                        if not (d.is_group or d.is_megagroup):
-                            skipped += 1
-                            continue
-
-                    # ارسال (forward)
-                    try:
-                        await r.forward_to(d.id)
-                        sent_ok += 1
-                        # وقفه‌ی کوتاه بین هر ارسال (۱ ثانیه) برای جلوگیری از ban
-                        await asyncio.sleep(1.0)
-                    except errors.FloodWaitError as _fwe:
-                        # صبر کن تا FloodWait تموم بشه
-                        _wait_sec = (_fwe.seconds or 30) + 2
-                        print(f"⏳ [broadcast:{self.tag}] FloodWait {_wait_sec}s")
-                        await asyncio.sleep(_wait_sec)
-                        # retry
-                        try:
-                            await r.forward_to(d.id)
-                            sent_ok += 1
-                        except Exception:
-                            sent_fail += 1
-                    except Exception as _e:
-                        sent_fail += 1
-                        print(f"⚠️ [broadcast:{self.tag}] send fail to {d.id}: "
-                              f"{type(_e).__name__}")
-                        continue
-
-                # ثبتِ timestamp برای cooldown
+                # v2.12.18: ست کنِ فوریِ cooldown
                 self._last_broadcast_at = _now
 
-                # گزارشِ نهایی
-                _total = sent_ok + sent_fail + skipped
+                # شروع broadcast در پس‌زمینه — مهم: خارج از پوششِ ۹۰ ثانیه‌ی
+                # _safe_handler اجرا می‌شه. با ۱۰۰۰ تا × ۲ ثانیه = ۳۰+ دقیقه،
+                # اگه داخل _safe_handler باشه بعد از ۹۰ ثانیه cancel می‌شد و
+                # کاربر روی «در حال ارسال» گیر می‌کرد.
+                _spawn_bg(
+                    self._do_broadcast(event, r, _target_type),
+                    f"broadcast:{self.tag}"
+                )
                 await event.edit(
-                    f"✅ ارسال به {'پیوی' if _target_type == 'pv' else 'گروه'}‌ها تمام شد!\n\n"
-                    f"📊 آمار:\n"
-                    f"• ✅ موفق: {fa_digits(sent_ok)}\n"
-                    f"• ❌ ناموفق: {fa_digits(sent_fail)}\n"
-                    f"• ⏭ رد شده: {fa_digits(skipped)}\n"
-                    f"• 📋 مجموع: {fa_digits(_total)}"
+                    f"📨 شروع ارسال به {'پیوی‌ها' if _target_type == 'pv' else 'گروه‌ها'}...\n"
+                    f"⏳ صبر کن، ممکنه چند دقیقه طول بکشه.\n"
+                    f"📊 گزارشِ نهایی بعداً ارسال می‌شه."
                 )
                 return
 
