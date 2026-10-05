@@ -1891,6 +1891,18 @@ def ensure_wallet_schema() -> None:
         if "auto_renew_enabled" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN auto_renew_enabled INTEGER NOT NULL DEFAULT 0")
             print("✅ [auto_renew] ستون auto_renew_enabled به users اضافه شد")
+        # v2.12.11 (QA3-QUICK BUG#2): ستون extensions_applied روی orders
+        # — برای محدود کردنِ دفعاتِ اکستندِ فاکتورِ pending با رسیدِ آپلود
+        # شده. قبلاً expiry_loop هر ۷ روز دوباره اکستند می‌کرد → حلقه‌ی
+        # بی‌نهایت. حالا حداکثر ۳ اکستند (۳×۷=۲۱ روز). بعد از ۳ اکستند،
+        # اگه هنوز OWNER تایید نکرده، فاکتور واقعاً باطل می‌شه.
+        try:
+            _order_cols = {r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()}
+            if "extensions_applied" not in _order_cols:
+                c.execute("ALTER TABLE orders ADD COLUMN extensions_applied INTEGER NOT NULL DEFAULT 0")
+                print("✅ [expiry] ستون extensions_applied به orders اضافه شد")
+        except Exception as _e:
+            print(f"⚠️ [expiry] add column extensions_applied failed: {_e}")
         # ۲) جدول تراکنش‌ها
         c.execute(
             "CREATE TABLE IF NOT EXISTS wallet_transactions ("
@@ -3648,6 +3660,11 @@ def review_payment_atomic(payment_id: int, approve: bool, reviewed_by: int) -> b
     (برای «رد» و برای حالت‌های بدون اثر تجاری استفاده می‌شود؛ برای «تاییدِ
     پلن عادی» از approve_card_payment_atomic استفاده کن که اثر تجاری را هم
     در همان تراکنش اعمال می‌کند.)
+
+    v2.12.11 (QA3-QUICK BUG#2): در حالتِ reject، فاکتورِ متصل هم باید
+    cancelled بشه. قبلاً فقط payment.status=rejected ست می‌شد ولی order
+    در حالت pending می‌موند و expiry_loop هر ۷ روز پیام «هنوز در صف بررسی
+    است» به کاربر می‌فرستاد — گمراه‌کننده و آزاردهنده.
     """
     status = PAYMENT_STATUS_APPROVED if approve else PAYMENT_STATUS_REJECTED
     with _conn() as c:
@@ -3656,7 +3673,17 @@ def review_payment_atomic(payment_id: int, approve: bool, reviewed_by: int) -> b
             "WHERE id = ? AND status = 'pending'",
             (status, reviewed_by, _now(), payment_id),
         )
-        return cur.rowcount > 0
+        if cur.rowcount == 0:
+            return False
+        # v2.12.11: در reject، فاکتور متصل رو cancelled کن تا expiry_loop
+        # دیگه اون رو اکستند نکنه و پیام گمراه‌کننده نفرسته.
+        if not approve:
+            c.execute(
+                "UPDATE orders SET status = 'cancelled', paid_at = NULL "
+                "WHERE payment_id = ? AND status = 'pending'",
+                (payment_id,),
+            )
+        return True
 
 
 def approve_card_payment_atomic(payment_id: int, reviewed_by: int) -> dict:
@@ -10281,17 +10308,6 @@ class SaaSBot:
         # «💰 کیف پول» است) کاملاً unreachable بود.
         buttons.append([UI.go("👤 حساب کاربری", "user_account")])
 
-        # v2.12.10 (QA2-USER/QA2-EXPERT C9 / AUDIT-10-H CRITICAL#1): دکمه‌ی
-        # «🤖 سلف من» — از v1.4.0 از منوی USER حذف شده بود. callback handler
-        # (user_my_bots → _show_user_own_bots، line ~16463) و renderer
-        # (_build_my_bots_view) هر دو وجود داشتن ولی هیچ دکمه‌ای بهشون
-        # وصل نبود. کاربرِ معمولی بعد از لاگین اکانت، هیچ راهی برای مدیریتِ
-        # اکانتش (toggle time/bio، تغییر proxy، 2FA، sessions و...) نداشت.
-        # حالا اگه n_bots > 0 باشه، دکمه اضافه می‌شه. عنوان شامل شمارنده‌ست.
-        if n_bots > 0:
-            _bots_label = f"🤖 سلف من ({fa_digits(n_active)}/{fa_digits(n_bots)})"
-            buttons.append([UI.go(_bots_label, "user_my_bots")])
-
         # ── ردیف ۴ (تکی): خرید با لایسنس
         buttons.append([UI.go("🔑 خرید با لایسنس", "user_activate_license")])
 
@@ -15833,34 +15849,48 @@ class SaaSBot:
                 # انقضا رو ۷ روز اکستند می‌کنیم به‌جای باطل کردن. فقط فاکتورهای
                 # بدون رسید (که کاربر کلاً پرداخت نکرده) بعد از ۲۴ ساعت باطل
                 # می‌شن.
+                # v2.12.11 (QA3-QUICK BUG#2): v2.12.10 بدون cap بود → هر ۷ روز
+                # دوباره اکستند می‌شد و فاکتور هیچ‌وقت باطل نمی‌شد. حالا حداکثر
+                # ۳ اکستند (۳×۷=۲۱ روز) مجاز است. بعد از اون، فاکتور واقعاً
+                # باطل می‌شه.
                 _EXTEND_SECONDS = 7 * 24 * 3600  # 7 روز
+                _MAX_EXTENSIONS = 3
                 _now_ts = _now()
                 for order in list_expired_orders():
-                    # اگه رسید آپلود شده (payment_id ست)، فاکتور رو نگه دار
+                    # اگه رسید آپلود شده (payment_id ست) و هنوز زیر cap، اکستند
                     if order.get("payment_id"):
-                        try:
-                            with _conn() as c:
-                                c.execute(
-                                    "UPDATE orders SET expires_at = ? WHERE id = ? AND status = 'pending'",
-                                    (_now_ts + _EXTEND_SECONDS, order["id"]),
-                                )
-                                c.commit()
-                            print(f"⏰ [expiry_loop] فاکتور {order['order_no']} انقضاش اکستند شد "
-                                  f"(رسید آپلود شده، در صفِ بررسی OWNER)")
+                        _ext_count = int(order.get("extensions_applied") or 0)
+                        if _ext_count < _MAX_EXTENSIONS:
                             try:
-                                await self.client.send_message(
-                                    order["user_id"],
-                                    f"⏰ فاکتور `{order['order_no']}` هنوز در صفِ بررسیِ "
-                                    f"مدیریت است. ۷ روز به انقضای فاکتور اضافه شد. "
-                                    f"پس از تایید، اشتراک شما فعال می‌شود.",
-                                )
-                            except Exception:
-                                pass
-                            continue
-                        except Exception as _e:
-                            print(f"⚠️ [expiry_loop] extend failed for {order['order_no']}: {_e}")
-                            # اگه extend ناموفق بود، fall through به expire
-                    # وگرنه: فاکتور بدون رسید → باطل
+                                with _conn() as c:
+                                    c.execute(
+                                        "UPDATE orders SET expires_at = ?, "
+                                        "extensions_applied = extensions_applied + 1 "
+                                        "WHERE id = ? AND status = 'pending'",
+                                        (_now_ts + _EXTEND_SECONDS, order["id"]),
+                                    )
+                                    c.commit()
+                                print(f"⏰ [expiry_loop] فاکتور {order['order_no']} انقضاش اکستند شد "
+                                      f"(رسید آپلود شده، اکستند {_ext_count + 1}/{_MAX_EXTENSIONS})")
+                                try:
+                                    await self.client.send_message(
+                                        order["user_id"],
+                                        f"⏰ فاکتور `{order['order_no']}` هنوز در صفِ بررسیِ "
+                                        f"مدیریت است. ۷ روز به انقضای فاکتور اضافه شد "
+                                        f"({fa_digits(_ext_count + 1)}/{fa_digits(_MAX_EXTENSIONS)}). "
+                                        f"پس از تایید، اشتراک شما فعال می‌شود.",
+                                    )
+                                except Exception:
+                                    pass
+                                continue
+                            except Exception as _e:
+                                print(f"⚠️ [expiry_loop] extend failed for {order['order_no']}: {_e}")
+                                # fall through به expire
+                        else:
+                            # به سقف اکستند رسیدیم — فاکتور رو واقعاً باطل کن
+                            print(f"⏰ [expiry_loop] فاکتور {order['order_no']} به سقف اکستند "
+                                  f"({_MAX_EXTENSIONS}×7 روز) رسید — باطل می‌شه")
+                    # وگرنه: فاکتور بدون رسید یا بعد از سقف اکستند → باطل
                     expire_order(order["id"])
                     try:
                         await self.client.send_message(
@@ -17884,7 +17914,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.10"
+BUILD_VERSION = "2026-10-05-v2.12.11"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -20436,7 +20466,7 @@ class SelfBot:
         self.runtime_status = status
         _set_bot_status(self.tag, status)
 
-    async def _on_fatal_auth(self, error_msg: str) -> None:
+    async def _on_fatal_auth(self, error_msg: str, exc: BaseException = None) -> None:
         """
         PATCH (v2.0.10): وقتی یک خطای احراز هویتِ غیرقابل‌بازیابی رخ می‌دهد:
         ۱. ban counter رو increment می‌کنه.
@@ -20463,6 +20493,11 @@ class SelfBot:
           • SESSION_EXPIRED (AuthKeyError/AuthKeyDuplicated/Unauthorized):
             فقط stop + notify OWNER، بدون DISABLE. (ممکنه transient باشه)
         OWNER می‌تونه دستی re-login کنه یا صبر کنه تلگرام به‌حال بیاد.
+
+        v2.12.11 (QA3-QUICK BUG#1): v2.12.10 از substring matching روی
+        error_msg استفاده می‌کرد ولی str(UserDeactivatedError) شامل
+        "UserDeactivated" نیست — پس هیچ‌وقت permanent تشخیص داده نمی‌شد.
+        حالا پارامتر exc اضافه شده و از isinstance واقعی استفاده می‌کنه.
         """
         try:
             import time as _time
@@ -20475,16 +20510,21 @@ class SelfBot:
                 self.ban_first_seen = now
             self.ban_count += 1
 
-            # detect type of error از error_msg (به‌سادگی: بر اساس رشته‌ی
-            # خطا). اگه error_msg حاوی نام کلاس‌های ban دائمی بود، disable
-            # دائمی؛ وگرنه فقط stop.
-            _msg_lower = (error_msg or "").lower()
-            _is_permanent = any(_w in _msg_lower for _w in (
-                "userdeactivated", "userdeactivatedban",
-                "authunregistered", "phonenumberbanned",
-                "user deactivated", "phone number banned",
-                "phone_number_banned",
-            ))
+            # v2.12.11: تشخیص نوع خطا بر اساس isinstance (نه substring).
+            # اگه exc عبور داده شده باشه، از helper استفاده می‌کنیم. اگه نه
+            # (callers قدیمی)، fallback به substring matching (که imperfect
+            # ولی بهتر از nothing).
+            _is_permanent = False
+            if exc is not None:
+                _is_permanent = _is_permanent_ban_error(exc)
+            else:
+                _msg_lower = (error_msg or "").lower()
+                _is_permanent = any(_w in _msg_lower for _w in (
+                    "userdeactivated", "userdeactivatedban",
+                    "authunregistered", "phonenumberbanned",
+                    "user deactivated", "phone number banned",
+                    "phone_number_banned",
+                ))
 
             # notify OWNER
             short_err = error_msg[:200] if error_msg else "unknown"
@@ -21538,7 +21578,11 @@ class SelfBot:
                 print(f"🛑 [{self.tag}] خطای احراز هویت غیرقابل‌بازیابی در هندلر {name}: {e}")
                 self._fatal_auth_error = True
                 # PATCH (v2.0.10): notify OWNER + increment ban counter
-                await self._on_fatal_auth(str(e))
+                # v2.12.11 (QA3-QUICK BUG#1): اگه str(e) عبور بدیم، substring
+                # matching روی نام کلاس کار نمی‌کنه چون str(UserDeactivatedError)
+                # شامل "UserDeactivated" نیست. حالا خودِ exc عبور می‌دیم تا
+                # isinstance در helper ها واقعاً کار کنه.
+                await self._on_fatal_auth(str(e), exc=e)
                 return
             print(f"⚠️ [{self.tag}] خطای کنترل‌نشده در هندلر {name}: {e}")
             if DEBUG:
@@ -24150,7 +24194,7 @@ class SelfBot:
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
                     # PATCH (v2.0.10): notify OWNER + increment ban counter
-                    await self._on_fatal_auth(str(e))
+                    await self._on_fatal_auth(str(e), exc=e)
                     continue
                 _em = str(e).lower()
                 if "readonly" in _em or "read-only" in _em or "read only" in _em:
@@ -24199,7 +24243,7 @@ class SelfBot:
                     self._fatal_auth_error = True
                     self._set_status("auth_failed")
                     # PATCH (v2.0.10): notify OWNER + increment ban counter
-                    await self._on_fatal_auth(str(e))
+                    await self._on_fatal_auth(str(e), exc=e)
                     continue
                 consecutive_failures += 1
                 print(
