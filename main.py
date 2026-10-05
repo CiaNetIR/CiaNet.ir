@@ -18148,7 +18148,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.18"
+BUILD_VERSION = "2026-10-05-v2.12.20"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -21493,9 +21493,21 @@ class SelfBot:
                     skipped += 1
                     continue
 
-            # v2.12.18: respect anti-ban gate. اگه gate اجازه نداد (FloodWait
-            # recovery، daily cap، cooldown)، skip کن.
-            if not self._gate_outbound():
+            # v2.12.20 (USER-REPORT): broadcast نباید از _gate_outbound استفاده
+            # کنه. قبلاً broadcast از همون gate_outbound استفاده می‌کرد که
+            # محدودیتِ ۲۰۰ در روز داره. این یعنی:
+            #   ۱) اگه کاربر ۵۰۰ تا PV داشته باشه، broadcast فقط ۲۰۰ تا رو
+            #      می‌فرستاد و ۳۰۰ تا رو رد می‌کرد.
+            #   ۲) بعد از broadcast، _out_today به ۲۰۰ می‌رسید و همه‌ی
+            #      features دیگه (time، bio، tabchi) gate می‌بستن و کار
+            #      نمی‌کردن.
+            # حالا broadcast فقط FloodWait رو رعایت می‌کنه (نه daily cap).
+            # broadcast یه عملیاتِ manual و نادر هست (با ۶۰ ثانیه cooldown)
+            # و نباید با features سبک رقابت کنه.
+
+            # چک کن FloodWait recovery فعال نیست
+            import time as _t_chk
+            if self._flood_until and _t_chk.time() < self._flood_until:
                 skipped += 1
                 continue
 
