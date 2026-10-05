@@ -8619,10 +8619,10 @@ class AdminBot:
             self.wizards.pop(event.sender_id, None)
             return
         except Exception as e:
-            note = ""
-            if proxy_cfg is None:
-                note = "\n💡 اگه فکر می‌کنی IP این سرور برای تلگرام فیلتره، دوباره «افزودن اکانت» رو بزن و این‌بار پروکسی رو انتخاب کن."
-            await event.respond(_friendly_error(e, "send_code") + f"{note}\nویزارد لغو شد.")
+            # v2.12.9 (QA-EXPERT WATCH-2): hint قدیمی به کاربر می‌گفت «این‌بار
+            # پروکسی رو انتخاب کن» ولی v2.12.8 سوالِ پروکسی رو در لاگینِ جدید
+            # حذف کرده. hint دروغ بود. حالا فقط پیامِ خطا رو می‌فرستیم.
+            await event.respond(_friendly_error(e, "send_code") + "\nویزارد لغو شد.")
             try:
                 await temp_client.disconnect()
             except Exception:
@@ -8920,6 +8920,13 @@ class AdminBot:
             temp_client.session.save()
             temp_client.session.close()
         except Exception as e:
+            # v2.12.9 (QA-EXPERT WATCH-3): در مسیر خطا، temp_client ممکن بود
+            # وصل بماند (نشتی سوکت + قفلِ فایل سشن). حالا حتماً disconnect
+            # می‌کنیم (best-effort) و بعد پیام خطا.
+            try:
+                await temp_client.disconnect()
+            except Exception:
+                pass
             await event.respond(_friendly_error(e, "finish_login"))
             self.wizards.pop(event.sender_id, None)
             return
@@ -10659,12 +10666,12 @@ class SaaSBot:
             sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
             sec4.append(UI.go("🌐 پنل وب", "owner_web_panel", tone="success"))
         else:
-            pass  # v2.12.7: ADMIN has no sec4 buttons
-            # PATCH (v2.1.5): دکمه‌ی «🌐 پنل وب» برای دسترسی به web panel.
-            # URL از env var PANEL_URL خوانده می‌شه (مثلاً https://panel.cianet.ir
-            # یا http://localhost:8000). اگه تنظیم نشه، یه message راهنما نشون
-            # داده می‌شه.
-            sec4.append(UI.go("🌐 پنل وب", "owner_web_panel", primary=True, tone="success"))
+            # v2.12.9: ADMIN هیچ دکمه‌ای در sec4 نداشت ولی قبلاً «🌐 پنل وب»
+            # به‌اشتباه append می‌شد (pass نویسه بود ولی خطِ بعدی همچنان اجرا
+            # می‌شد). ADMIN دکمه‌ی «🌐 پنل وب» رو می‌دید ولی callback فقط برای
+            # ROLE_OWNER کار می‌کرد → silent no-op. حالا واقعاً چیزی append
+            # نمی‌شه.
+            pass
         # Ⅴ امنیت (فقط OWNER)
         sec5 = []
         if role == ROLE_OWNER:
@@ -14714,6 +14721,18 @@ class SaaSBot:
         data = wiz["data"]
         text = (event.raw_text or "").strip()
 
+        # v2.12.9 (QA-USER): کاربر تو حالِ انتظارِ رسید (عکس) بود ولی متن
+        # فرستاد. قبلاً این پیام سایلنت no-op می‌شد و کاربر گیر می‌کرد. حالا
+        # پیامِ واضح می‌دیم و ویزارد رو باز نگه می‌داریم تا عکس رو بفرسته.
+        if state == WIZ_PAYMENT_RECEIPT:
+            await event.respond(
+                "❌ این یک متن است، نه تصویرِ رسید.\n\n"
+                "📷 لطفاً **عکسِ رسید پرداخت** رو بفرست (مثل اسکرین‌شات از اپلیکیشن بانکی).\n"
+                "اگه می‌خوای انصراف بدی، دکمه‌ی «بازگشت» رو بزن.",
+                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+            return True
+
         if state == WIZ_TICKET_MSG:
             # v1.8.0: اگه تیکت هنوز ساخته نشده (اولین پیام بعد از انتخاب واحد)،
             # الان بساز. این کار از ساختن تیکت‌های الکی جلوگیری می‌کنه.
@@ -17648,6 +17667,36 @@ async def _owner_notify_async(text: str) -> None:
 _ADMIN_CLIENT_REF: dict = {}
 
 
+# v2.12.9 (QA-USER): ارسالِ پیامِ تلگرامی به هر user_id (نه فقط OWNER).
+# از همان client رباتِ مدیریت که در _ADMIN_CLIENT_REF ثبت شده استفاده
+# می‌کنه. web_panel بعد از پرداختِ موفقِ Zarinpal/Zibal این رو صدا می‌زنه
+# تا کاربر در تلگرام هم تایید بگیره (نه فقط JSON خام در مرورگر).
+async def _notify_user_async(user_id: int, text: str) -> bool:
+    """
+    ارسالِ پیامِ best-effort به user_id با کلاینت ربات مدیریت.
+    برمی‌گرداند: True اگه ارسال موفق بود، False اگه نه.
+    """
+    try:
+        global _ADMIN_CLIENT_REF
+        client = None
+        try:
+            client = _ADMIN_CLIENT_REF.get("client") if _ADMIN_CLIENT_REF else None
+        except Exception:
+            pass
+        if client is None or not client.is_connected():
+            print(f"⚠️ [USER NOTIFY] (no admin client) uid={user_id}: {text[:80]}", file=sys.stderr)
+            return False
+        try:
+            await client.send_message(int(user_id), text)
+            return True
+        except Exception as e:
+            print(f"⚠️ [USER NOTIFY] send failed uid={user_id}: {e}", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"❌ [USER NOTIFY FAILED] uid={user_id}: {e}", file=sys.stderr)
+        return False
+
+
 # ========== تنظیمات دیباگ ==========
 # قابل فعال‌سازی از محیط: DEBUG=1 python3 main.py all — traceback کامل با
 # شماره خط هر خطا را چاپ می‌کند (برای پیدا کردن دقیقِ محل خطا روی سرور).
@@ -17657,7 +17706,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.8"
+BUILD_VERSION = "2026-10-05-v2.12.9"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -18781,6 +18830,30 @@ async def _graceful_shutdown_all() -> None:
         entry = ACCOUNTS.get(tag)
         if entry and entry.task and not entry.task.done():
             entry.task.cancel()
+
+    # v2.12.9 (QA-DEBUG C4 / AUDIT-2): SIGTERM به subprocessهای dedicated-bot
+    # منتقل نمی‌شد. بعد از kill سرویسِ والد، این subprocessها init می‌رفتن
+    # (orphan) و فایل‌های .session شون باز می‌موند. حالا لیستِ همه‌ی
+    # dedicated-botهای فعال رو می‌گیریم و تک‌تک با _stop_process_by_pid
+    # تمیز متوقف می‌کنیم. این patch از v2.0.4 باز بوده و الان بسته شد.
+    try:
+        active_dbots = list_active_dedicated_bots()
+    except Exception as _e:
+        print(f"⚠️ [shutdown] list_active_dedicated_bots failed: {_e}")
+        active_dbots = []
+    for dbot in active_dbots:
+        pid = dbot.get("pid")
+        if not pid:
+            continue
+        try:
+            # _stop_process_by_pid async است (در main.py) — ۵ ثانیه صبر،
+            # بعد SIGKILL. برای shutdown، این کافیه.
+            await asyncio.wait_for(_stop_process_by_pid(int(pid)), timeout=8)
+            print(f"✅ [shutdown] dedicated-bot pid={pid} stopped")
+        except asyncio.TimeoutError:
+            print(f"⚠️ [shutdown] dedicated-bot pid={pid} stop timeout — orphaned")
+        except Exception as _e:
+            print(f"⚠️ [shutdown] dedicated-bot pid={pid} stop error: {_e}")
 
     # تسک‌های run_bot که از دید ACCOUNTS نامرئی‌اند (در حال استارت یا در
     # backoffِ reconnect) — هیچ Task مربوط به Runtime بعد از Shutdown نباید
@@ -20194,6 +20267,13 @@ class SelfBot:
 
         این سیاست از retry بی‌نهایتِ اکانت‌های مشک‌دار جلوگیری می‌کنه و
         ریسکِ ban شدنِ api_id مشترک رو کاهش می‌ده.
+
+        v2.12.9 (QA-DEBUG C6 / AUDIT-10-G B3): قبلاً threshold سه-strike بود،
+        ولی ban_count فقط در همون نمونه‌ی in-memory شمرده می‌شد و run_bot
+        بعد از اولین fatal-auth از حلقه می‌برک (line 24181). یعنی
+        threshold سه هرگز محقق نمی‌شد و auto-disable عملاً dead-code بود.
+        حالا همون اولین خطا رو disabled می‌کنه — چون fatal-auth واقعاً
+        non-recoverable هست و retry فقط ریسکِ api_id رو بیشتر می‌کنه.
         """
         try:
             import time as _time
@@ -20211,29 +20291,30 @@ class SelfBot:
             notify_text = (
                 f"🛑 اکانت «{self.tag}» به خطای احراز هویتِ غیرقابل‌بازیابی خورد.\n\n"
                 f"⚠️ خطا: `{short_err}`\n"
-                f"📊 تعداد در ۳۰ روز اخیر: {self.ban_count} از {self._BAN_THRESHOLD}\n"
+                f"📊 تعداد در ۳۰ روز اخیر: {self.ban_count}\n"
             )
-            if self.ban_count >= self._BAN_THRESHOLD:
-                notify_text += (
-                    f"\n🔒 اکانت خودکار disabled شد — برای جلوگیری از retry بی‌نهایت "
-                    f"و حفاظت از api_id مشترک."
-                )
+            # v2.12.9: همون اولین fatal-auth رو disabled می‌کنه (threshold
+            # سه dead-code بود — توضیح در docstring بالا)
+            notify_text += (
+                f"\n🔒 اکانت خودکار disabled شد — برای جلوگیری از retry بی‌نهایت "
+                f"و حفاظت از api_id مشترک."
+            )
             try:
                 await _owner_notify_async(notify_text)
             except Exception:
                 pass
 
-            # اگه threshold رسید، اکانت رو disabled کن
-            if self.ban_count >= self._BAN_THRESHOLD:
-                try:
-                    cfg = load_config()
-                    if self.tag in cfg and isinstance(cfg[self.tag], dict):
-                        if not cfg[self.tag].get("disabled"):
-                            cfg[self.tag]["disabled"] = True
-                            cfg[self.tag]["disabled_reason"] = "auto_ban_counter"
-                            save_config(cfg)
-                except Exception as e:
-                    print(f"⚠️ [{self.tag}] خطا در disable خودکار اکانت: {e}")
+            # v2.12.9: اکانت رو همین حالا disabled کن (اولین خطا کافیه)
+            try:
+                cfg = load_config()
+                if self.tag in cfg and isinstance(cfg[self.tag], dict):
+                    if not cfg[self.tag].get("disabled"):
+                        cfg[self.tag]["disabled"] = True
+                        cfg[self.tag]["disabled_reason"] = "auto_ban_counter"
+                        save_config(cfg)
+                        print(f"✅ [{self.tag}] اکانت disabled شد (auto_ban_counter)")
+            except Exception as e:
+                print(f"⚠️ [{self.tag}] خطا در disable خودکار اکانت: {e}")
         except Exception as e:
             # هرگز نباید این تابع exception بده — بهترین تلاش
             print(f"⚠️ [{self.tag}] خطا در _on_fatal_auth: {e}")
@@ -20533,7 +20614,17 @@ class SelfBot:
                         pass
                 # اگه warning حاوی "deleted" یا "banned" بود، account رو disable کن
                 _low = text.lower()
-                if any(_w in _low for _w in ("deleted", "banned", "terminated", "violated")):
+                # v2.12.9 (QA-DEBUG C5/B1): اضافه‌شدنِ کلمات فارسی — قبلاً فقط
+                # انگلیسی چک می‌شد و پیام‌های فارسیِ تلگرام (مثل «حذف می‌شود»،
+                # «مسدود شد») اصلاً تشخیص داده نمی‌شدن. حالا فارسی هم چک می‌شه.
+                _CRITICAL_WARN_KEYWORDS_EN = ("deleted", "banned", "terminated", "violated")
+                _CRITICAL_WARN_KEYWORDS_FA = (
+                    "حذف", "حذف می", "حذف خواهد", "حذف گردید",
+                    "مسدود", "محدود", "غیرفعال", "بسته شد",
+                    "خروج از تلگرام", "خلاف", "نقض",
+                )
+                if (any(_w in _low for _w in _CRITICAL_WARN_KEYWORDS_EN)
+                        or any(_w in text for _w in _CRITICAL_WARN_KEYWORDS_FA)):
                     print(f"⛔ [{self.tag}] warning بحرانی — غیرفعال‌سازی خودکار")
                     # v2.9.4: self.sb در SelfBot تعریف نشده — از
                     # module-level load_config/save_config استفاده می‌کنیم
@@ -20546,6 +20637,15 @@ class SelfBot:
                             print(f"✅ [{self.tag}] اکانت غیرفعال شد (telegram_warning)")
                     except Exception as _e:
                         print(f"⚠️ [{self.tag}] disable failed: {_e}")
+                    # v2.12.9 (QA-DEBUG C5/B2): قبلاً فقط disabled=True ست می‌شد
+                    # ولی نمونه‌ی در حال اجرا به کار ادامه می‌داد تا restart بعدی.
+                    # حالا مستقیم self.stop() رو صدا می‌زنیم تا همون لحظه قطع بشه
+                    # و ریسکِ تشدیدِ ban کاهش پیدا کنه.
+                    try:
+                        await self.stop()
+                        print(f"🛑 [{self.tag}] نمونه‌ی زنده متوقف شد (telegram_warning)")
+                    except Exception as _e:
+                        print(f"⚠️ [{self.tag}] stop after warning failed: {_e}")
             except Exception as _e:
                 print(f"⚠️ [{self.tag}] service warning handler error: {_e}")
 

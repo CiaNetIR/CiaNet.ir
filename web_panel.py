@@ -1759,17 +1759,98 @@ async def zarinpal_create_payment(order_id: int, request: Request):
         return {"ok": True, "url": result["url"]}
     raise HTTPException(400, result.get("error", "zarinpal_failed"))
 
+# v2.12.9 (QA-USER): صفحات فارسی HTML به‌جای JSON خام برای کاربرِ غیرتکنیکال.
+# قبل از این patch، کاربر بعد از پرداخت Zarinpal/Zibal یه صفحه‌ی سفید با
+# JSON خام می‌دید — حالا یه صفحه‌ی حرفه‌ای فارسی می‌بینه و توی تلگرام هم
+# تایید می‌گیره.
+from starlette.responses import HTMLResponse as _HTMLResponse
+
+def _payment_success_html(ref_id: str) -> _HTMLResponse:
+    return _HTMLResponse(f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>پرداخت موفق — CiaNet</title>
+<style>
+body {{ font-family: 'Vazirmatn', Tahoma, sans-serif; background: #f0f4f8;
+  display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }}
+.card {{ background: white; padding: 40px; border-radius: 16px; max-width: 420px;
+  text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
+.ok {{ width: 80px; height: 80px; background: #10b981; border-radius: 50%;
+  margin: 0 auto 20px; display: flex; align-items: center; justify-content: center;
+  color: white; font-size: 48px; font-weight: bold; }}
+h1 {{ color: #10b981; margin: 0 0 12px; font-size: 24px; }}
+p {{ color: #475569; line-height: 1.7; margin: 8px 0; }}
+.ref {{ background: #f1f5f9; padding: 12px; border-radius: 8px; font-family: monospace;
+  font-size: 14px; color: #1e293b; margin: 16px 0; direction: ltr; }}
+.note {{ color: #64748b; font-size: 13px; margin-top: 20px; }}
+</style></head><body><div class="card">
+<div class="ok">✓</div>
+<h1>پرداخت شما با موفقیت ثبت شد</h1>
+<p>اشتراک شما فعال شد.</p>
+<div class="ref">کد پیگیری: {ref_id}</div>
+<p class="note">می‌توانید این صفحه را ببندید و به ربات تلگرام برگردید.<br>
+پیام تایید نیز برای شما در تلگرام ارسال شد.</p>
+</div></body></html>""")
+
+def _payment_failed_html(reason: str) -> _HTMLResponse:
+    return _HTMLResponse(f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>پرداخت ناموفق — CiaNet</title>
+<style>
+body {{ font-family: 'Vazirmatn', Tahoma, sans-serif; background: #f0f4f8;
+  display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }}
+.card {{ background: white; padding: 40px; border-radius: 16px; max-width: 420px;
+  text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
+.x {{ width: 80px; height: 80px; background: #ef4444; border-radius: 50%;
+  margin: 0 auto 20px; display: flex; align-items: center; justify-content: center;
+  color: white; font-size: 48px; font-weight: bold; }}
+h1 {{ color: #ef4444; margin: 0 0 12px; font-size: 24px; }}
+p {{ color: #475569; line-height: 1.7; margin: 8px 0; }}
+.reason {{ background: #fef2f2; padding: 12px; border-radius: 8px; color: #991b1b;
+  margin: 16px 0; }}
+.note {{ color: #64748b; font-size: 13px; margin-top: 20px; }}
+</style></head><body><div class="card">
+<div class="x">✕</div>
+<h1>پرداخت ناموفق</h1>
+<div class="reason">{reason}</div>
+<p class="note">اگر مبلغ از حسابتان کسر شده، در سریع‌ترین زمان ممکن بازمی‌گردد.<br>
+در صورت نیاز با پشتیبانی در تلگرام تماس بگیرید.</p>
+</div></body></html>""", status_code=400)
+
+def _payment_already_processed_html() -> _HTMLResponse:
+    return _HTMLResponse("""<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>پرداخت قبلاً ثبت شده — CiaNet</title>
+<style>
+body { font-family: 'Vazirmatn', Tahoma, sans-serif; background: #f0f4f8;
+  display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }
+.card { background: white; padding: 40px; border-radius: 16px; max-width: 420px;
+  text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+.i { width: 80px; height: 80px; background: #3b82f6; border-radius: 50%;
+  margin: 0 auto 20px; display: flex; align-items: center; justify-content: center;
+  color: white; font-size: 48px; font-weight: bold; }
+h1 { color: #3b82f6; margin: 0 0 12px; font-size: 24px; }
+p { color: #475569; line-height: 1.7; }
+</style></head><body><div class="card">
+<div class="i">i</div>
+<h1>این پرداخت قبلاً ثبت شده</h1>
+<p>لازم نیست دوباره پرداخت کنید.<br>اشتراک شما از قبل فعال است.</p>
+</div></body></html>""")
+
 @app.get("/api/payment/zarinpal/callback")
 async def zarinpal_callback(request: Request, Authority: str = "", Status: str = ""):
     """callback Zarinpal بعد از پرداخت."""
     m = _main()
     if Status != "OK":
-        return JSONResponse({"ok": False, "error": "payment_cancelled"})
+        # v2.12.9 (QA-USER): صفحه‌ی فارسی HTML به‌جای JSON خام
+        return _payment_failed_html("پرداخت لغو شد یا ناموفق بود.")
     # پیدا کردن سفارش با authority
     with m._conn() as c:
         row = c.execute("SELECT * FROM orders WHERE txid = ?", (Authority,)).fetchone()
     if not row:
-        return JSONResponse({"ok": False, "error": "order_not_found"})
+        return _payment_failed_html("سفارش پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.")
     order = dict(row)
     amount = int(order["amount_toman"])
     verify_result = m.verify_zarinpal_payment(Authority, amount)
@@ -1782,13 +1863,25 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
                 (m._now(), order["id"]),
             )
             if cur.rowcount == 0:
-                return JSONResponse({"ok": True, "message": "already_processed"})
+                return _payment_already_processed_html()
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)
         days = int(pricing["duration_days"] or 30) if pricing else 30
         m.create_subscription(order["user_id"], plan_name, days)
-        return JSONResponse({"ok": True, "ref_id": verify_result.get("ref_id")})
-    return JSONResponse({"ok": False, "error": verify_result.get("error")})
+        # v2.12.9 (QA-USER): تاییدِ تلگرامیِ فارسی به کاربر
+        try:
+            plan_label = pricing.get("label") if pricing else plan_name
+            await m._notify_user_async(int(order["user_id"]),
+                f"✅ پرداخت شما با موفقیت ثبت شد!\n\n"
+                f"🧾 پلن: {plan_label or plan_name}\n"
+                f"📅 مدت: {days} روز\n"
+                f"💳 روش: Zarinpal\n"
+                f"🔢 کد پیگیری: {verify_result.get('ref_id', '-')}\n\n"
+                f"اشتراک شما فعال شد. لطفاً در ربات دوباره /start بزنید.")
+        except Exception as _e:
+            print(f"⚠️ [zarinpal_callback] notify user failed: {_e}", flush=True)
+        return _payment_success_html(verify_result.get("ref_id", "-"))
+    return _payment_failed_html(verify_result.get("error", "verify_failed"))
 
 @app.post("/api/user/auto-renew")
 async def toggle_auto_renew(request: Request):
@@ -1898,11 +1991,12 @@ async def zibal_create_payment(order_id: int, request: Request):
 async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
     m = _main()
     if status not in ("1", "100"):
-        return JSONResponse({"ok": False, "error": "cancelled"})
+        # v2.12.9 (QA-USER): صفحه‌ی فارسی HTML به‌جای JSON خام
+        return _payment_failed_html("پرداخت لغو شد یا ناموفق بود.")
     with m._conn() as c:
         row = c.execute("SELECT * FROM orders WHERE txid = ?", (trackId,)).fetchone()
     if not row:
-        return JSONResponse({"ok": False, "error": "order_not_found"})
+        return _payment_failed_html("سفارش پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.")
     order = dict(row)
     verify_result = m.verify_zibal_payment(trackId, int(order["amount_toman"]))
     if verify_result.get("ok"):
@@ -1913,13 +2007,25 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
                 (m._now(), order["id"]),
             )
             if cur.rowcount == 0:
-                return JSONResponse({"ok": True, "message": "already_processed"})
+                return _payment_already_processed_html()
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)
         days = int(pricing["duration_days"] or 30) if pricing else 30
         m.create_subscription(order["user_id"], plan_name, days)
-        return JSONResponse({"ok": True, "ref_id": verify_result.get("ref_id")})
-    return JSONResponse({"ok": False, "error": verify_result.get("error")})
+        # v2.12.9 (QA-USER): تاییدِ تلگرامیِ فارسی به کاربر
+        try:
+            plan_label = pricing.get("label") if pricing else plan_name
+            await m._notify_user_async(int(order["user_id"]),
+                f"✅ پرداخت شما با موفقیت ثبت شد!\n\n"
+                f"🧾 پلن: {plan_label or plan_name}\n"
+                f"📅 مدت: {days} روز\n"
+                f"💳 روش: Zibal\n"
+                f"🔢 کد پیگیری: {verify_result.get('ref_id', '-')}\n\n"
+                f"اشتراک شما فعال شد. لطفاً در ربات دوباره /start بزنید.")
+        except Exception as _e:
+            print(f"⚠️ [zibal_callback] notify user failed: {_e}", flush=True)
+        return _payment_success_html(verify_result.get("ref_id", "-"))
+    return _payment_failed_html(verify_result.get("error", "verify_failed"))
 
 # ─── v2.8.5: Account Settings + Chat API ─────────────────────────────
 # این endpoint‌ها به Telethon client زنده نیاز دارند — فقط وقتی کار می‌کنند

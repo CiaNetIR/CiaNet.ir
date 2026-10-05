@@ -402,6 +402,47 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         if reset_result.returncode != 0:
             return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
 
+        # v2.12.9 CRITICAL (QA-DEBUG C1): پس از reset --hard، فایلِ main.py
+        # جدید رو با ast.parse اعتبارسنجی کن. اگه SyntaxError داشت، یعنی
+        # commitِ خراب از GitHub اومده — auto-rollback کن به backup که قبل
+        # از reset گرفتیم. بدون این چک، systemd بعد از restart ده‌بار در
+        # ۵ دقیقه کِرش می‌خورد و rate-limit می‌شد و کل سرویس down می‌شد.
+        new_main_path = os.path.join(repo_dir, "main.py")
+        try:
+            import ast as _ast
+            with open(new_main_path, "r", encoding="utf-8") as _f:
+                _src = _f.read()
+            _ast.parse(_src, filename=new_main_path)
+        except SyntaxError as _se:
+            log.error("❌ new main.py has SyntaxError: %s — rolling back", _se)
+            # rollback: backup رو برگردون
+            if backup_path and os.path.exists(backup_path):
+                try:
+                    shutil.copy2(backup_path, new_main_path)
+                    log.info("✅ rolled back to %s", backup_path)
+                    state = _read_state()
+                    state["rolled_back"] = True
+                    state["rolled_back_at"] = time.time()
+                    state["rollback_reason"] = f"syntax_error: {_se.msg}"
+                    _write_state(state)
+                    return False, (
+                        f"❌ آپدیت ناموفق: main.py جدید SyntaxError داشت "
+                        f"(خط {_se.lineno}: {_se.msg}). به backup برگشتیم:\n"
+                        f"{backup_path}\n\nربات روی نسخه‌ی قبلی ادامه می‌دهد."
+                    )
+                except Exception as _re:
+                    log.exception("rollback failed: %s", _re)
+                    return False, (
+                        f"❌ آپدیت ناموفق و rollback هم ناموفق: {_re}\n"
+                        f"⚠️ ربات ممکن است down باشد — دستی restore کنید: "
+                        f"cp {backup_path} {new_main_path}"
+                    )
+            else:
+                return False, (
+                    f"❌ آپدیت ناموفق: main.py جدید SyntaxError داشت و "
+                    f"backup پیدا نشد. ربات ممکن است down باشد."
+                )
+
         # حذف __pycache__ تا کد قدیمی cached اجرا نشه
         import shutil as _shutil
         pycache = os.path.join(repo_dir, "__pycache__")
