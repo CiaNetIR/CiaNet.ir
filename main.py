@@ -6571,15 +6571,17 @@ class AdminBot:
             print(f"⚠️ [respond_safe] timeout after {self._RESPOND_TIMEOUT_SEC}s", flush=True)
             try:
                 await event.answer("⏳ تلگرام پاسخ نداد. دوباره بزن.", alert=True)
-            except Exception:
-                pass
+            except Exception as _ae:
+                print(f"⚠️ [respond_safe] alert fallback failed: "
+                      f"{type(_ae).__name__}", flush=True)
             return False
         except Exception as _e:
             print(f"⚠️ [respond_safe] {type(_e).__name__}: {_e}", flush=True)
             try:
                 await event.answer("❌ خطا در نمایش. دوباره بزن.", alert=True)
-            except Exception:
-                pass
+            except Exception as _ae:
+                print(f"⚠️ [respond_safe] alert fallback failed: "
+                      f"{type(_ae).__name__}", flush=True)
             return False
 
     async def _edit_safe(self, event, text: str = None, buttons=None,
@@ -6606,7 +6608,11 @@ class AdminBot:
             return False
         except Exception as _e:
             print(f"⚠️ [edit_safe] {type(_e).__name__}: {_e}", flush=True)
-            if "MessageNotModified" in type(_e).__name__:
+            # v2.12.13: از isinstance واقعی به‌جای string-match استفاده کن
+            _mnt = getattr(errors, "MessageNotModifiedError", None)
+            if _mnt is not None and isinstance(_e, _mnt):
+                return True
+            if _mnt is None and "MessageNotModified" in type(_e).__name__:
                 return True
             if text is not None:
                 try:
@@ -6667,14 +6673,20 @@ class AdminBot:
         )
         await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
         # v2.12.12: pre-warm dialog cache (مشابه SaaSBot.start)
+        # v2.12.13: timeout aggregate اضافه شد.
         try:
             print("🔄 [admin_bot] pre-warming dialog cache (limit=100)...")
-            _warmup_count = 0
-            async for _ in self.client.iter_dialogs(limit=100):
-                _warmup_count += 1
-                if _warmup_count >= 100:
-                    break
-            print(f"✅ [admin_bot] dialog cache warmed ({_warmup_count} dialogs)")
+            async def _warmup_admin():
+                _warmup_count = 0
+                async for _ in self.client.iter_dialogs(limit=100):
+                    _warmup_count += 1
+                    if _warmup_count >= 100:
+                        break
+                return _warmup_count
+            _n = await asyncio.wait_for(_warmup_admin(), timeout=30)
+            print(f"✅ [admin_bot] dialog cache warmed ({_n} dialogs)")
+        except asyncio.TimeoutError:
+            print(f"⚠️ [admin_bot] dialog cache warmup TIMED OUT after 30s (continuing)")
         except Exception as _e:
             print(f"⚠️ [admin_bot] dialog cache warmup failed (continuing): "
                   f"{type(_e).__name__}: {_e}")
@@ -6786,7 +6798,8 @@ class AdminBot:
             buttons.append([UI.item(tag, state, f"acc:{tag}")])
         buttons.append([UI.go("➕ افزودن اکانت", "add", primary=True, tone="success")])
         buttons.append(UI.nav_row())
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen(
                 "📋 اکانت‌های سلف",
                 body=body,
@@ -6879,7 +6892,8 @@ class AdminBot:
         buttons.append([UI.danger("حذف کامل اکانت", f"del_confirm:{tag}")])
         buttons.append(UI.nav_row())
 
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen(
                 f"⚙️ مدیریت «{tag}»",
                 body=body,
@@ -6917,7 +6931,8 @@ class AdminBot:
             subtitle = "تا وقتی اکانت روشن نشود، قابلیت‌ها قابل تغییر نیستند."
             hint = "اول اکانت را فعال کن، بعد قابلیت‌ها اینجا ظاهر می‌شوند."
         buttons.append(UI.nav_row())
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen(f"⚡ قابلیت‌های «{tag}»", body=body, subtitle=subtitle, hint=hint),
             buttons=buttons,
         )
@@ -6950,7 +6965,8 @@ class AdminBot:
                 [UI.go("🟢 روشن کن", f"enable:{tag}", primary=True, tone="success")],
                 UI.nav_row(),
             ]
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen(f"🎨 ظاهر و پروفایل «{tag}»", body=body,
                       subtitle="ظاهر پیام‌ها و پروفایل این اکانت."),
             buttons=buttons,
@@ -6976,7 +6992,8 @@ class AdminBot:
             [UI.go("📊 وضعیت", b"status:" + tag.encode())],
             UI.nav_row(),
         ]
-        await event.edit(
+        await self._edit_safe(
+            event,
             UI.screen("🌐 اتصال و پروکسی", body=body,
                       subtitle=f"«{tag}»"),
             buttons=buttons,
@@ -7605,12 +7622,30 @@ class AdminBot:
         buttons = []
         if pending:
             # بازنشانی از قبل در جریان است — «شروع» نمی‌آید.
-            body += [
-                UI.SEP,
-                f"{UI.AMBER} بازنشانی در جریان است",
-                f"{UI.GRAY} پایانِ انتظار: {st.get('pending_reset_date_local') or self._until_text(pending)}",
-                "بعد از آن «ادامه‌ی بازنشانی» را بزن تا رمز حذف شود.",
-            ]
+            # v2.12.13 (USER-REPORT): اگه pending در گذشته باشه، یعنی
+            # انتظارِ ۷ روزه تمام شده و کاربر می‌تونه رمز رو حذف کنه.
+            # قبلاً حتی در این حالت هم «بعد از آن ادامه‌ی بازنشانی را بزن»
+            # نشون می‌دادیم که گمراه‌کننده بود.
+            try:
+                _sec_left = (pending - datetime.now(timezone.utc)).total_seconds()
+            except Exception:
+                _sec_left = 0
+            if _sec_left <= 0:
+                # انتظار تمام شده
+                body += [
+                    UI.SEP,
+                    f"{UI.GREEN} ✅ زمانِ انتظار به پایان رسیده!",
+                    f"{UI.GRAY} حالا می‌توانی «ادامه‌ی بازنشانی» را بزنی تا "
+                    f"رمز دو مرحله‌ای برای همیشه حذف شود.",
+                ]
+            else:
+                body += [
+                    UI.SEP,
+                    f"{UI.AMBER} بازنشانی در جریان است",
+                    f"{UI.GRAY} پایانِ انتظار: {st.get('pending_reset_date_local') or self._until_text(pending)}",
+                    f"{UI.GRAY} {self._until_text(pending)} دیگر.",
+                    "بعد از آن «ادامه‌ی بازنشانی» را بزن تا رمز حذف شود.",
+                ]
             antiban_mark2 = ""
             entry_for_antiban2 = self.sb.ACCOUNTS.get(tag)
             if entry_for_antiban2 and is_dangerous_account(entry_for_antiban2.acc):
@@ -8779,7 +8814,8 @@ class AdminBot:
             # PATCH (audit-5): شماره‌ای که هیچ اکانت تلگرامی روی‌اش نیست
             # (مثلاً شماره‌ی جدید بدون ثبت‌نام). کاربر باید اول در اپ تلگرام
             # اکانت بسازد.
-            await event.respond(
+            await self._respond_safe(
+                event,
                 "❌ این شماره هنوز در تلگرام ثبت‌نام نشده است. اول در اپ "
                 "تلگرام اکانت بساز و دوباره بیا. ویزارد لغو شد."
             )
@@ -8792,7 +8828,8 @@ class AdminBot:
         except errors.AuthKeyError:
             # PATCH (audit-5): کلیدِ احراز هویتِ معتبر نیست — معمولاً
             # api_id/api_hash خراب یا مسدود.
-            await event.respond(
+            await self._respond_safe(
+                event,
                 "❌ api_id/api_hash معتبر نیست (شاید توسط تلگرام مسدود شده). "
                 "با پشتیبانی تماس بگیر. ویزارد لغو شد."
             )
@@ -8806,7 +8843,7 @@ class AdminBot:
             # v2.12.9 (QA-EXPERT WATCH-2): hint قدیمی به کاربر می‌گفت «این‌بار
             # پروکسی رو انتخاب کن» ولی v2.12.8 سوالِ پروکسی رو در لاگینِ جدید
             # حذف کرده. hint دروغ بود. حالا فقط پیامِ خطا رو می‌فرستیم.
-            await event.respond(_friendly_error(e, "send_code") + "\nویزارد لغو شد.")
+            await self._respond_safe(event, _friendly_error(e, "send_code") + "\nویزارد لغو شد.")
             try:
                 await temp_client.disconnect()
             except Exception:
@@ -8817,7 +8854,8 @@ class AdminBot:
         data["temp_client"] = temp_client
         data["phone_code_hash"] = sent.phone_code_hash
         self.wizards[event.sender_id] = {"state": WIZ_CODE, "data": data}
-        await event.respond(
+        await self._respond_safe(
+            event,
             "📩 کد به تلگرام/پیامکِ این شماره ارسال شد. کد رو بفرست:\n"
             "(فاصله بین ارقام مهم نیست، خودم پاکش می‌کنم)",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
@@ -8838,7 +8876,7 @@ class AdminBot:
                 # مدیریت ادمین‌ها منحصراً از طریق saas_bot.py (که saas_db
                 # را به‌روزرسانی می‌کند) انجام می‌شود.
                 self.wizards.pop(event.sender_id, None)
-                await event.respond("این عملیات از این پنل در دسترس نیست.")
+                await self._respond_safe(event, "این عملیات از این پنل در دسترس نیست.")
                 return
             new_id = None
             if event.forward and event.forward.sender_id:
@@ -8847,15 +8885,15 @@ class AdminBot:
                 try:
                     new_id = int(text)
                 except ValueError:
-                    await event.respond("❌ یا آیدی عددی بفرست، یا یه پیام از همون شخص رو فوروارد کن:")
+                    await self._respond_safe(event, "❌ یا آیدی عددی بفرست، یا یه پیام از همون شخص رو فوروارد کن:")
                     return
             self.wizards.pop(event.sender_id, None)
             if new_id in (self.admin_ids | {ADMIN_ID}):
-                await event.respond("این شخص از قبل ادمینه.")
+                await self._respond_safe(event, "این شخص از قبل ادمینه.")
             else:
                 self.admin_ids.add(new_id)
                 self._save_admin_ids()
-                await event.respond(f"✅ آیدی `{new_id}` به‌عنوان ادمین اضافه شد.")
+                await self._respond_safe(event, f"✅ آیدی `{new_id}` به‌عنوان ادمین اضافه شد.")
             await self._show_main_menu(event.chat_id)
             return
 
@@ -8864,14 +8902,14 @@ class AdminBot:
             entry = self.sb.ACCOUNTS.get(tag)
             self.wizards.pop(event.sender_id, None)
             if not entry:
-                await event.respond(f"❌ اکانت «{tag}» دیگر روشن نیست.")
+                await self._respond_safe(event, f"❌ اکانت «{tag}» دیگر روشن نیست.")
                 await self._show_main_menu(event.chat_id)
                 return
             bot = entry.bot
             new_name = bot._clean_name(text)
             bot.base_name = new_name
             bot._persist(base_name=new_name)
-            await event.respond(f"✅ اسم پایه‌ی «{tag}» به «{new_name}» تغییر کرد.")
+            await self._respond_safe(event, f"✅ اسم پایه‌ی «{tag}» به «{new_name}» تغییر کرد.")
             await self._show_account_detail(event, tag)
             return
 
@@ -8883,7 +8921,8 @@ class AdminBot:
                     target = int(target)
             data["target"] = target
             wiz["state"] = WIZ_SEND_MSG_TEXT
-            await event.respond(
+            await self._respond_safe(
+                event,
                 "متن پیام رو بفرست:", buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]]
             )
             return
@@ -8899,17 +8938,18 @@ class AdminBot:
         if state == WIZ_PROXY_ADDR:
             data["addr"] = text
             wiz["state"] = WIZ_PROXY_PORT
-            await event.respond("پورت پروکسی رو بفرست (فقط عدد):",
+            await self._respond_safe(event, "پورت پروکسی رو بفرست (فقط عدد):",
                                  buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]])
             return
 
         if state == WIZ_PROXY_PORT:
             if not text.isdigit():
-                await event.respond("❌ پورت باید فقط عدد باشه. دوباره بفرست:")
+                await self._respond_safe(event, "❌ پورت باید فقط عدد باشه. دوباره بفرست:")
                 return
             data["port"] = int(text)
             wiz["state"] = WIZ_PROXY_USERNAME
-            await event.respond(
+            await self._respond_safe(
+                event,
                 "یوزرنیم پروکسی رو بفرست (اگه نیاز نداره، دکمه‌ی رد کن رو بزن):",
                 buttons=[[UI.go("⏭ رد کن (بدون یوزرنیم/پسورد)", b"proxy_skip_auth")],
                          [UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
@@ -8922,7 +8962,7 @@ class AdminBot:
                 return
             data["username"] = text
             wiz["state"] = WIZ_PROXY_PASSWORD
-            await event.respond("پسورد پروکسی رو بفرست:",
+            await self._respond_safe(event, "پسورد پروکسی رو بفرست:",
                                  buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]])
             return
 
@@ -8934,14 +8974,15 @@ class AdminBot:
         if state == WIZ_TAG:
             cfg = self.sb.load_config()
             if not re.fullmatch(r"[A-Za-z0-9_\-]{2,32}", text):
-                await event.respond("❌ فقط حروف انگلیسی/عدد/خط‌تیره، بین ۲ تا ۳۲ کاراکتر. دوباره بفرست:")
+                await self._respond_safe(event, "❌ فقط حروف انگلیسی/عدد/خط‌تیره، بین ۲ تا ۳۲ کاراکتر. دوباره بفرست:")
                 return
             if text in cfg or text in RESERVED_TAGS:
-                await event.respond("❌ این تگ قبلاً استفاده شده یا رزرو شده. یه اسم دیگه بفرست:")
+                await self._respond_safe(event, "❌ این تگ قبلاً استفاده شده یا رزرو شده. یه اسم دیگه بفرست:")
                 return
             data["tag"] = text
             wiz["state"] = WIZ_PHONE
-            await event.respond(
+            await self._respond_safe(
+                event,
                 "شماره تلفن رو با کد کشور بفرست (مثلاً `+989123456789`):",
                 buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
             )
@@ -8949,7 +8990,7 @@ class AdminBot:
 
         if state == WIZ_PHONE:
             if not re.fullmatch(r"\+\d{7,15}", text):
-                await event.respond("❌ فرمت شماره درست نیست. با + و کد کشور بفرست (مثلاً +989123456789):")
+                await self._respond_safe(event, "❌ فرمت شماره درست نیست. با + و کد کشور بفرست (مثلاً +989123456789):")
                 return
             # PATCH (audit-5): جلوگیری از لاگینِ دو اکانت با همان شماره
             # تلگرام. قبلاً این چک نبود و کاربر می‌توانست همین شماره را
@@ -9211,7 +9252,10 @@ class AdminBot:
                 )
             # کاربر عادی باید در «منوی اصلی» نقش خودش فرود بیاید (مدیریت
             # سلفش از طریق همان ربات کمکی و «پنل» انجام می‌شود).
-            await saas._show_menu_for_role(event.chat_id, ROLE_USER)
+            # v2.12.13 (QA5-OWNER): قبلاً ROLE_USER هاردکد بود → OWNER بعد
+            # از لاگین اکانت، منوی USER می‌دید و باید دوباره /start می‌زد.
+            # حالا از نقشِ واقعی کاربر استفاده می‌کنیم.
+            await saas._show_menu_for_role(event.chat_id, saas._role(event.chat_id))
             return
 
         if ready:
@@ -10008,14 +10052,21 @@ class SaaSBot:
         # فراخوانی می‌کنه که می‌تونه hang کنه. اینجا در startup، cache رو
         # گرم می‌کنیم تا در runtime این مشکل پیش نیاد. best-effort — اگه
         # ناموفق بود، ربات بالا میاد ولی ممکنه بعضی callbackها کند باشن.
+        # v2.12.13 (QA5-EXPERT): timeout aggregate اضافه شد تا خودِ startup
+        # هم hang نکنه اگه iter_dialogs هم هنگ کنه.
         try:
             print("🔄 [saas_bot] pre-warming dialog cache (limit=100)...")
-            _warmup_count = 0
-            async for _ in self.client.iter_dialogs(limit=100):
-                _warmup_count += 1
-                if _warmup_count >= 100:
-                    break
-            print(f"✅ [saas_bot] dialog cache warmed ({_warmup_count} dialogs)")
+            async def _warmup():
+                _warmup_count = 0
+                async for _ in self.client.iter_dialogs(limit=100):
+                    _warmup_count += 1
+                    if _warmup_count >= 100:
+                        break
+                return _warmup_count
+            _n = await asyncio.wait_for(_warmup(), timeout=30)
+            print(f"✅ [saas_bot] dialog cache warmed ({_n} dialogs)")
+        except asyncio.TimeoutError:
+            print(f"⚠️ [saas_bot] dialog cache warmup TIMED OUT after 30s (continuing)")
         except Exception as _e:
             print(f"⚠️ [saas_bot] dialog cache warmup failed (continuing): "
                   f"{type(_e).__name__}: {_e}")
@@ -17221,7 +17272,7 @@ class SaaSBot:
                     gw = data.split(":", 1)[1]
                     await self._clear_admin_panel_wizard(event.sender_id)
                     self._start_own_wizard(event.sender_id, "set_merchant", {"gw": gw})
-                    await event.respond(f"🔑 **مرچنت {gw}**\n\nکد مرچنت رو بفرست:")
+                    await self._respond_safe(event, f"🔑 **مرچنت {gw}**\n\nکد مرچنت رو بفرست:")
                     return
                 if data.startswith("order_zarinpal:"):
                     oid = safe_callback_int(data.split(":", 1)[1], 0)
@@ -17234,7 +17285,8 @@ class SaaSBot:
                     cb = f"{panel_url}/api/payment/zarinpal/callback" if panel_url else "https://panel.cianet.ir/api/payment/zarinpal/callback"
                     result = create_zarinpal_payment(oid, cb)
                     if result.get("ok"):
-                        await event.respond(f"🟡 **زرین‌پال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
+                        await self._respond_safe(event,
+                            f"🟡 **زرین‌پال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
                             buttons=[UI.nav_row()])
                     else:
                         await event.answer(f"❌ {result.get('error', 'خطا')}", alert=True)
@@ -17250,7 +17302,8 @@ class SaaSBot:
                     cb = f"{panel_url}/api/payment/zibal/callback" if panel_url else "https://panel.cianet.ir/api/payment/zibal/callback"
                     result = create_zibal_payment(oid, cb)
                     if result.get("ok"):
-                        await event.respond(f"🟢 **زیبال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
+                        await self._respond_safe(event,
+                            f"🟢 **زیبال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
                             buttons=[UI.nav_row()])
                     else:
                         await event.answer(f"❌ {result.get('error', 'خطا')}", alert=True)
@@ -18055,7 +18108,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.12"
+BUILD_VERSION = "2026-10-05-v2.12.13"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
