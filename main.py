@@ -7752,6 +7752,7 @@ class AdminBot:
         self.wizards[event.sender_id] = {
             "state": WIZ_2FA_OLD_PASS,
             "data": {"tag": tag, "mode": mode, "back": f"tfa:{tag}"},
+            "_ts": time.time(),
         }
         title = "🔑 تغییر رمز دو مرحله‌ای" if mode == "change" else "🗑 حذف رمز دو مرحله‌ای"
         await self._respond_safe(
@@ -7769,6 +7770,7 @@ class AdminBot:
         self.wizards[event.sender_id] = {
             "state": WIZ_2FA_OLD_PASS,
             "data": {"tag": tag, "mode": "email", "back": f"tfa:{tag}"},
+            "_ts": time.time(),
         }
         await self._respond_safe(
             event,
@@ -8253,7 +8255,9 @@ class AdminBot:
         if not entry:
             await event.answer("این اکانت الان روشن نیست.", alert=True)
             return
-        self.wizards[event.sender_id] = {"state": WIZ_EDIT_NAME, "data": {"tag": tag}}
+        self.wizards[event.sender_id] = {"state": WIZ_EDIT_NAME, "data": {"tag": tag},
+            "_ts": time.time(),
+        }
         await event.edit(
             f"✏️ اسم پایه‌ی جدید برای «{tag}» رو بفرست:",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
@@ -8417,6 +8421,7 @@ class AdminBot:
         self.wizards[event.sender_id] = {
             "state": None,
             "data": {"tag": tag},
+            "_ts": time.time(),
         }
         await self._show_proxy_type_buttons(event, f"🌐 **تنظیم پروکسی برای «{tag}»**\n\nنوع پروکسی رو انتخاب کن:")
 
@@ -8482,7 +8487,9 @@ class AdminBot:
         if not entry:
             await event.answer("این اکانت الان روشن نیست.", alert=True)
             return
-        self.wizards[event.sender_id] = {"state": WIZ_SEND_MSG_TARGET, "data": {"tag": tag}}
+        self.wizards[event.sender_id] = {"state": WIZ_SEND_MSG_TARGET, "data": {"tag": tag},
+            "_ts": time.time(),
+        }
         await event.edit(
             f"📨 **ارسال پیام از طرف «{tag}»**\n\n"
             f"آیدی عددی، یوزرنیم (با یا بدون @) رو بفرست — یا برای "
@@ -8533,7 +8540,9 @@ class AdminBot:
         await event.edit("\n".join(lines), buttons=buttons)
 
     async def _start_add_admin_wizard(self, event):
-        self.wizards[event.sender_id] = {"state": WIZ_ADD_ADMIN, "data": {}}
+        self.wizards[event.sender_id] = {"state": WIZ_ADD_ADMIN, "data": {},
+            "_ts": time.time(),
+        }
         await event.edit(
             "➕ **افزودن ادمین جدید**\n\n"
             "آیدی عددی تلگرام شخص رو بفرست، یا یه پیام از همون شخص رو برام فوروارد کن:",
@@ -8690,7 +8699,9 @@ class AdminBot:
             # (که owner_user_id صریح می‌گذارد) اشتباه گرفته نشود و ادمین
             # بعد از ساخت، در منوی USER فرود نیاید.
             data["for_user_id"] = preset_owner_id
-        self.wizards[event.sender_id] = {"state": WIZ_TAG, "data": data}
+        self.wizards[event.sender_id] = {"state": WIZ_TAG, "data": data,
+            "_ts": time.time(),
+        }
         title = "➕ **افزودن SelfBot**" if preset_owner_id is not None else "➕ **افزودن اکانت جدید**"
         await event.edit(
             f"{title}\n\n"
@@ -8716,6 +8727,9 @@ class AdminBot:
 
         این متد idempotent است و در صورت concurrent invocation مشکل
         ایجاد نمی‌کنه (pop روی کلیدِ حذف‌شده هیچ‌کاری نمی‌کنه).
+
+        v2.12.23 (QA10-STABILITY BUG#2): _ts حالا در همه‌ی creation sites
+        ست می‌شه (هم AdminBot هم SaaSBot)، پس TTL واقعاً کار می‌کنه.
         """
         import time as _time
         now = _time.time()
@@ -8727,7 +8741,7 @@ class AdminBot:
             return
         expired_uids = [
             uid for uid, wiz in self.wizards.items()
-            if (now - wiz.get("_ts", now)) > self._WIZARD_TTL_SEC
+            if (now - wiz.get("_ts", 0)) > self._WIZARD_TTL_SEC
         ]
         for uid in expired_uids:
             wiz = self.wizards.pop(uid, None)
@@ -8871,7 +8885,9 @@ class AdminBot:
 
         data["temp_client"] = temp_client
         data["phone_code_hash"] = sent.phone_code_hash
-        self.wizards[event.sender_id] = {"state": WIZ_CODE, "data": data}
+        self.wizards[event.sender_id] = {"state": WIZ_CODE, "data": data,
+            "_ts": time.time(),
+        }
         await self._respond_safe(
             event,
             "📩 کد به تلگرام/پیامکِ این شماره ارسال شد. کد رو بفرست:\n"
@@ -9335,6 +9351,7 @@ class AdminBot:
         self.wizards[event.sender_id] = {
             "state": WIZ_TAG,
             "data": {"owner_user_id": owner_user_id},
+            "_ts": time.time(),
         }
         # v2.12.4: use respond instead of edit (avoid "mix inline" error)
         await event.respond(
@@ -10324,7 +10341,10 @@ class SaaSBot:
             # یک سشنِ متصلِ telethon نشت می‌کرد.
             _spawn_bg(self.admin_panel._cleanup_wizard_temp_client(wiz),
                       "wizard_cleanup")
-        self.wizards[user_id] = {"state": state, "data": data}
+        # v2.12.23 (QA10-STABILITY BUG#2): timestamp ست کن برای TTL cleanup.
+        # قبلاً _ts ست نمی‌شد → _cleanup_stale_wizards هرگز expire نمی‌کرد.
+        import time as _t_wiz
+        self.wizards[user_id] = {"state": state, "data": data, "_ts": _t_wiz.time()}
 
     def _sync_admin_panel_scope(self, user_id: int) -> None:
         """
@@ -15513,7 +15533,8 @@ class SaaSBot:
                 await event.respond(f"❌ پلن «{name}» از قبل وجود دارد.")
                 return True
             self.wizards[event.sender_id] = {"state": WIZ_PRICING_PRICE,
-                                             "data": {"plan": name, "days": None}}
+                                             "data": {"plan": name, "days": None},
+                                             "_ts": time.time()}
             await event.respond(f"قیمت پلن «{name}» به تومان چنده؟")
             return True
 
@@ -15534,7 +15555,8 @@ class SaaSBot:
             days = data.get("days")
             if days is None:
                 self.wizards[event.sender_id] = {"state": WIZ_PRICING_DAYS,
-                                                 "data": {"plan": plan, "price": price}}
+                                                 "data": {"plan": plan, "price": price},
+                                                 "_ts": time.time()}
                 await event.respond(f"مدت اشتراک پلن «{plan}» چند روزه بشه؟")
                 return True
             set_pricing(plan, price, days)
@@ -15646,6 +15668,7 @@ class SaaSBot:
                 return True
             self.wizards[event.sender_id] = {
                 "state": WIZ_SET_CHANNEL, "data": {"channel": norm, "title": info},
+                "_ts": time.time(),
             }
             await event.respond(
                 f"✅ **کانال پیدا شد:**\n\n"
@@ -15675,7 +15698,8 @@ class SaaSBot:
                 return True
             data["token"] = token
             data["bot_username"] = info
-            self.wizards[event.sender_id] = {"state": WIZ_DEDICATED_OWNER_ID, "data": data}
+            self.wizards[event.sender_id] = {"state": WIZ_DEDICATED_OWNER_ID, "data": data,
+                                             "_ts": time.time()}
             await event.respond(
                 "✅ توکن معتبر است. حالا **آیدی عددی** کسی که می‌خوای مالک ربات "
                 "اختصاصی باشه رو بفرست (مثلاً `123456789` — از @userinfobot می‌تونی "
@@ -16133,13 +16157,34 @@ class SaaSBot:
                         c.execute(
                             "DELETE FROM logs WHERE created_at < datetime('now', '-90 days')"
                         )
+                        # v2.12.23 (QA10-STABILITY BUG#4): trim سایر جدول‌ها
+                        # که قبلاً بدون محدودیت رشد می‌کردن.
+                        c.execute(
+                            "DELETE FROM wallet_transactions WHERE created_at < datetime('now', '-365 days')"
+                        )
+                        c.execute(
+                            "DELETE FROM orders WHERE status IN ('expired', 'cancelled') "
+                            "AND created_at < datetime('now', '-90 days')"
+                        )
+                        c.execute(
+                            "DELETE FROM payments WHERE status IN ('rejected') "
+                            "AND created_at < datetime('now', '-90 days')"
+                        )
+                        c.execute(
+                            "DELETE FROM subscriptions WHERE status = 'expired' "
+                            "AND expire_date < datetime('now', '-30 days')"
+                        )
+                        # broadcasts table اگر وجود داره
+                        try:
+                            c.execute(
+                                "DELETE FROM broadcasts WHERE created_at < datetime('now', '-90 days')"
+                            )
+                        except Exception:
+                            pass  # table ممکنه وجود نداشته باشه
                         # PATCH (v2.5.1): c.connection.commit() نادرست بود.
-                        # در _conn() context manager، c خودش sqlite3.Connection
-                        # است — متد commit() مستقیماً رویش callable است.
-                        # c.connection یک attribute نیست → AttributeError.
                         c.commit()
                 except Exception as e:
-                    print(f"⚠️ [saas_bot] trim logs ناموفق (بی‌ضرر): {e}")
+                    print(f"⚠️ [saas_bot] trim DB tables ناموفق (بی‌ضرر): {e}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -18200,7 +18245,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.22"
+BUILD_VERSION = "2026-10-05-v2.12.23"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -21350,8 +21395,12 @@ class SelfBot:
             return 0
 
         self.enabled = state.get("enabled", self.enabled)
-        # v2.12.5: همیشه خاموش شروع کنه — کاربر خودش روشن کنه
-        self.time_enabled = False
+        # v2.12.23 (QA10-UX-LONG BUG#1): قبلاً در v2.12.5 هاردکد False
+        # بود که persisted True رو override می‌کرد. این یعنی بعد از هر
+        # restart، time کاربر خاموش می‌شد و باید دوباره `تایم روشن` می‌زد.
+        # حالا persisted state رو احترام می‌ذاریم (مثل bio_enabled در خط
+        # بعدی).
+        self.time_enabled = state.get("time_enabled", self.time_enabled)
         self.online_enabled = state.get("online_enabled", self.online_enabled)
         self.auto_read_pv = state.get("auto_read_pv", self.auto_read_pv)
         self.auto_read_group = state.get("auto_read_group", self.auto_read_group)
@@ -21505,8 +21554,11 @@ class SelfBot:
         _safe_handler اجرا می‌شه (با _spawn_bg صدا زده شده) تا بتونه
         ۱۰۰۰ تا ارسال رو در ۳۰+ دقیقه انجام بده.
 
+        v2.12.20: skip _gate_outbound (daily cap) — فقط FloodWait رعایت می‌شه.
+        v2.12.23: CancelledError handler (restart mid-broadcast no longer stuck).
+        v2.12.23: noforwards check — رد کردن پیام‌های محافظت‌شده.
+
         anti-ban features:
-        - respect _gate_outbound (daily cap 200، cooldown، flood_until)
         - delay تصادفی ۱-۳ ثانیه بین هر ارسال
         - FloodWait handling با _flood_until coordination
         - skip self/bot/non-matching dialogs
@@ -21519,79 +21571,132 @@ class SelfBot:
         import time as _t
         import random as _random
 
+        # v2.12.23 (QA10-STRESS BUG#7): CancelledError handler.
+        # اگه restart وسط broadcast بشه، task cancel می‌شه. بدون این handler،
+        # کاربر روی «📨 شروع ارسال...» گیر می‌کرد. حالا یه پیام نهایی
+        # فرستاده می‌شه (به‌حداکثر توان) تا کاربر بدونه چی شده.
         try:
-            dialogs = await self.client.get_dialogs(limit=1000)
-        except Exception as _e:
+            # v2.12.23 (QA10-TELEGRAM): noforwards check — اگه پیام
+            # محافظت‌شده (noforwards) باشه، تلگرام اجازه فوروارد نمی‌ده.
+            if getattr(reply_msg, 'noforwards', False):
+                try:
+                    await event.edit(
+                        "❌ این پیام محافظت‌شده است و امکان فوروارد ندارد.\n"
+                        "از یه پیام دیگه استفاده کن."
+                    )
+                except Exception:
+                    pass
+                return
+
             try:
-                await event.edit(f"❌ خطا در گرفتن لیست: {_e}")
-            except Exception:
-                pass
-            return
+                dialogs = await self.client.get_dialogs(limit=1000)
+            except Exception as _e:
+                try:
+                    await event.edit(f"❌ خطا در گرفتن لیست: {_e}")
+                except Exception:
+                    pass
+                return
 
-        for d in dialogs:
-            # فیلتر کردن بر اساس نوع
-            if target_type == "pv":
-                if not d.is_user:
+            # v2.12.23 (QA10-STRESS BUG#3): اگه بیش از ۱۰۰۰ چت داشته باشه،
+            # به کاربر اطلاع بده که فقط ۱۰۰۰ تای اول ارسال می‌شه.
+            _total_dialogs = len(dialogs)
+            if _total_dialogs >= 1000:
+                try:
+                    await event.edit(
+                        f"⚠️ توجه: بیش از ۱۰۰۰ چت داری. فقط ۱۰۰۰ تای اول ارسال می‌شه.\n"
+                        f"⏳ ادامه ارسال..."
+                    )
+                except Exception:
+                    pass
+
+            for d in dialogs:
+                # فیلتر کردن بر اساس نوع
+                if target_type == "pv":
+                    if not d.is_user:
+                        skipped += 1
+                        continue
+                    if d.entity and getattr(d.entity, "is_self", False):
+                        skipped += 1
+                        continue
+                    if d.entity and getattr(d.entity, "bot", False):
+                        skipped += 1
+                        continue
+                else:  # group
+                    if not (d.is_group or d.is_megagroup):
+                        skipped += 1
+                        continue
+
+                # v2.12.20: broadcast نباید از _gate_outbound استفاده کنه.
+                # فقط FloodWait رو رعایت می‌کنه (نه daily cap).
+
+                # چک کن FloodWait recovery فعال نیست
+                import time as _t_chk
+                if self._flood_until and _t_chk.time() < self._flood_until:
                     skipped += 1
                     continue
-                if d.entity and getattr(d.entity, "is_self", False):
-                    skipped += 1
-                    continue
-                if d.entity and getattr(d.entity, "bot", False):
-                    skipped += 1
-                    continue
-            else:  # group
-                if not (d.is_group or d.is_megagroup):
-                    skipped += 1
-                    continue
 
-            # v2.12.20 (USER-REPORT): broadcast نباید از _gate_outbound استفاده
-            # کنه. قبلاً broadcast از همون gate_outbound استفاده می‌کرد که
-            # محدودیتِ ۲۰۰ در روز داره. این یعنی:
-            #   ۱) اگه کاربر ۵۰۰ تا PV داشته باشه، broadcast فقط ۲۰۰ تا رو
-            #      می‌فرستاد و ۳۰۰ تا رو رد می‌کرد.
-            #   ۲) بعد از broadcast، _out_today به ۲۰۰ می‌رسید و همه‌ی
-            #      features دیگه (time، bio، tabchi) gate می‌بستن و کار
-            #      نمی‌کردن.
-            # حالا broadcast فقط FloodWait رو رعایت می‌کنه (نه daily cap).
-            # broadcast یه عملیاتِ manual و نادر هست (با ۶۰ ثانیه cooldown)
-            # و نباید با features سبک رقابت کنه.
-
-            # چک کن FloodWait recovery فعال نیست
-            import time as _t_chk
-            if self._flood_until and _t_chk.time() < self._flood_until:
-                skipped += 1
-                continue
-
-            # ارسال (forward)
-            try:
-                await reply_msg.forward_to(d.id)
-                sent_ok += 1
-                # delay تصادفی ۱-۳ ثانیه برای anti-ban
-                _delay = 1.0 + _random.random() * 2.0
-                await asyncio.sleep(_delay)
-            except errors.FloodWaitError as _fwe:
-                # صبر کن تا FloodWait تموم بشه
-                _wait_sec = (_fwe.seconds or 30) + 2
-                # v2.12.18: _flood_until رو coordination کن تا بقیه‌ی
-                # featureها هم FloodWait رو رعایت کنن.
-                self._flood_until = _t.time() + _wait_sec
-                print(f"⏳ [broadcast:{self.tag}] FloodWait {_wait_sec}s "
-                      f"(flood_until coordinated)")
-                await asyncio.sleep(_wait_sec)
-                # retry یک‌بار
+                # ارسال (forward)
                 try:
                     await reply_msg.forward_to(d.id)
                     sent_ok += 1
+                    # delay تصادفی ۱-۳ ثانیه برای anti-ban
+                    _delay = 1.0 + _random.random() * 2.0
+                    await asyncio.sleep(_delay)
+                except errors.FloodWaitError as _fwe:
+                    # صبر کن تا FloodWait تموم بشه
+                    _wait_sec = (_fwe.seconds or 30) + 2
+                    self._flood_until = _t.time() + _wait_sec
+                    print(f"⏳ [broadcast:{self.tag}] FloodWait {_wait_sec}s "
+                          f"(flood_until coordinated)")
+                    await asyncio.sleep(_wait_sec)
+                    # retry یک‌بار
+                    try:
+                        await reply_msg.forward_to(d.id)
+                        sent_ok += 1
+                    except Exception as _e:
+                        sent_fail += 1
+                        print(f"⚠️ [broadcast:{self.tag}] retry fail to {d.id}: "
+                              f"{type(_e).__name__}")
                 except Exception as _e:
                     sent_fail += 1
-                    print(f"⚠️ [broadcast:{self.tag}] retry fail to {d.id}: "
-                          f"{type(_e).__name__}")
-            except Exception as _e:
-                sent_fail += 1
-                print(f"⚠️ [broadcast:{self.tag}] send fail to {d.id}: "
-                      f"{type(_e).__name__}: {str(_e)[:80]}")
-                continue
+                    print(f"⚠️ [broadcast:{self.tag}] send fail to {d.id}: "
+                          f"{type(_e).__name__}: {str(_e)[:80]}")
+                    continue
+
+        except asyncio.CancelledError:
+            # v2.12.23 (QA10-STRESS BUG#7): restart وسط broadcast.
+            # به کاربر اطلاع بده که ارسال ناقص مونده.
+            _total = sent_ok + sent_fail + skipped
+            print(f"⚠️ [broadcast:{self.tag}] CANCELLED — sent={sent_ok}, "
+                  f"fail={sent_fail}, skipped={skipped}")
+            try:
+                await self.client.send_message(
+                    "me",
+                    f"⚠️ ارسال به {'پیوی' if target_type == 'pv' else 'گروه'}‌ها "
+                    f"ناقص متوقف شد (restart).\n\n"
+                    f"📊 آمار تا لحظه توقف:\n"
+                    f"• ✅ موفق: {fa_digits(sent_ok)}\n"
+                    f"• ❌ ناموفق: {fa_digits(sent_fail)}\n"
+                    f"• ⏭ رد شده: {fa_digits(skipped)}\n"
+                    f"• 📋 مجموع: {fa_digits(_total)}\n\n"
+                    f"برای ادامه، دوباره `ارسال به پیوی` رو بزن."
+                )
+            except Exception:
+                pass
+            raise  # propagate cancellation
+        except Exception as _e:
+            # هر خطای غیرمنتظره دیگه
+            print(f"❌ [broadcast:{self.tag}] unexpected error: {type(_e).__name__}: {_e}")
+            try:
+                await event.edit(
+                    f"❌ خطای غیرمنتظره در ارسال: {_e}\n\n"
+                    f"📊 آمار تا لحظه خطا:\n"
+                    f"• ✅ موفق: {fa_digits(sent_ok)}\n"
+                    f"• ❌ ناموفق: {fa_digits(sent_fail)}\n"
+                    f"• ⏭ رد شده: {fa_digits(skipped)}"
+                )
+            except Exception:
+                pass
 
         # گزارشِ نهایی
         _total = sent_ok + sent_fail + skipped

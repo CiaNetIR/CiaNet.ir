@@ -559,10 +559,53 @@ def _backup_main_py(repo_dir: str = None) -> Optional[str]:
         backup = Path(repo_dir) / "versions" / f"main.py.pre-auto-update.{ts}"
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(main_py, backup)
+        # v2.12.23 (QA10-STABILITY BUG#5): پاکسازی backup‌های قدیمی.
+        # فقط ۱۰ تا backup اخیر رو نگه دار. بقیه حذف بشن تا disk پر نشه.
+        try:
+            _cleanup_old_backups(backup.parent)
+        except Exception as _ce:
+            log.warning("backup cleanup failed (continuing): %s", _ce)
         return str(backup)
     except Exception as e:
         log.warning("backup failed: %s", e)
         return None
+
+
+def _cleanup_old_backups(versions_dir: Path, keep: int = 10) -> None:
+    """v2.12.23: پاکسازی backup‌های قدیمی — فقط `keep` تا اخیر رو نگه دار.
+
+    فایل‌های با الگوی `main.py.pre-auto-update.*` و `main.py.pre-rollback.*`
+    رو بر اساس modification time مرتب می‌کنه و قدیمی‌ترها رو حذف می‌کنه.
+    این از پر شدنِ disk بعد از ماه‌ها auto-update جلوگیری می‌کنه.
+    """
+    if not versions_dir.exists():
+        return
+    backups = sorted(
+        versions_dir.glob("main.py.pre-auto-update.*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,  # جدیدترین اول
+    )
+    # هم rollback backups رو در نظر بگیر
+    backups += sorted(
+        versions_dir.glob("main.py.pre-rollback.*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    # نگه‌داشتنِ `keep` تا اخیر (به‌ترتیبِ زمان)
+    # backups لیست مسطح هست، نه مرتب به‌صورت واحد. بذار با همون mtime
+    # مرتب کن:
+    all_backups = sorted(
+        list(versions_dir.glob("main.py.pre-auto-update.*"))
+        + list(versions_dir.glob("main.py.pre-rollback.*")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in all_backups[keep:]:
+        try:
+            old.unlink()
+            log.info("cleaned up old backup: %s", old.name)
+        except Exception:
+            pass
 
 
 def propagation_marker_present() -> bool:
