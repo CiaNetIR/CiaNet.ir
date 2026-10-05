@@ -2465,10 +2465,12 @@ def auto_renew_subscription(user_id: int) -> dict:
         # v2.12.21: فقط active با expire_date آینده رو «فعلی» در نظر بگیر.
         # اگه active ولی expire_date گذشته (در حال expire شدن)، نیاز به
         # تمدید هست.
+        # v2.12.22 (re-audit): از _now_date() + >= استفاده می‌کنیم (همون
+        # end-of-day semantic که در list_expired_subscriptions استفاده می‌شه).
         active = c.execute(
             "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' "
-            "AND expire_date > ? LIMIT 1",
-            (user_id, _now())
+            "AND expire_date >= ? LIMIT 1",
+            (user_id, _now_date())
         ).fetchone()
         if active:
             return {"ok": True, "renewed": False, "reason": "already_active"}
@@ -16172,6 +16174,11 @@ class SaaSBot:
             # می‌کرد، ولی کاربری که تمدید کرده (sub1 expired + sub2 active)
             # هم 'expired' داره و حذف می‌شد! حالا فقط کاربرانی که هیچ
             # اشتراکِ active فعلی ندارن حذف می‌شن.
+            # v2.12.22 (re-audit): از _now_date() (date-only) استفاده می‌کنیم
+            # نه _now() (datetime) — چون expire_date فقط date ذخیره می‌شه
+            # و lexicographic comparison با datetime فرمت‌مطابقت نداره.
+            # هم از >= استفاده می‌کنیم (نه >) چون در روزِ آخرِ اشتراک،
+            # expire_date == today و اشتراک هنوز فعال هست (end-of-day semantic).
             rows = c.execute(
                 "SELECT DISTINCT s1.user_id FROM subscriptions s1 "
                 "WHERE s1.status = 'expired' AND s1.expire_date < ? "
@@ -16179,9 +16186,9 @@ class SaaSBot:
                 "  SELECT 1 FROM subscriptions s2 "
                 "  WHERE s2.user_id = s1.user_id "
                 "  AND s2.status = 'active' "
-                "  AND s2.expire_date > ?"
+                "  AND s2.expire_date >= ?"
                 ")",
-                (cutoff_date, _now()),
+                (cutoff_date, _now_date()),
             ).fetchall()
         expired_user_ids = [r["user_id"] for r in rows]
         if not expired_user_ids:
@@ -18193,7 +18200,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.21"
+BUILD_VERSION = "2026-10-05-v2.12.22"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
