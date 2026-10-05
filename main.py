@@ -17699,6 +17699,22 @@ HELPER_TOPICS_FA = {
              "مثال: `کپی https://t.me/channel/123`\n\n"
              "**با ریپلای:** `ذخیره` · `فوروارد`\n\n"
              "__برای کانال خصوصی باید عضو باشی.__"),
+    "broadcast": ("📨 ارسال دسته‌جمعی",
+                  "📨 **ارسال دسته‌جمعی**\n\n"
+                  "به همه‌ی پیوی یا گروه‌هایت یه پیام رو فوروارد کن.\n\n"
+                  "**روش استفاده:**\n"
+                  "۱) پیامِ مدنظرت رو پیدا کن یا بفرست\n"
+                  "۲) روی همون پیام **ریپلای** بزن\n"
+                  "۳) یکی از دستورهای زیر رو تایپ کن:\n\n"
+                  "`ارسال به پیوی` — به همه‌ی PV (مخصوص)\n"
+                  "`ارسال به گروه` — به همه‌ی گروه‌ها\n\n"
+                  "🟢 فارسی یا انگلیسی فرقی نداره: `ارسال به pv` / `ارسال به gp` هم کار می‌کنه.\n\n"
+                  "**نکات:**\n"
+                  "• فقط در Saved Messages یا PV خودت کار می‌کنه (نه گروه).\n"
+                  "• بین هر ارسال ۱-۳ ثانیه وقفه هست (ضد بن).\n"
+                  "• ۶۰ ثانیه cooldown بین هر بار استفاده.\n"
+                  "• سقف ۱۰۰۰ چت در هر بار.\n"
+                  "• بعد از اتمام، آمار دقیق میاد: موفق / ناموفق / رد شده."),
     "status": ("📊 وضعیت",
                "📊 **وضعیت**\n\n`وضعیت` — همه‌ی تنظیمات فعلی را یک‌جا نشان می‌دهد:\n"
                "سلف · تایم · تبچی · آنلاین · تیک · سکوت · ردیاب"),
@@ -17739,6 +17755,22 @@ HELPER_TOPICS_EN = {
     "copy": ("📋 Copy",
              "📋 **Copy & Save**\n\n`copy [link]` — fetch a message by link\n\n"
              "**Reply:** `save` · `forward`"),
+    "broadcast": ("📨 Broadcast",
+                   "📨 **Broadcast**\n\n"
+                   "Forward a message to ALL your private chats or ALL your groups at once.\n\n"
+                   "**How to use:**\n"
+                   "1) Find or send the message you want to broadcast\n"
+                   "2) **Reply** on that message\n"
+                   "3) Type one of:\n\n"
+                   "`ارسال به پیوی` — to all PV (private chats)\n"
+                   "`ارسال به گروه` — to all groups\n\n"
+                   "🟢 Persian or English triggers both work: `ارسال به pv` / `ارسال به gp`\n\n"
+                   "**Notes:**\n"
+                   "• Only works in Saved Messages or your own chat (not in groups).\n"
+                   "• 1-3 second delay between each forward (anti-ban).\n"
+                   "• 60-second cooldown between uses.\n"
+                   "• Max 1000 chats per broadcast.\n"
+                   "• Final report: success / failed / skipped counts."),
     "status": ("📊 Status", "📊 **Status**\n\n`status` — shows every current setting."),
     "tips": ("❓ Tips",
              "❓ **Tips**\n\n• Reply commands must be sent on the target message.\n"
@@ -17748,7 +17780,7 @@ HELPER_TOPICS_EN = {
 }
 
 HELPER_ORDER = ("time", "tabchi", "mute", "online", "read", "profile",
-                "tools", "games", "crypto", "copy", "status", "tips")
+                "tools", "games", "crypto", "copy", "broadcast", "status", "tips")
 
 HELPER_TRIGGERS = {"پنل", "راهنما", "منو", "panel", "help", "h", "menu"}
 
