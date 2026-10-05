@@ -10498,19 +10498,10 @@ class SaaSBot:
         # «💰 کیف پول» است) کاملاً unreachable بود.
         buttons.append([UI.go("👤 حساب کاربری", "user_account")])
 
-        # v2.12.15 (USER-REQUEST): دکمه‌ی «🤖 سلف من» کاملاً برای کاربر
-        # عادی حذف شد. قبلاً این دکمه کاربر عادی رو به پنل مدیریت اکانت
-        # می‌برد، ولی وقتی کاربر cancel می‌زد، به پنل مدیریتِ کاملِ
-        # ادمین (🎛 پنل مدیریت سلف‌بات) می‌افتاد که یه باگِ UX بود — کاربر
-        # عادی نباید اون پنل رو می‌دید. با حذف کاملِ این دکمه، کاربر عادی
-        # فقط می‌تونه اشتراک بخره و از خدمات استفاده کنه، بدون دسترسیِ
-        # مستقیم به مدیریتِ اکانت.
-        # فقط برای privileged roles (OWNER/ADMIN/RESELLER) نگه داشته می‌شه
-        # چون اونا به مدیریت اکانت دسترسیِ واقعی دارن و مسیرِ cancel‌شون
-        # هم درست طراحی شده.
-        if privileged and n_bots > 0:
-            _bots_label = f"🤖 سلف من ({fa_digits(n_active)}/{fa_digits(n_bots)})"
-            buttons.append([UI.go(_bots_label, "user_my_bots")])
+        # v2.12.16 (USER-REQUEST): دکمه‌ی «🤖 سلف من» کاملاً حذف شد.
+        # قبلاً برای همه‌ی نقش‌ها وجود داشت و کاربر عادی بعد از cancel به
+        # پنل مدیریتِ ادمین می‌افتاد (باگ UX). v2.12.15 برای USER پنهان
+        # شد ولی الان OWNER/ADMIN/RESELLER هم نمی‌خوان. کلاً حذف می‌شه.
 
         # ── ردیف ۴ (تکی): خرید با لایسنس
         buttons.append([UI.go("🔑 خرید با لایسنس", "user_activate_license")])
@@ -16831,31 +16822,11 @@ class SaaSBot:
                         self._sync_admin_panel_scope(event.sender_id)
                         await self.admin_panel.handle_callback(event, data=route)
                     return
-                # «سلف من» فقط برای privileged roles (OWNER/ADMIN/RESELLER).
-                # v2.12.15 (USER-REQUEST): کاربر عادی نباید به پنل مدیریت
-                # اکانت دسترسی داشته باشه. قبلاً به همه‌ی نقش‌ها اجازه
-                # داده می‌شد، ولی این یه باگِ UX داشت: کاربر عادی بعد از
-                # cancel، به پنل مدیریتِ کامل ادمین می‌افتاد. حالا این
-                # مسیر فقط برای privileged بازه و کاربر عادی reject می‌شه.
-                _viewer_role = self._role(event.sender_id)
-                if data == "user_my_bots":
-                    if _viewer_role == ROLE_USER:
-                        await event.answer("⛔ این بخش فقط برای مدیران/نمایندگان قابل‌دسترسی است.", alert=True)
-                        return
-                    await self._show_user_own_bots(event)
-                    return
-                if data.startswith("my_acc:"):
-                    if _viewer_role == ROLE_USER:
-                        await event.answer("⛔ این بخش فقط برای مدیران/نمایندگان قابل‌دسترسی است.", alert=True)
-                        return
-                    # فرمت: my_acc:{tag} — هاب مدیریت یک SelfBot خودِ کاربر
-                    await self._show_my_acc(event, data.split(":", 1)[1])
-                    return
-                if data == "user_my_add_bot":
-                    if _viewer_role == ROLE_USER:
-                        await event.answer("⛔ این بخش فقط برای مدیران/نمایندگان قابل‌دسترسی است.", alert=True)
-                        return
-                    await self._user_my_add_bot(event)
+                # v2.12.16 (USER-REQUEST): «🤖 سلف من» کاملاً حذف شد.
+                # callback handlers موندن برای defensive rejection (اگه
+                # کسی با callback دستی تلاش کنه).
+                if data == "user_my_bots" or data.startswith("my_acc:") or data == "user_my_add_bot":
+                    await event.answer("⛔ این بخش دیگر فعال نیست.", alert=True)
                     return
                 if data.startswith("user_sub_admin:"):
                     # فرمت: user_sub_admin:{user_id}:{back_data} — مدیریت اشتراک یک کاربر
@@ -18145,7 +18116,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.15"
+BUILD_VERSION = "2026-10-05-v2.12.16"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
