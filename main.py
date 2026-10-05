@@ -5875,8 +5875,8 @@ NAV_ACTION_PREFIXES = (
     "channel_retry", "channel_confirm_save", "owner_channel_clear",
     "owner_db_restore_go", "owner_db_restore_cancel", "owner_backup",
     "owner_db_backup", "admin_del:", "role_del:", "cancel_wizard",
-    "user_support_end", "proxy_skip_auth", "login_proxy_yes",
-    "login_proxy_no", "send_target_me", "owner_channel_check",
+    "user_support_end", "proxy_skip_auth",
+    "send_target_me", "owner_channel_check",
     # بستنِ نشست‌ها عمل است و خودش فهرست را دوباره رندر می‌کند
     "sessterm:", "sesskill:", "sesstog:", "codeget:", "codearm:",
     "tfago:", "tfacancel:",
@@ -8155,17 +8155,16 @@ class AdminBot:
         )
 
     # ─────────────────────────────────────────────────────
-    #  پروکسی — هم برای اکانت موجود، هم برای لاگینِ اکانت جدید
+    #  پروکسی — فقط برای اکانتِ موجود (تغییر/حذف پروکسی روی اکانتِ از‌قبل‌لاگین‌شده)
     # ─────────────────────────────────────────────────────
-    # نکته‌ی مهم: پروکسی روی این پروژه دو کاربرد دارد که هر دو پشتیبانی
-    # می‌شوند: (۱) اگر تلگرام IP سرور را برای *ورود/لاگین* محدود کرده باشد،
-    # می‌توان قبل از شروع لاگین یک پروکسی انتخاب کرد تا کل فرایند لاگین
-    # (send_code_request و sign_in) از همان لحظه‌ی اول از پروکسی رد شود.
-    # (۲) برای یک اکانت از قبل موجود، می‌توان پروکسی تنظیم/تعویض کرد که
-    # پس از ری‌استارت زنده اعمال شود. هر دو مسیر از همان مراحل مشترک زیر
-    # (نوع → آدرس → پورت → یوزرنیم/پسورد اختیاری) عبور می‌کنند؛ تفاوت فقط
-    # در قدم پایانی (_finish_proxy) است که بر اساس data["proxy_flow"]
-    # تشخیص می‌دهد کدام مسیر در جریان است.
+    # نکته‌ی مهم: از v2.12.8 به بعد، فرایند لاگینِ اکانتِ جدید همیشه
+    # مستقیم انجام می‌شود (بدون پرسیدنِ پروکسی). اگر تلگرام IP این سرور
+    # را برای ورود محدود کرده باشد، کاربر باید ابتدا اکانت را روی یک
+    # سرورِ دیگر (با IP تمیز) لاگین کند و سپس فایل session را روی این
+    # سرور کپی کند. پروکسی روی این پروژه فقط برای اکانتِ از‌قبل‌موجود
+    # کاربرد دارد: از صفحه‌ی «🌐 اتصال و پروکسی» (دکمه‌ی «🌐 تنظیم
+    # پروکسی») پروکسی را تنظیم می‌کنی، بعد از ری‌استارت زنده اعمال
+    # می‌شود. مسیر ویزارد: نوع → آدرس → پورت → یوزرنیم/پسورد اختیاری.
 
     async def _show_proxy_type_buttons(self, event, title: str):
         buttons = [
@@ -8180,7 +8179,7 @@ class AdminBot:
     async def _start_proxy_wizard(self, event, tag: str):
         self.wizards[event.sender_id] = {
             "state": None,
-            "data": {"tag": tag, "proxy_flow": "existing_account"},
+            "data": {"tag": tag},
         }
         await self._show_proxy_type_buttons(event, f"🌐 **تنظیم پروکسی برای «{tag}»**\n\nنوع پروکسی رو انتخاب کن:")
 
@@ -8197,6 +8196,9 @@ class AdminBot:
         )
 
     async def _finish_proxy(self, event, data: dict):
+        # v2.12.8: تنها مسیرِ باقی‌مانده، تنظیمِ پروکسی برای یک اکانت
+        # از‌قبل‌موجود است. مسیرِ new_account_login حذف شده — لاگین همیشه
+        # مستقیم انجام می‌شود.
         proxy_cfg = {
             "proxy_type": data["proxy_type"],
             "addr": data["addr"],
@@ -8207,15 +8209,6 @@ class AdminBot:
             proxy_cfg["username"] = data["username"]
             proxy_cfg["password"] = data.get("password", "")
 
-        if data.get("proxy_flow") == "new_account_login":
-            # این پروکسی برای همین لاگینِ در حال انجامِ یک اکانت *جدید*
-            # است — به مرحله‌ی ارسال کد (که حالا با این پروکسی وصل می‌شود)
-            # می‌رویم، نه ذخیره در config یک اکانت موجود.
-            data["proxy"] = proxy_cfg
-            await self._do_send_code(event, data)
-            return
-
-        # وگرنه: تنظیم پروکسی برای یک اکانت از قبل موجود
         tag = data["tag"]
         cfg = self.sb.load_config()
         if tag not in cfg:
@@ -8793,15 +8786,11 @@ class AdminBot:
                     return
             data["phone"] = text
             wiz["state"] = None
-            await event.respond(
-                "🌐 برای این لاگین نیاز به پروکسی داری؟ (اگه تلگرام IP این سرور رو "
-                "برای ورود محدود/فیلتر کرده، باید از پروکسی وارد بشی)",
-                buttons=[
-                    [UI.go("🌐 بله، با پروکسی وارد شو", b"login_proxy_yes")],
-                    [UI.go("🚀 نه، مستقیم وصل شو", b"login_proxy_no")],
-                    [UI.neutral(UI.L_CANCEL, "cancel_wizard")],
-                ],
-            )
+            # v2.12.8: حذفِ پرسشِ «ورود با پروکسی یا مستقیم» — همیشه
+            # مستقیم وصل می‌شویم. کاربر می‌تواند بعداً برای اکانتِ موجود
+            # از صفحه‌ی «🌐 اتصال و پروکسی» (دکمه‌ی «🌐 تنظیم پروکسی»)
+            # پروکسی تنظیم/تعویض کند.
+            await self._do_send_code(event, data)
             return
 
         if state == WIZ_CODE:
@@ -9338,15 +9327,6 @@ class AdminBot:
                 wiz = self.wizards.get(event.sender_id)
                 if wiz:
                     await self._finish_proxy(event, wiz["data"])
-            elif data == "login_proxy_no":
-                wiz = self.wizards.get(event.sender_id)
-                if wiz:
-                    await self._do_send_code(event, wiz["data"])
-            elif data == "login_proxy_yes":
-                wiz = self.wizards.get(event.sender_id)
-                if wiz:
-                    wiz["data"]["proxy_flow"] = "new_account_login"
-                    await self._show_proxy_type_buttons(event, "نوع پروکسی رو انتخاب کن:")
             elif data.startswith("disable:"):
                 tag = data.split(":", 1)[1]
                 await self._disable_account(event, tag)
@@ -17677,7 +17657,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-03-v2.6.7"
+BUILD_VERSION = "2026-10-05-v2.12.8"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
