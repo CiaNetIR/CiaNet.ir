@@ -2455,19 +2455,23 @@ def auto_renew_subscription(user_id: int) -> dict:
     بازگشت: {"ok": True, "renewed": True/False, "reason": "..."}
 
     v2.10.0: کل عملیات در یک _conn_immediate برای جلوگیری از race.
+    v2.12.21 (QA7-USER6 BUG#3): قبلاً already_active guard فقط status='active'
+    رو چک می‌کرد، ولی _expiry_loop قبل از expire_subscription، auto_renew رو
+    صدا می‌زنه — یعنی هنوز 'active' هست. حالا expiry-imminent (active با
+    expire_date گذشته) هم به‌عنوان «نیاز به تمدید» در نظر گرفته می‌شه.
     """
     # v2.10.0: atomic lock — دو فراخوانی هم‌زمان نمی‌تونن هر دو succeed کنن
     with _conn_immediate() as c:
-        # double-check داخل lock
+        # v2.12.21: فقط active با expire_date آینده رو «فعلی» در نظر بگیر.
+        # اگه active ولی expire_date گذشته (در حال expire شدن)، نیاز به
+        # تمدید هست.
         active = c.execute(
-            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
-            (user_id,)
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' "
+            "AND expire_date > ? LIMIT 1",
+            (user_id, _now())
         ).fetchone()
         if active:
             return {"ok": True, "renewed": False, "reason": "already_active"}
-    sub = get_active_subscription(user_id)
-    if sub and sub.get("status") == "active":
-        return {"ok": True, "renewed": False, "reason": "already_active"}
     # پیدا کردن آخرین پلن کاربر
     with _conn() as c:
         last_sub = c.execute(
@@ -14911,6 +14915,15 @@ class SaaSBot:
             except Exception:
                 pass
             create_subscription(event.sender_id, plan_name, days)
+            # v2.12.21 (QA7-USER6 BUG#5): _pay_order_from_wallet،
+            # _resume_user_selfbots رو صدا نمی‌زد. این یعنی کاربر بعد از
+            # تمدید، SelfBotش همچنان disabled می‌موند تا restart بعدی.
+            # حالا مثل بقیه‌ی مسیرها (admin card-pay، license، TRC20)
+            # resume می‌کنه.
+            try:
+                await self._resume_user_selfbots(event.sender_id)
+            except Exception as _re:
+                print(f"⚠️ [wallet_pay] resume selfbots failed: {_re}")
             await event.edit(
                 f"✅ پرداخت با کیف پول انجام شد\n\n"
                 f"🧾 فاکتور: `{order['order_no']}`\n"
@@ -16155,10 +16168,20 @@ class SaaSBot:
 
         # پیدا کردن اشتراک‌های منقضی + کاربرانشون
         with _conn() as c:
+            # v2.12.21 (QA7-USER6 BUG#6): قبلاً فقط 'expired' بودن رو چک
+            # می‌کرد، ولی کاربری که تمدید کرده (sub1 expired + sub2 active)
+            # هم 'expired' داره و حذف می‌شد! حالا فقط کاربرانی که هیچ
+            # اشتراکِ active فعلی ندارن حذف می‌شن.
             rows = c.execute(
-                "SELECT DISTINCT user_id FROM subscriptions "
-                "WHERE status = 'expired' AND expire_date < ?",
-                (cutoff_date,),
+                "SELECT DISTINCT s1.user_id FROM subscriptions s1 "
+                "WHERE s1.status = 'expired' AND s1.expire_date < ? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM subscriptions s2 "
+                "  WHERE s2.user_id = s1.user_id "
+                "  AND s2.status = 'active' "
+                "  AND s2.expire_date > ?"
+                ")",
+                (cutoff_date, _now()),
             ).fetchall()
         expired_user_ids = [r["user_id"] for r in rows]
         if not expired_user_ids:
@@ -17288,9 +17311,20 @@ class SaaSBot:
                     if not order or order["user_id"] != event.sender_id:
                         await event.answer("❌ فاکتور پیدا نشد.", alert=True)
                         return
+                    # v2.12.21 (QA7-USER3): status check — جلوگیری از double-pay
+                    if order["status"] != ORDER_STATUS_PENDING:
+                        await event.answer("❌ این فاکتور قابل پرداخت نیست.", alert=True)
+                        return
                     import os as _os
                     panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
-                    cb = f"{panel_url}/api/payment/zarinpal/callback" if panel_url else "https://panel.cianet.ir/api/payment/zarinpal/callback"
+                    if not panel_url:
+                        await event.answer(
+                            "❌ پنل وب تنظیم نشده. لطفاً با پشتیبانی تماس بگیرید "
+                            "یا از روش پرداخت دیگه‌ای استفاده کنید.",
+                            alert=True,
+                        )
+                        return
+                    cb = f"{panel_url}/api/payment/zarinpal/callback"
                     result = create_zarinpal_payment(oid, cb)
                     if result.get("ok"):
                         await self._respond_safe(event,
@@ -17305,9 +17339,20 @@ class SaaSBot:
                     if not order or order["user_id"] != event.sender_id:
                         await event.answer("❌ فاکتور پیدا نشد.", alert=True)
                         return
+                    # v2.12.21 (QA7-USER3): status check
+                    if order["status"] != ORDER_STATUS_PENDING:
+                        await event.answer("❌ این فاکتور قابل پرداخت نیست.", alert=True)
+                        return
                     import os as _os
                     panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
-                    cb = f"{panel_url}/api/payment/zibal/callback" if panel_url else "https://panel.cianet.ir/api/payment/zibal/callback"
+                    if not panel_url:
+                        await event.answer(
+                            "❌ پنل وب تنظیم نشده. لطفاً با پشتیبانی تماس بگیرید "
+                            "یا از روش پرداخت دیگه‌ای استفاده کنید.",
+                            alert=True,
+                        )
+                        return
+                    cb = f"{panel_url}/api/payment/zibal/callback"
                     result = create_zibal_payment(oid, cb)
                     if result.get("ok"):
                         await self._respond_safe(event,
@@ -18148,7 +18193,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.20"
+BUILD_VERSION = "2026-10-05-v2.12.21"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -23503,7 +23548,10 @@ class SelfBot:
                 if not self.enabled:
                     await event.edit("❌ ابتدا `سلف روشن` بزنید")
                     return
-                self.time_enabled = False  # v2.12.5: default off
+                # v2.12.21 (QA7-USER8 BUG#1): قبلاً False ست می‌شد که یه باگِ
+                # v2.12.5 بود — _name_loop بعد از یک آپدیت exit می‌کرد. حالا
+                # درست True ست می‌شه.
+                self.time_enabled = True
                 await self._start_time_loops()
                 self._persist(time_enabled=True)
                 sample = apply_font("12:34", self.current_font)
@@ -23550,7 +23598,8 @@ class SelfBot:
                         self.base_bio = full.full_user.about or ""
                     except Exception:
                         pass
-                self.bio_enabled = False  # v2.12.5: default off
+                # v2.12.21 (QA7-USER8 BUG#2): قبلاً False ست می‌شد — باگِ v2.12.5
+                self.bio_enabled = True
                 await self._start_bio_loop()
                 self._persist(bio_enabled=True, base_bio=self.base_bio)
                 sample = apply_font("12:34", self.current_font)
@@ -24210,11 +24259,13 @@ class SelfBot:
             #   5. فقط در chat خودِ کاربر (is_private) کار کنه
             #   6. delay تصادفی ۱-۳ ثانیه
             elif text in ("ارسال به پیوی", "ارسال به گروه", "ارسال به pv", "ارسال به gp"):
-                # فقط در PV خودِ کاربر (Saved Messages یا PV با خودش) کار کنه.
-                # این دستور در گروه‌ها نباید کار کنه چون متنِ دستور رو بقیه
-                # می‌بینن.
-                if not getattr(event, "is_private", False):
-                    await event.edit("ℹ️ این دستور فقط در پیوی خودت (Saved Messages) کار می‌کنه.")
+                # v2.12.21 (QA7-USER7): فقط در Saved Messages (chat با خود)
+                # کار کنه. قبلاً is_private چک می‌شد که شامل PV با هر کس
+                # می‌شد — یعنی کاربر می‌تونست تو PV یه دوست دستور رو بزنه و
+                # اون دوست هم متنِ دستور و آمار نهایی رو می‌دید. حالا فقط
+                # در Saved Messages (self.my_id) مجاز هست.
+                if event.chat_id != self.my_id:
+                    await event.edit("ℹ️ این دستور فقط در Saved Messages (پیوی خودت) کار می‌کنه.")
                     return
                 if not event.is_reply:
                     await event.edit("ℹ️ روی پیام مدنظر ریپلای کن و بنویس:\n• `ارسال به پیوی` (همه PV)\n• `ارسال به گروه` (همه گروه‌ها)")
