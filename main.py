@@ -10427,7 +10427,7 @@ class SaaSBot:
             items.append(UI.go("👥 نمایندگی", "user_reseller_info"))
         buttons = self._pair_buttons(items)
         buttons.append(UI.nav_row())
-        await event.edit(
+        await event.respond(
             UI.screen("👤 حساب کاربری", body=body,
                       subtitle="کارهای مربوط به حساب خودت اینجاست."),
             buttons=buttons,
@@ -10679,7 +10679,7 @@ class SaaSBot:
             sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
             sec4.append(UI.go("🌐 پنل وب", "owner_web_panel", tone="success"))
         else:
-            sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True))
+            pass  # v2.12.7: ADMIN has no sec4 buttons
             # PATCH (v2.1.5): دکمه‌ی «🌐 پنل وب» برای دسترسی به web panel.
             # URL از env var PANEL_URL خوانده می‌شه (مثلاً https://panel.cianet.ir
             # یا http://localhost:8000). اگه تنظیم نشه، یه message راهنما نشون
@@ -10856,7 +10856,7 @@ class SaaSBot:
                                    "dedicated_pay:wallet", tone="success")])
         buttons.append([UI.go("💳 پرداخت با کارت", "dedicated_pay:card")])
         buttons.append(UI.nav_row())
-        await event.edit(
+        await event.respond(
             UI.screen("🤖 ربات اختصاصی", body=body,
                       subtitle="ربات اختصاصی با توکن خودت."),
             buttons=buttons,
@@ -10893,7 +10893,7 @@ class SaaSBot:
                     return
             await self._clear_admin_panel_wizard(uid)
             self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
-            await event.edit(
+            await event.respond(
                 "✅ **پرداخت موفق!**\n\n"
                 f"💰 موجودی جدید: {fa_digits(pay_result['balance'])} Toman\n\n"
                 "🤖 حالا توکن رباتت رو بفرست:\n"
@@ -11049,7 +11049,7 @@ class SaaSBot:
             f"{UI.GRAY} پس از بررسی توسط تیم، نتیجه به شما اطلاع داده می‌شود.",
             f"{UI.GRAY} معمولاً کمتر از ۲۴ ساعت طول می‌کشد.",
         ]
-        await event.edit(
+        await event.respond(
             UI.screen("✋ درخواست ثبت شد", body=body,
                      subtitle="منتظر تأیید تیم CiaNet باشید"),
             buttons=[[UI.go("🏠 منوی اصلی", NAV_HOME)]],
