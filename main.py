@@ -6877,12 +6877,24 @@ class AdminBot:
                 UI.go(f"⚡ قابلیت‌ها ({on_count})", f"feat:{tag}"),
                 UI.go("🎨 ظاهر و پروفایل", f"appear:{tag}"),
             ],
-            [
+        ]
+        # v2.12.14 (USER-REQUEST): دکمه‌ی «📨 ارسال پیام» فقط برای
+        # OWNER/ADMIN نشون داده بشه. کاربرِ معمولی فقط باید قابلیت‌ها/
+        # ظاهر/اتصال/وضعیت/توقف/حذف رو ببینه — ابزارِ ارسالِ پیام از طرفِ
+        # اکانت، یه قابلیتِ مدیریتیه و برای کاربر عادی مفید نیست.
+        # _role در SaaSBot تعریف شده (AdminBot مستقلیم doesn't have it)،
+        # پس از self.saas استفاده می‌کنیم.
+        _saas_ref = getattr(self, "saas", None)
+        _viewer_role = _saas_ref._role(event.sender_id) if _saas_ref else None
+        _can_send_msg = _viewer_role in (ROLE_OWNER, ROLE_ADMIN) if _viewer_role else True
+        if _can_send_msg:
+            buttons.append([
                 UI.go("📨 ارسال پیام", f"send_msg:{tag}"),
                 UI.go("🌐 اتصال و پروکسی", f"conn:{tag}"),
-            ],
-            [UI.go("📊 دیدن وضعیت کامل", f"status:{tag}")],
-        ]
+            ])
+        else:
+            buttons.append([UI.go("🌐 اتصال و پروکسی", f"conn:{tag}")])
+        buttons.append([UI.go("📊 دیدن وضعیت کامل", f"status:{tag}")])
         # عملیاتِ حالت‌دار: سبز برای روشن‌کردن، خاکستری برای توقفِ موقت،
         # قرمز فقط برای حذفِ برگشت‌ناپذیر — تا رنگ‌ها با شدتِ عمل بخوانند.
         if disabled:
@@ -9543,6 +9555,14 @@ class AdminBot:
                 tag = data.split(":", 1)[1]
                 await self._start_edit_name_wizard(event, tag)
             elif data.startswith("send_msg:"):
+                # v2.12.14 (USER-REQUEST): ارسال پیام فقط برای OWNER/ADMIN.
+                # دکمه در _show_account_detail برای کاربر عادی پنهان شده، ولی
+                # اگه کاربر عادی با callback دستی تلاش کنه، اینجا هم reject میشه.
+                _saas_ref = getattr(self, "saas", None)
+                _vr = _saas_ref._role(event.sender_id) if _saas_ref else None
+                if _vr and _vr not in (ROLE_OWNER, ROLE_ADMIN):
+                    await event.answer("⛔ این قابلیت فقط برای مدیران قابل‌استفاده است.", alert=True)
+                    return True
                 tag = data.split(":", 1)[1]
                 await self._start_send_msg_wizard(event, tag)
             elif data == "send_target_me":
@@ -18108,7 +18128,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.13"
+BUILD_VERSION = "2026-10-05-v2.12.14"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
