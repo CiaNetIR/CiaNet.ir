@@ -6470,6 +6470,12 @@ NAV_ACTION_PREFIXES = (
     # بستنِ نشست‌ها عمل است و خودش فهرست را دوباره رندر می‌کند
     "sessterm:", "sesskill:", "sesstog:", "codeget:", "codearm:",
     "tfago:", "tfacancel:", "login_guard:",  # v2.12.24
+    # PATCH (USER-REPORT v2.14.3): تأیید/انصرافِ Anti-Ban «عمل» است نه «صفحه» —
+    # توکنِ آن یک‌بارمصرف است (uuid)؛ push شدنش در پشته‌ی ناوبری ورودیِ
+    # مُرده می‌ساخت: «بازگشت» به آن برمی‌گشت، توکن مصرف‌شده فقط alertِ
+    # «منقضی شده» می‌داد و صفحه‌ای رندر نمی‌شد — دکمه‌ی بازگشت از دیدِ
+    # کاربر «کار نمی‌کرد» و باید چندبار پشتِ‌سرهم می‌زد.
+    "abok:", "abno:",
     # اعطا/سلبِ مجوز عمل است؛ صفحه‌ی کاربر را دوباره رندر می‌کنند.
     "cap_grant:", "cap_revoke:", "dbcap_grant:", "dbcap_revoke:",
     # TEST-G4-PAYMENT: عملیات‌های جدید که اکشن هستند (re-render، نه نویگیت).
@@ -8132,7 +8138,11 @@ class AdminBot:
             # فقط در لاگِ سرور — هرگز به کاربر نمی‌رود.
             print(f"⚠️ [tfa:{tag}] خواندن 2FA شکست خورد: {err_code} "
                   f"({st.get('error_ident', '?')}) actor={event.sender_id}")
-            await self._respond_safe(
+            await self._edit_safe(
+                # PATCH (USER-REPORT v2.14.3): این صفحه — مثلِ بقیه‌ی صفحاتِ پنل —
+                # درجا ویرایش می‌شود (نه پیامِ جدید برای هر تعامل). قبلاً هر
+                # بازدید/بروزرسانی/بازگشت، کلِ صفحه را به‌صورت پیامِ جدید
+                # می‌فرستاد و چت زیرِ پیام‌هایِ تکراری دفن می‌شد.
                 event,
                 UI.screen("🔐 رمز دو مرحله‌ای", body=body,
                           subtitle=f"«{tag}»",
@@ -8147,7 +8157,7 @@ class AdminBot:
             body.append(f"{UI.GRAY} رمز دو مرحله‌ای روی این اکانت فعال نیست.")
             if st["email_pattern"]:
                 body.append(f"{UI.AMBER} یک ایمیل در انتظارِ تأیید است: {st['email_pattern']}")
-            await self._respond_safe(
+            await self._edit_safe(
                 event,
                 UI.screen(f"🔐 رمز دو مرحله‌ای", body=body,
                           subtitle=f"«{tag}» · {phone_hint}"),
@@ -8191,7 +8201,9 @@ class AdminBot:
                     UI.SEP,
                     f"{UI.AMBER} بازنشانی در جریان است",
                     f"{UI.GRAY} پایانِ انتظار: {st.get('pending_reset_date_local') or self._until_text(pending)}",
-                    f"{UI.GRAY} {self._until_text(pending)} دیگر.",
+                    # PATCH (USER-REPORT v2.14.3): «دیگر» تکراری — خودِ _until_text
+                    # همیشه با «دیگر» تمام می‌شود؛ پس اینجا فقط نقطه.
+                    f"{UI.GRAY} {self._until_text(pending)}.",
                     "بعد از آن «ادامه‌ی بازنشانی» را بزن تا رمز حذف شود.",
                 ]
             antiban_mark2 = ""
@@ -8221,7 +8233,7 @@ class AdminBot:
         buttons.append([UI.refresh(f"tfa:{tag}")])
         buttons.append(UI.nav_row())
 
-        await self._respond_safe(
+        await self._edit_safe(
             event,
             UI.screen(f"🔐 رمز دو مرحله‌ای", body=body,
                       subtitle=f"«{tag}» · {phone_hint}",
@@ -8249,27 +8261,71 @@ class AdminBot:
             await self._show_2fa(event, tag, flash="رمزی برای بازنشانی وجود ندارد.")
             return
         pending = st.get("ok") and st.get("pending_reset_at")
+        # PATCH (USER-REPORT v2.14.3): pending_reset_date تا وقتی بازنشانی
+        # نهایی/لغو نشده ست می‌ماند — حتی بعد از پایانِ دوره‌ی ۷ روزه. قبلاً
+        # هر دو حالت یکسان رفتار می‌کردند (redirect به صفحه‌ی وضعیت) که دو
+        # باگ می‌ساخت:
+        #   ۱) در طولِ انتظار، هر کلیکِ «ادامه‌ی بازنشانی» همان صفحه را
+        #      دوباره می‌فرستاد + مسیرِ tfareset در پشته‌ی ناوبری می‌ماند →
+        #      «بازگشت» به تعدادِ کلیک‌ها همین صفحه را تکرار می‌فرستاد.
+        #   ۲) بعد از پایانِ انتظار، هیچ راهی برای نهایی‌کردنِ حذفِ رمز
+        #      باقی نمی‌ماند — با اینکه صفحه‌ی وضعیت قولِ «بعد از آن
+        #      ادامه‌ی بازنشانی را بزن تا رمز حذف شود» می‌دهد.
+        # حالا: انتظارِ فعال → فقط پاسخِ کوتاه + تمیزکاریِ پشته؛
+        # انتظارِ تمام‌شده → صفحه‌ی تأییدِ نهایی (ادامه → حذفِ واقعی).
         if pending:
-            # از قبل در جریان است — مستقیم به صفحه‌ی وضعیت می‌رویم.
-            await self._show_2fa(event, tag)
-            return
+            try:
+                _sec_left = (pending - datetime.now(timezone.utc)).total_seconds()
+            except Exception:
+                _sec_left = 0
+            if _sec_left > 0:
+                # انتظارِ فعال — هنوز کاری از دستِ کاربر برنمی‌آید. مسیرِ
+                # tfareset که روتر موقعِ همین کلیک push کرده بود، مثلِ
+                # NAV_BACK از پشته برداشته می‌شود تا «بازگشت» قدمِ اضافه
+                # نخورد؛ کاربر فقط یک پاسخِ کوتاه می‌گیرد.
+                self.nav.pop(event.sender_id)
+                try:
+                    await event.answer(
+                        "⏳ زمانِ انتظار هنوز تمام نشده — "
+                        f"{self._until_text(pending)} صبر کن و بعد دوباره «ادامه‌ی بازنشانی» را بزن.",
+                        alert=True)
+                except Exception:
+                    pass
+                return
+            # انتظار تمام شده — به صفحه‌ی تأییدِ نهایی می‌رویم (fall through)
+            # تا با «ادامه» رمز واقعاً حذف شود (ResetPasswordRequest دوم →
+            # ResetPasswordOk).
 
+        # ── متنِ صفحه‌ی تأیید: دو حالت ──
+        #   شروعِ تازه (pending=None) یا نهایی‌کردن بعد از پایانِ انتظار.
+        if pending:
+            body = [
+                "انتظارِ دوره‌ی بازنشانی به پایان رسیده است.",
+                f"{UI.GREEN} با تأیید، رمز دو مرحله‌ای همین حالا برای همیشه حذف می‌شود.",
+                "",
+                f"{UI.GRAY} • ایمیلِ بازیابی هم بی‌اثر می‌شود.",
+                f"{UI.AMBER} این عملیات برگشت‌پذیر نیست.",
+            ]
+            go_label = "بله، رمز را حذف کن"
+        else:
+            body = [
+                "با تأیید این درخواست:",
+                f"{UI.GRAY} • تلگرام یک دوره‌ی انتظار شروع می‌کند (معمولاً تا ۷ روز).",
+                f"{UI.GRAY} • بعد از پایانِ انتظار، رمز کاملاً حذف می‌شود — نه زودتر.",
+                f"{UI.GRAY} • ایمیلِ بازیابی هم بی‌اثر می‌شود.",
+                "",
+                f"{UI.AMBER} تا پایانِ انتظار، رمز همچنان فعال است و اکانت کار می‌کند.",
+                f"{UI.GREEN} هر وقت خواستی می‌توانی درخواست را لغو کنی.",
+            ]
+            go_label = "بله، بازنشانی را شروع کن"
         await self._respond_safe(
             event,
             UI.screen(
                 "⚠️ بازنشانی رمز دو مرحله‌ای",
-                body=[
-                    "با تأیید این درخواست:",
-                    f"{UI.GRAY} • تلگرام یک دوره‌ی انتظار شروع می‌کند (معمولاً تا ۷ روز).",
-                    f"{UI.GRAY} • بعد از پایانِ انتظار، رمز کاملاً حذف می‌شود — نه زودتر.",
-                    f"{UI.GRAY} • ایمیلِ بازیابی هم بی‌اثر می‌شود.",
-                    "",
-                    f"{UI.AMBER} تا پایانِ انتظار، رمز همچنان فعال است و اکانت کار می‌کند.",
-                    f"{UI.GREEN} هر وقت خواستی می‌توانی درخواست را لغو کنی.",
-                ],
+                body=body,
                 hint="این درخواست فقط با تأیید شما ثبت می‌شود."),
             buttons=[
-                [UI.danger("بله، بازنشانی را شروع کن", f"tfago:{tag}")],
+                [UI.danger(go_label, f"tfago:{tag}")],
                 [UI.neutral("انصراف", f"tfa:{tag}")],
             ],
         )
@@ -9411,6 +9467,13 @@ class AdminBot:
         for_user = (wiz or {}).get("data", {}).get("for_user_id") if wiz else None
         add_back = (wiz or {}).get("data", {}).get("add_back") if wiz else None
         saas = getattr(self, "saas", None)
+        # PATCH (USER-REPORT v2.14.3): ویزاردهای 2FA (تغییر/حذف رمز، تغییر
+        # ایمیل) مقصدِ بازگشتِ صریح دارند («back»: tfa:TAG) ولی این مقدار
+        # هیچ‌جا خوانده نمی‌شد — بعد از لغو، کلِ منوی اصلیِ پنل به‌صورتِ
+        # پیامِ جدید فرستاده می‌شد و کاربر جای خودش را گم می‌کرد. حالا
+        # همان صفحه‌ی مقصد دوباره رندر می‌شود تا کاربر همان‌جا که بود
+        # ادامه بدهد.
+        back_route = ((wiz or {}).get("data") or {}).get("back") if wiz else None
         if for_user and add_back and saas is not None:
             if notify_event is not None:
                 try:
@@ -9430,6 +9493,28 @@ class AdminBot:
                     "❌ لغو شد.",
                     buttons=[UI.nav_row(back=False)],
                 )
+            elif back_route:
+                try:
+                    await notify_event.answer("❌ لغو شد.")
+                except Exception:
+                    pass
+                # مسیرِ ویزارد (tfachange/tfaremove/tfaemail) که روتر موقعِ
+                # شروعِ ویزارد روی پشته گذاشته بود، مثلِ NAV_BACK از پشته
+                # برداشته می‌شود تا «بازگشت» بعدی قدمِ اضافه نخورد.
+                _cur = self.nav.current(notify_event.sender_id) or ""
+                if _cur.startswith(("tfachange:", "tfaremove:", "tfaemail:")):
+                    self.nav.pop(notify_event.sender_id)
+                router = getattr(saas, "_router", None) if saas is not None else None
+                if router is not None:
+                    # dispatch از ابتدا — همه‌ی گاردهای مالکیت/نقش مثلِ کلیکِ
+                    # مستقیم اجرا می‌شوند (همان الگوی NAV_BACK و _nav_heal).
+                    await router(notify_event, _route=back_route, _depth=1)
+                else:
+                    # حالت standalone: پیامِ کوتاهِ لغو + دکمه‌ی بازگشت به مقصد.
+                    await notify_event.edit(
+                        "❌ لغو شد.",
+                        buttons=[[UI.neutral(UI.L_BACK, back_route)]],
+                    )
             else:
                 await notify_event.edit("❌ لغو شد.")
                 await self._show_main_menu(notify_event.chat_id)
@@ -9438,6 +9523,13 @@ class AdminBot:
                 await self.client.send_message(
                     chat, "❌ لغو شد.",
                     buttons=[UI.nav_row(back=False)],
+                )
+            elif back_route:
+                # اینجا event نداریم (لغو با متن «لغو»)؛ پس فقط پیامِ کوتاه +
+                # دکمه‌ی بازگشت به صفحه‌ی مقصد — نه منوی کامل.
+                await self.client.send_message(
+                    chat, "❌ لغو شد.",
+                    buttons=[[UI.neutral(UI.L_BACK, back_route)]],
                 )
             else:
                 await self.client.send_message(chat, "❌ لغو شد.")
@@ -20868,7 +20960,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.14.2"
+BUILD_VERSION = "2026-10-06-v2.14.3"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
