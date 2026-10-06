@@ -95,6 +95,13 @@ def _main():
     return _main_mod
 
 
+# PATCH (TEST-G9-ANALYTICS FIX-F): track panel startup time so /api/health
+# can report real uptime. Without this, /api/health always said "ok"
+# regardless of whether the DB was reachable or accounts were running —
+# a silent no-op for monitoring.
+_PANEL_START_TIME = time.time()
+
+
 # ─── Configuration ────────────────────────────────────────────────────
 PANEL_ADMIN_USER = os.environ.get("PANEL_ADMIN_USER", "admin").strip()
 # bcrypt hash. برای تولید: python3 -c "from passlib.hash import bcrypt; print(bcrypt.hash('secret'))"
@@ -545,29 +552,36 @@ async def dashboard(request: Request, _: None = Depends(require_auth)):
             open_tickets = c.execute(
                 "SELECT COUNT(*) FROM tickets WHERE status='open'"
             ).fetchone()[0]
-            # PATCH (v2.1.5): table‌های saas.db به این شکل هستند:
-            #   purchases (amount, status, approved_at, created_at)
-            #   tickets (status: open/closed)
-            # قبلاً amount_toman و paid_at استفاده می‌شد که وجود ندارن.
-            # MRR rough estimate: sum از همه‌ی purchases با status='approved'
+            # PATCH (TEST-G9-ANALYTICS FIX-A): جدولِ saas.db واقعاً `payments`
+            # است (نه `purchases` که فقط تو bot_data.db وجود داره). ستون‌ها:
+            #   payments (amount, status, reviewed_at, created_at)
+            # قبلاً `purchases.approved_at` استفاده می‌شد که در saas.db وجود
+            # نداشت → هر بار `/api/dashboard` با OperationalError: no such
+            # table: purchases می‌افتاد و کل داشبورد از کار می‌افتاد.
+            # MRR rough estimate: sum از همه‌ی payments با status='approved'
             mrr_row = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases WHERE status='approved'"
+                "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='approved'"
             ).fetchone()
             mrr = mrr_row[0] if mrr_row else 0
             # revenue 30d
             rev_30d = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases "
-                "WHERE status='approved' AND (approved_at IS NOT NULL AND approved_at >= date('now','-30 days'))"
+                "SELECT COALESCE(SUM(amount),0) FROM payments "
+                "WHERE status='approved' AND (reviewed_at IS NOT NULL AND reviewed_at >= date('now','-30 days'))"
             ).fetchone()[0]
             # 30-day chart (simple daily revenue)
             daily_rev = c.execute(
-                "SELECT date(approved_at) as d, SUM(amount) as v FROM purchases "
-                "WHERE status='approved' AND approved_at IS NOT NULL "
-                "AND approved_at >= date('now','-30 days') "
-                "GROUP BY date(approved_at) ORDER BY d"
+                "SELECT date(reviewed_at) as d, SUM(amount) as v FROM payments "
+                "WHERE status='approved' AND reviewed_at IS NOT NULL "
+                "AND reviewed_at >= date('now','-30 days') "
+                "GROUP BY date(reviewed_at) ORDER BY d"
             ).fetchall()
+    except sqlite3.OperationalError as e:
+        # PATCH (TEST-G9-ANALYTICS FIX-A): don't leak DB schema to client
+        print(f"❌ [dashboard] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
     except Exception as e:
-        return {"error": f"DB: {e}"}
+        print(f"❌ [dashboard] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای سمت سرور — با پشتیبانی تماس بگیرید.")
 
     return {
         "accounts": {
@@ -1099,28 +1113,36 @@ async def finance_stats(request: Request, _: None = Depends(require_auth)):
     m = _main()
     try:
         with m._conn() as c:
-            # PATCH (v2.1.5): amount (نه amount_toman)، approved_at (نه paid_at)
+            # PATCH (TEST-G9-ANALYTICS FIX-B): جدولِ واقعیِ saas.db `payments`
+            # است (نه `purchases` که فقط تو bot_data.db هست). ستونِ تاریخِ
+            # تایید `reviewed_at` نام دارد (نه `approved_at`). قبلاً هر فراخوانی
+            # با OperationalError: no such table: purchases می‌افتاد.
             mrr = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases WHERE status='approved'"
+                "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='approved'"
             ).fetchone()[0]
             rev_30d = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases "
-                "WHERE status='approved' AND approved_at IS NOT NULL "
-                "AND approved_at >= date('now','-30 days')"
+                "SELECT COALESCE(SUM(amount),0) FROM payments "
+                "WHERE status='approved' AND reviewed_at IS NOT NULL "
+                "AND reviewed_at >= date('now','-30 days')"
             ).fetchone()[0]
             daily = c.execute(
-                "SELECT date(approved_at) as d, SUM(amount) as v FROM purchases "
-                "WHERE status='approved' AND approved_at IS NOT NULL "
-                "AND approved_at >= date('now','-30 days') "
-                "GROUP BY date(approved_at) ORDER BY d"
+                "SELECT date(reviewed_at) as d, SUM(amount) as v FROM payments "
+                "WHERE status='approved' AND reviewed_at IS NOT NULL "
+                "AND reviewed_at >= date('now','-30 days') "
+                "GROUP BY date(reviewed_at) ORDER BY d"
             ).fetchall()
             return {
                 "mrr_total_toman": mrr,
                 "revenue_30d_toman": rev_30d,
                 "daily": [{"date": r["d"], "amount": r["v"]} for r in daily],
             }
+    except sqlite3.OperationalError as e:
+        # PATCH (TEST-G9-ANALYTICS FIX-B): don't leak DB schema to client
+        print(f"❌ [finance_stats] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
     except Exception as e:
-        return {"error": str(e)}
+        print(f"❌ [finance_stats] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای سمت سرور — با پشتیبانی تماس بگیرید.")
 
 
 # ─── Tickets ─────────────────────────────────────────────────────────
@@ -1216,6 +1238,10 @@ async def audit_log(
     _: None = Depends(require_auth),
 ):
     m = _main()
+    # PATCH (TEST-G9-ANALYTICS FIX-C): clamp page_size to prevent DoS
+    # (a client could pass page_size=10_000_000 to dump all rows at once).
+    page_size = max(1, min(int(page_size), 500))
+    page = max(1, int(page))
     where = []
     params = []
     if actor_id:
@@ -1225,7 +1251,7 @@ async def audit_log(
         where.append("action LIKE ?")
         params.append(f"%{action}%")
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-    offset = (max(1, page) - 1) * page_size
+    offset = (page - 1) * page_size
     try:
         with m._conn() as c:
             # جدول logs وجود نداشت → table info
@@ -1237,11 +1263,17 @@ async def audit_log(
                     f"SELECT * FROM logs {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
                     params + [page_size, offset],
                 ).fetchall()
-                return {"items": [dict(r) for r in rows], "total": total}
-            except sqlite3.OperationalError:
-                return {"items": [], "total": 0, "error": "logs table not found"}
+                return {"items": [dict(r) for r in rows], "total": total,
+                        "page": page, "page_size": page_size}
+            except sqlite3.OperationalError as e:
+                # PATCH (TEST-G9-ANALYTICS FIX-C): log server-side, generic msg
+                print(f"❌ [audit_log] OperationalError: {e}")
+                return {"items": [], "total": 0, "page": page, "page_size": page_size,
+                        "error": "logs table not found"}
     except Exception as e:
-        return {"items": [], "total": 0, "error": str(e)}
+        print(f"❌ [audit_log] error: {type(e).__name__}: {e}")
+        # PATCH (TEST-G9-ANALYTICS FIX-C): don't leak DB details to client
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 # ─── Version management ──────────────────────────────────────────────
@@ -1813,7 +1845,38 @@ async def admin_debit_user_wallet(user_id: int, req: WalletDebitRequest,
 # ─── Health check (public) ───────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "time": time.time()}
+    # PATCH (TEST-G9-ANALYTICS FIX-F): قبلاً فقط {"status":"ok","time":...}
+    # برمی‌گرداند — بی‌توجه به وضعیت واقعیِ DB یا ربات‌های در حال اجرا.
+    # حالا DB ping + نسخه + uptime + تعداد ربات‌های فعال رو گزارش می‌دهد.
+    # public می‌ماند (بدون auth) ولی اطلاعات حساسی نشون داده نمیشه.
+    info = {
+        "status": "ok",
+        "time": time.time(),
+        "uptime_seconds": round(time.time() - _PANEL_START_TIME, 1),
+    }
+    try:
+        m = _main()
+        with m._conn() as c:
+            c.execute("SELECT 1").fetchone()  # DB ping
+        info["db"] = "ok"
+        info["version"] = getattr(m, "BUILD_VERSION", None)
+        try:
+            cfg = m.load_config() or {}
+            info["accounts_total"] = len(cfg)
+            info["accounts_enabled"] = sum(
+                1 for a in cfg.values()
+                if isinstance(a, dict) and not a.get("disabled")
+            )
+            info["accounts_running"] = len(getattr(m, "ACCOUNTS", {}))
+        except Exception:
+            # config load failure shouldn't fail /api/health entirely
+            info["accounts_total"] = None
+            info["accounts_running"] = None
+    except Exception as e:
+        info["status"] = "degraded"
+        info["db"] = "error"
+        print(f"❌ [health] DB ping failed: {type(e).__name__}: {e}")
+    return info
 
 
 # v2.9.4: محاسبه‌ی روزهای باقی‌مانده از اشتراک
@@ -1918,19 +1981,37 @@ async def analytics_audit_log(request: Request, limit: int = 100, offset: int = 
                               action: str = None, _: None = Depends(require_auth)):
     """لاگ فعالیت‌ها با فیلتر و صفحه‌بندی."""
     m = _main()
-    with m._conn() as c:
-        if action:
-            rows = c.execute(
-                "SELECT * FROM logs WHERE action = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-                (action, limit, offset)
-            ).fetchall()
-            total = c.execute("SELECT COUNT(*) FROM logs WHERE action = ?", (action,)).fetchone()[0]
-        else:
-            rows = c.execute(
-                "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset)
-            ).fetchall()
-            total = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+    # PATCH (TEST-G9-ANALYTICS FIX-D): clamp limit/offset to prevent DoS
+    # (negative limit would mean "no limit" in SQLite — return ALL rows).
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    try:
+        with m._conn() as c:
+            # PATCH (TEST-G9-ANALYTICS FIX-D): use `action LIKE ?` (substring
+            # match) for consistency with `/api/audit-log` (which uses LIKE).
+            # Previously `action = ?` meant exact match — a UI typo or partial
+            # action name returned 0 results, surprising the user.
+            if action:
+                rows = c.execute(
+                    "SELECT * FROM logs WHERE action LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (f"%{action}%", limit, offset)
+                ).fetchall()
+                total = c.execute("SELECT COUNT(*) FROM logs WHERE action LIKE ?",
+                                  (f"%{action}%",)).fetchone()[0]
+            else:
+                rows = c.execute(
+                    "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset)
+                ).fetchall()
+                total = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+    except sqlite3.OperationalError as e:
+        # PATCH (TEST-G9-ANALYTICS FIX-D): defensive like `/api/audit-log`
+        print(f"❌ [analytics_audit_log] OperationalError: {e}")
+        return {"logs": [], "total": 0, "limit": limit, "offset": offset,
+                "error": "logs table not found"}
+    except Exception as e:
+        print(f"❌ [analytics_audit_log] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
     return {
         "logs": [
             {
@@ -1948,25 +2029,85 @@ async def analytics_audit_log(request: Request, limit: int = 100, offset: int = 
     }
 
 @app.get("/api/analytics/export")
-async def analytics_export(request: Request, _: None = Depends(require_auth)):
-    """خروجی CSV از درآمد."""
+async def analytics_export(request: Request, format: str = "csv",
+                           _: None = Depends(require_auth)):
+    """خروجی CSV یا JSON از درآمد.
+
+    PATCH (TEST-G9-ANALYTICS FIX-E): قبلاً فقط CSV خروجی می‌داد. حالا
+    پارامتر `format=csv|json` رو هم پشتیبانی می‌کنه. JSON شامل overview
+    stats هم هست (MRR, total_users, active_subscriptions, daily_revenue)
+    تا با توضیحات task «Export CSV/JSON of stats» هماهنگ باشه.
+    """
     import csv, io
-    from fastapi.responses import StreamingResponse
+    import json as _json
+    from fastapi.responses import StreamingResponse, JSONResponse
     m = _main()
-    with m._conn() as c:
-        rows = c.execute(
-            "SELECT order_no, user_id, plan, amount_toman, amount_usdt, status, "
-            "discount_code, discount_percent, pay_method, created_at, paid_at "
-            "FROM orders ORDER BY id DESC LIMIT 10000"
-        ).fetchall()
+    fmt = (format or "csv").strip().lower()
+    if fmt not in ("csv", "json"):
+        raise HTTPException(400, "format باید csv یا json باشد.")
+    try:
+        with m._conn() as c:
+            rows = c.execute(
+                "SELECT order_no, user_id, plan, amount_toman, amount_usdt, status, "
+                "discount_code, discount_percent, pay_method, created_at, paid_at "
+                "FROM orders ORDER BY id DESC LIMIT 10000"
+            ).fetchall()
+            # PATCH (TEST-G9-ANALYTICS FIX-E): also gather overview stats for JSON
+            if fmt == "json":
+                mrr_row = c.execute(
+                    "SELECT COALESCE(SUM(amount_toman),0) FROM orders WHERE status='paid' "
+                    "AND paid_at >= date('now','-30 days')"
+                ).fetchone()
+                total_revenue = c.execute(
+                    "SELECT COALESCE(SUM(amount_toman),0) FROM orders WHERE status='paid'"
+                ).fetchone()[0]
+                total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                active_subs = c.execute(
+                    "SELECT COUNT(*) FROM subscriptions WHERE status='active'"
+                ).fetchone()[0]
+                daily_rev = c.execute(
+                    "SELECT date(paid_at) AS day, SUM(amount_toman) AS rev, COUNT(*) AS cnt "
+                    "FROM orders WHERE status='paid' AND paid_at >= date('now','-30 days') "
+                    "GROUP BY date(paid_at) ORDER BY day"
+                ).fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"❌ [analytics_export] OperationalError: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
+    except Exception as e:
+        print(f"❌ [analytics_export] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای سمت سرور — با پشتیبانی تماس بگیرید.")
+
+    orders = [dict(r) for r in rows]
+
+    if fmt == "json":
+        payload = {
+            "generated_at": time.time(),
+            "overview": {
+                "mrr_30d_toman": int(mrr_row[0] if mrr_row else 0),
+                "total_revenue_toman": int(total_revenue),
+                "total_users": total_users,
+                "active_subscriptions": active_subs,
+                "daily_revenue": [
+                    {"day": r["day"], "revenue": int(r["rev"] or 0), "orders": int(r["cnt"] or 0)}
+                    for r in daily_rev
+                ],
+            },
+            "orders": orders,
+        }
+        return JSONResponse(
+            payload,
+            headers={"Content-Disposition": "attachment; filename=cianet_stats.json"},
+        )
+
+    # CSV path (default)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["order_no", "user_id", "plan", "amount_toman", "amount_usdt",
                      "status", "discount_code", "discount_percent", "pay_method",
                      "created_at", "paid_at"])
-    for r in rows:
+    for r in orders:
         safe_row = []
-        for val in r:
+        for val in r.values():
             s = str(val) if val is not None else ""
             if s.startswith(("=", "+", "-", "@")):
                 s = "'" + s
