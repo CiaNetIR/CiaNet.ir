@@ -194,9 +194,18 @@ def _acquire_lock(timeout: int = 30) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         try:
-            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            # v2.13.4 (UP-MED-4): create lock with 0o600 instead of 0o644 to
+            # prevent local users from rewriting the PID and staging a
+            # permanent DoS of the auto-update path.
+            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
+            # Defense-in-depth: enforce 0o600 even if the file pre-existed
+            # with looser bits and was unlinked/recreated (best-effort).
+            try:
+                os.chmod(str(LOCK_FILE), 0o600)
+            except OSError:
+                pass
             return True
         except FileExistsError:
             # lock قبلاً وجود دارد — چک کن آیا owner هنوز زنده است
@@ -301,15 +310,32 @@ def _verify_min_commit(repo_dir: str, remote_commit: str) -> Tuple[bool, str]:
         return False, f"❌ Supply chain check exception: {type(e).__name__}: {e}"
 
 
-def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]:
+def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object = None) -> Tuple[bool, str]:
     """
     pull + restart. قبلش همه‌ی اکانت‌ها disable می‌شن.
     Returns: (success, message)
+
+    v2.13.4 patches:
+      - UP-HIGH-2: pin `git reset --hard` to the supply-chain-verified SHA
+        instead of `origin/{BRANCH}` to eliminate the verify/reset TOCTOU
+        window. Also collapses the redundant fetches in this function to
+        a single fetch (the one inside get_remote_commit).
+      - UP-MED-3: accept an optional `main_loop` so callers running this
+        sync function in a thread executor can hand the main asyncio loop
+        in. When provided, the disable-accounts hook is scheduled on the
+        main loop via `run_coroutine_threadsafe` (the hook's Telethon
+        coroutines are bound to that loop). Without `main_loop`, fall back
+        to the previous best-effort behaviour but log the failure loudly.
     """
     if repo_dir is None:
         repo_dir = INSTALL_DIR
     if not _acquire_lock():
         return False, "❌ یک update دیگه در حال اجراست"
+
+    # v2.13.4 (UP-HIGH-2): SHA verified by the supply-chain check.
+    # `git reset --hard` will be pinned to this SHA (not origin/BRANCH)
+    # to eliminate the TOCTOU window between verify and reset.
+    verified_commit_sha: Optional[str] = None
 
     try:
         # PATCH (v2.2.0 CRITICAL): fail-closed verification.
@@ -318,44 +344,84 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         # update بدون verify اعمال می‌شد. حالا fail-closed است: اگر
         # CIANET_MIN_COMMIT تنظیم شده باشه و verify شکست بخوره، update
         # رد می‌شه.
+        #
+        # v2.13.4 (UP-HIGH-2): the redundant `git fetch` before
+        # `get_remote_commit` has been removed — `get_remote_commit`
+        # already runs a fetch internally, so the previous double-fetch
+        # just widened the TOCTOU window for no benefit.
         min_commit = os.environ.get("CIANET_MIN_COMMIT", "").strip()
         if min_commit:
             try:
-                subprocess.run(
-                    ["git", "fetch", "origin", BRANCH, "--quiet"],
-                    cwd=repo_dir, capture_output=True, text=True, timeout=30,
-                )
                 remote_commit = get_remote_commit(repo_dir)
                 if not remote_commit:
                     return False, "❌ Cannot fetch remote commit for verification — update refused (fail-closed)"
                 ok, msg = _verify_min_commit(repo_dir, remote_commit)
                 if not ok:
                     return False, msg
+                # Pin the destructive reset to the verified SHA. This is
+                # the SHA actually passed to `git merge-base --is-ancestor`
+                # inside `_verify_min_commit`, so resetting to it is
+                # exactly what was approved.
+                verified_commit_sha = remote_commit
             except subprocess.TimeoutExpired:
                 return False, "❌ git fetch timeout during verification — update refused (fail-closed)"
             except Exception as e:
                 return False, f"❌ Supply chain verification error (fail-closed): {type(e).__name__}: {e}"
 
         # 1. graceful disable همه‌ی اکانت‌ها (اگه event loop فعال نیست)
+        # v2.13.4 (UP-MED-3): this function is typically invoked via
+        # `loop.run_in_executor(None, apply_update)` from main.py, which
+        # runs in a worker thread with no running asyncio loop. The
+        # disable hook (_disable_all_accounts_for_update) calls Telethon
+        # coroutines that are bound to the MAIN loop. The previous code
+        # used `asyncio.run(hook())` from the worker thread, which built
+        # a new loop and failed with "Future attached to a different
+        # loop" — silently swallowed by the broad `except Exception`.
+        # When the caller passes `main_loop`, schedule the hook on it
+        # via `run_coroutine_threadsafe` so the Telethon coroutines run
+        # on their home loop. When `main_loop` is not provided, keep the
+        # legacy best-effort path but log failures explicitly.
+        disable_hook_ok = False
         try:
             import main as _main_mod
             hook = getattr(_main_mod, "_disable_all_accounts_for_update", None)
             # PATCH (v2.2.0): hook حالا در main.py واقعاً تعریف شده.
             if hook is not None:
-                try:
-                    loop = asyncio.get_running_loop()
-                    # event loop فعال است: schedule کن و واقعاً صبر کن
-                    # (با create_task + ۲s sleep، حلقه فرصت اجرا داره)
-                    task = loop.create_task(hook())
-                    # بذار disable تموم شه
-                    time.sleep(2)
-                except RuntimeError:
-                    # event loop نیست: اجرا کن
-                    asyncio.run(hook())
+                if main_loop is not None:
+                    try:
+                        fut = asyncio.run_coroutine_threadsafe(hook(), main_loop)
+                        fut.result(timeout=20)
+                        disable_hook_ok = True
+                    except Exception as e:
+                        log.error(
+                            "disable accounts hook failed on main_loop "
+                            "(continuing — accounts may be killed by SIGTERM "
+                            "during restart): %s: %s", type(e).__name__, e
+                        )
+                else:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # event loop فعال است: schedule کن و واقعاً صبر کن
+                        # (با create_task + ۲s sleep، حلقه فرصت اجرا داره)
+                        task = loop.create_task(hook())
+                        # بذار disable تموم شه
+                        time.sleep(2)
+                        disable_hook_ok = True
+                    except RuntimeError:
+                        # event loop نیست: fallback به asyncio.run (legacy)
+                        try:
+                            asyncio.run(hook())
+                            disable_hook_ok = True
+                        except Exception as e:
+                            log.error(
+                                "disable accounts hook failed in asyncio.run "
+                                "(continuing — accounts may be killed by SIGTERM "
+                                "during restart): %s: %s", type(e).__name__, e
+                            )
         except ImportError:
             pass  # main.py لود نشده (مثلاً در تست)
         except Exception as e:
-            log.warning("disable accounts hook failed (continuing): %s", e)
+            log.warning("disable accounts hook setup failed (continuing): %s", e)
 
         # 2. backup
         backup_path = _backup_main_py(repo_dir)
@@ -388,19 +454,52 @@ def apply_update(repo_dir: str = None, restart: bool = True) -> Tuple[bool, str]
         # حتی اگه local changes یا dubious ownership باشه.
         # PATCH (v2.6.4): git pull می‌تونه به‌خاطر local changes fail کنه.
         # git fetch + reset --hard همیشه کار می‌کنه و مطمئن‌تره.
-        fetch_result = subprocess.run(
-            ["git", "fetch", "origin", BRANCH, "--quiet"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=30,
-        )
-        if fetch_result.returncode != 0:
-            return False, f"❌ git fetch failed:\n{fetch_result.stderr}"
+        #
+        # v2.13.4 (UP-HIGH-2): pin the destructive reset to the SHA that
+        # was actually verified by `_verify_min_commit`. The previous
+        # code re-fetched `origin/{BRANCH}` between verify and reset,
+        # which let a force-push to the upstream branch land a malicious
+        # commit during the verify/reset window. When we have a verified
+        # SHA, the SHA is already present in the local object database
+        # (it was just fetched by get_remote_commit), so no additional
+        # fetch is needed. When verification was skipped (CIANET_MIN_COMMIT
+        # unset), fall back to the legacy origin/{BRANCH} path but do
+        # exactly one fetch.
+        if verified_commit_sha:
+            reset_result = subprocess.run(
+                ["git", "reset", "--hard", verified_commit_sha],
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
+            )
+            if reset_result.returncode != 0:
+                return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
+            # Defense-in-depth: confirm HEAD actually points at the
+            # verified SHA. A misconfigured git config or hook could
+            # otherwise leave us on a different commit.
+            actual_head = get_local_commit(repo_dir)
+            if actual_head and actual_head != verified_commit_sha:
+                log.error(
+                    "post-reset HEAD %s != verified SHA %s — refusing to proceed",
+                    actual_head[:8], verified_commit_sha[:8]
+                )
+                return False, (
+                    f"❌ Supply chain TOCTOU check failed: HEAD after reset "
+                    f"({actual_head[:8]}) != verified SHA ({verified_commit_sha[:8]}). "
+                    f"Update refused — possible repository tampering."
+                )
+        else:
+            fetch_result = subprocess.run(
+                ["git", "fetch", "origin", BRANCH, "--quiet"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
+            )
+            if fetch_result.returncode != 0:
+                return False, f"❌ git fetch failed:\n{fetch_result.stderr}"
 
-        reset_result = subprocess.run(
-            ["git", "reset", "--hard", f"origin/{BRANCH}"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=30,
-        )
-        if reset_result.returncode != 0:
-            return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
+            reset_result = subprocess.run(
+                ["git", "reset", "--hard", f"origin/{BRANCH}"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
+            )
+            if reset_result.returncode != 0:
+                return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
 
         # v2.12.9 CRITICAL (QA-DEBUG C1): پس از reset --hard، فایلِ main.py
         # جدید رو با ast.parse اعتبارسنجی کن. اگه SyntaxError داشت، یعنی

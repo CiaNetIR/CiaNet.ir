@@ -22,6 +22,7 @@ pid-file، بدون لاگِ جدا، بدون ریسکِ زیرپروسسِ ی�
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -38,9 +39,10 @@ import threading
 import time
 import zipfile
 from contextlib import contextmanager
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Dict
 
 from telethon import TelegramClient, events, Button, errors
 from telethon.tl.functions.account import (
@@ -186,6 +188,15 @@ def _spawn_bg(coro, label: str = ""):
 
     task.add_done_callback(_done)
     return task
+
+
+# PATCH (PATCH-5-TELEGRAM / TG-CRIT-1): ارجاعِ قویِ سراسری برای تسکِ
+# auto-update. همِ toggle path (خط 13513 قدیمی) و همِ startup path
+# (خط 26047) باید روی همین یک متغیر بنویسند تا duplicate-guard کار کند.
+# قبلاً toggle از `asyncio.create_task(...)` خام استفاده می‌کرد — نه ارجاعِ
+# قوی (GC risk) و نه duplicate-guard (toggling چند بار N حلقه‌ی while True
+# spawn می‌کرد).
+_AUTO_UPDATE_TASK: Optional[asyncio.Task] = None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1299,18 +1310,98 @@ def _migrate_schema(c) -> None:
         if added:
             print("✅ [saas_db] مهاجرت orders با موفقیت انجام شد — ستون‌های تخفیف اضافه شدند.")
 
-    # v2.10.5: مهاجرت wallet_transactions CHECK
+    # v2.10.5: مهاجرت wallet_transactions CHECK (reseller_credit)
+    # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-6): probe switched from
+    # INSERT(user_id=0, ...) to schema-text check via
+    # _table_check_constraint_text, because the new FK on user_id →
+    # users(user_id) ON DELETE CASCADE would make the INSERT probe fail
+    # with FK violation (user_id=0 not in users), causing the migration
+    # to run on every startup. The schema-text check matches the pattern
+    # used by the subscriptions migration above (line ~1195).
     if "wallet_transactions" in tables:
-        try:
-            c.execute("INSERT INTO wallet_transactions (user_id, amount, balance_after, type, created_at) VALUES (0, 0, 0, 'reseller_credit', 'test')")
-            c.execute("DELETE FROM wallet_transactions WHERE user_id = 0 AND amount = 0")
-        except Exception:
+        _wt_check_sql = _table_check_constraint_text(c, "wallet_transactions")
+        if "reseller_credit" not in _wt_check_sql:
             print("🔧 [saas_db] مهاجرت wallet_transactions: افزودن reseller_credit...")
             c.execute("ALTER TABLE wallet_transactions RENAME TO wallet_transactions_old")
-            c.execute("CREATE TABLE wallet_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, amount INTEGER NOT NULL, balance_after INTEGER NOT NULL, type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund','reseller_credit')), ref TEXT, reason TEXT, created_by INTEGER, created_at TEXT NOT NULL)")
+            # Clean orphaned rows (user_id no longer exists in users, or
+            # user_id=0 leftover from prior probe). Otherwise the FK
+            # INSERT below would fail with FK violation.
+            c.execute(
+                "DELETE FROM wallet_transactions_old "
+                "WHERE user_id NOT IN (SELECT user_id FROM users WHERE user_id IS NOT NULL) "
+                "OR user_id = 0"
+            )
+            c.execute(
+                "CREATE TABLE wallet_transactions ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "user_id INTEGER NOT NULL, "
+                "amount INTEGER NOT NULL, "
+                "balance_after INTEGER NOT NULL, "
+                "type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund','reseller_credit')), "
+                "ref TEXT, reason TEXT, created_by INTEGER, created_at TEXT NOT NULL, "
+                "FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE"
+                ")"
+            )
             c.execute("INSERT INTO wallet_transactions SELECT * FROM wallet_transactions_old")
             c.execute("DROP TABLE wallet_transactions_old")
             print("✅ [saas_db] مهاجرت wallet_transactions انجام شد.")
+
+    # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-6): مهاجرت wallet_transactions FK
+    # — افزودن FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    # برای دیتابیس‌هایی که reseller_credit را دارند ولی FK ندارند (مثلاً
+    # دیتابیس‌های ساخته‌شده بین v2.10.5 و این پچ). دیتابیس‌های تازه از init_db
+    # با FK ساخته می‌شوند و این مهاجرت روی آن‌ها no-op است. وقتی کاربر حذف
+    # می‌شد، رکوردهای wallet_transactions او orphan می‌شدند؛ حالا با CASCADE
+    # خودکار حذف می‌شوند (و delete_user_completely برای belt-and-suspenders
+    # آن‌ها را صریح هم حذف می‌کند).
+    if "wallet_transactions" in tables:
+        _fk_to_users = False
+        for _fk in c.execute("PRAGMA foreign_key_list(wallet_transactions)").fetchall():
+            if _fk["table"] == "users" and _fk["on_delete"] == "CASCADE":
+                _fk_to_users = True
+                break
+        if not _fk_to_users:
+            print("🔧 [saas_db] مهاجرت wallet_transactions: افزودن FK user_id → users(user_id) ON DELETE CASCADE...")
+            c.execute("ALTER TABLE wallet_transactions RENAME TO wallet_transactions_old")
+            # Clean orphaned rows before INSERT — otherwise FK violation
+            # would abort the migration.
+            c.execute(
+                "DELETE FROM wallet_transactions_old "
+                "WHERE user_id NOT IN (SELECT user_id FROM users WHERE user_id IS NOT NULL) "
+                "OR user_id = 0"
+            )
+            c.execute(
+                "CREATE TABLE wallet_transactions ("
+                "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  user_id INTEGER NOT NULL,"
+                "  amount INTEGER NOT NULL,"
+                "  balance_after INTEGER NOT NULL,"
+                "  type TEXT NOT NULL CHECK(type IN ('credit','debit','payment','admin_adjust','refund','reseller_credit')),"
+                "  ref TEXT,"
+                "  reason TEXT,"
+                "  created_by INTEGER,"
+                "  created_at TEXT NOT NULL,"
+                "  FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE"
+                ")"
+            )
+            # explicit column list — preserves column order (AUDIT-3-DB-8 fix)
+            c.execute(
+                "INSERT INTO wallet_transactions (id, user_id, amount, balance_after, type, ref, reason, created_by, created_at) "
+                "SELECT id, user_id, amount, balance_after, type, ref, reason, created_by, created_at "
+                "FROM wallet_transactions_old"
+            )
+            _old_count = c.execute("SELECT COUNT(*) FROM wallet_transactions_old").fetchone()[0]
+            _new_count = c.execute("SELECT COUNT(*) FROM wallet_transactions").fetchone()[0]
+            if _old_count != _new_count:
+                raise RuntimeError(
+                    f"wallet_transactions FK migration: row count mismatch "
+                    f"(old={_old_count}, new={_new_count}) — rolling back"
+                )
+            c.execute("DROP TABLE wallet_transactions_old")
+            # Recreate indexes (dropped along with old table)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_user ON wallet_transactions(user_id, created_at DESC)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_created ON wallet_transactions(created_at DESC)")
+            print("✅ [saas_db] مهاجرت wallet_transactions FK انجام شد.")
 
 
 def init_db() -> None:
@@ -1319,7 +1410,17 @@ def init_db() -> None:
     # ممکن بود.
     with _conn_immediate() as c:
         _migrate_schema(c)
-        c.executescript("""
+        # v2.12.29 (PATCH-3-DB-RACE / AUDIT-3-DB-1): replaced
+        # c.executescript("""...""") with individual c.execute(...) calls.
+        # executescript issues an implicit COMMIT before running the
+        # script (per CPython sqlite3 docs), which broke the outer
+        # _conn_immediate atomicity — _migrate_schema() changes were
+        # already committed before these CREATE TABLEs ran, so a
+        # mid-script failure (disk full, crash between statements)
+        # would leave the DB in a partial state. Each c.execute here
+        # participates in the outer BEGIN IMMEDIATE and rolls back
+        # together if anything fails.
+        c.execute("""
         CREATE TABLE IF NOT EXISTS admins (
             user_id INTEGER PRIMARY KEY,
             role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','RESELLER')),
@@ -1327,7 +1428,9 @@ def init_db() -> None:
             reseller_max_users INTEGER,
             created_at TEXT NOT NULL
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
@@ -1335,7 +1438,9 @@ def init_db() -> None:
             reseller_id INTEGER,
             created_at TEXT NOT NULL
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1348,7 +1453,9 @@ def init_db() -> None:
             warned_24h INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS licenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE NOT NULL,
@@ -1361,7 +1468,9 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             is_active INTEGER DEFAULT 1
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -1373,7 +1482,9 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             reviewed_at TEXT
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_no TEXT UNIQUE NOT NULL,
@@ -1393,9 +1504,15 @@ def init_db() -> None:
             discount_percent INTEGER DEFAULT 0,
             original_amount_toman INTEGER
         );
+        """)
 
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
+        """)
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, expires_at);
+        """)
+        c.execute("""
         -- Replay protection در سطح دیتابیس: هر txid فقط یک‌بار (روی هر فاکتور).
         -- به‌صورت جدا (خارج از executescript) ساخته می‌شود تا اگر دیتابیس
         -- قدیمی تکراری دارد (قبل از این قانون ساخته شده)، استارت‌آپ کرش نکند:
@@ -1409,7 +1526,9 @@ def init_db() -> None:
             unit TEXT,
             created_at TEXT NOT NULL
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS dedicated_bots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             reseller_id INTEGER NOT NULL,
@@ -1423,7 +1542,9 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             reviewed_at TEXT
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS ticket_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticket_id INTEGER NOT NULL,
@@ -1433,7 +1554,9 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             FOREIGN KEY(ticket_id) REFERENCES tickets(id)
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             actor_id INTEGER,
@@ -1441,7 +1564,9 @@ def init_db() -> None:
             details TEXT,
             created_at TEXT NOT NULL
         );
+        """)
 
+        c.execute("""
         -- Operation Journal برای حذف کاربر (دو دیتابیس جدا): ردیف در همان
         -- تراکنشِ اصلیِ حذف ثبت می‌شود و بعد از کامل‌شدنِ همه‌ی مراحل
         -- (bot_data + config) پاک می‌شود. ردیفِ باقی‌مانده = عملیاتِ ناتمام
@@ -1451,18 +1576,24 @@ def init_db() -> None:
             created_at TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'DELETE_PENDING'
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS pricing (
             plan TEXT PRIMARY KEY,
             price_toman INTEGER NOT NULL,
             duration_days INTEGER NOT NULL
         );
+        """)
 
+        c.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         );
+        """)
 
+        c.execute("""
         -- مجوزهای ظرفیتی (capability-based permissions). این جدول لایه‌ی
         -- مجوزِ جدا از نقش است: یک RESELLER صرفاً به‌خاطرِ نماینده‌بودن هیچ
         -- مجوزی نمی‌گیرد — مالکِ اصلی باید صراحتاً اعطا کند. پیش‌فرض DENY
@@ -1486,16 +1617,31 @@ def init_db() -> None:
             expires_at TEXT,
             is_active INTEGER NOT NULL DEFAULT 1
         );
+        """)
 
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_perm_subject ON permission_grants(subject_user_id, capability, is_active);
+        """)
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_perm_scope ON permission_grants(scope_type, scope_id, is_active);
+        """)
 
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_sub_user_status ON subscriptions(user_id, status);
+        """)
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_sub_status_expire ON subscriptions(status, expire_date);
+        """)
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_users_reseller ON users(reseller_id);
+        """)
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_ticket_msgs_ticket ON ticket_messages(ticket_id);
+        """)
+        c.execute("""
         CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
         """)
+
         # Replay protection در سطح دیتابیس (خارج از executescript تا خطای
         # تکراریِ قدیمی استارت‌آپ را کرش نکند): هر txid فقط یک‌بار روی هر
         # فاکتور. اگر دیتابیس قدیمی تکراری دارد، ایندکس یکتا ساخته نمی‌شود
@@ -1831,21 +1977,32 @@ def reseller_max_users(reseller_id: int):
 # ─────────────────────────────────────────────────────
 
 def upsert_user(user_id: int, username: str = None, first_name: str = None, reseller_id: int = None) -> None:
+    """
+    ثبت یا به‌روزرسانیِ یک کاربر در جدول users.
+
+    PATCH (PATCH-8-USERMGMT UM-LOW-6): atomic با INSERT ... ON CONFLICT
+    DO UPDATE. قبلاً SELECT-then-INSERT/UPDATE بود — دو /start هم‌زمان
+    (مثلاً دابل‌کلیکِ سریع یا دو کلاینت هم‌زمان) هر دو SELECT می‌کردند،
+    هیچ کدام row پیدا نمی‌کرد، هر دو INSERT می‌کردند و دومین INSERT با
+    sqlite3.IntegrityError (UNIQUE constraint failed: users.user_id) می‌شکست
+    و exception به /start handler می‌رفت — کاربر هیچ menu‌ای نمی‌دید و
+    attach_referrer هم برایش رد می‌شد. حالا با ON CONFLICT(user_id) DO
+    UPDATE یک عملیاتِ اتمیک و race-free انجام می‌شود: SQLite خودش
+    INSERT یا UPDATE را انتخاب می‌کند و هیچ‌وقت IntegrityError پرتاب
+    نمی‌شود. الگوی COALESCE(excluded.X, users.X) یعنی: «اگر مقدارِ جدید
+    NULL است، مقدارِ قبلی را نگه دار» (تا UPDATE با None، فیلدهای موجود
+    را overwrite نکند).
+    """
     with _conn() as c:
-        existing = c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if existing:
-            c.execute(
-                "UPDATE users SET username = COALESCE(?, username), "
-                "first_name = COALESCE(?, first_name), "
-                "reseller_id = COALESCE(?, reseller_id) WHERE user_id = ?",
-                (username, first_name, reseller_id, user_id),
-            )
-        else:
-            c.execute(
-                "INSERT INTO users (user_id, username, first_name, reseller_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (user_id, username, first_name, reseller_id, _now()),
-            )
+        c.execute(
+            "INSERT INTO users (user_id, username, first_name, reseller_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "username = COALESCE(excluded.username, users.username), "
+            "first_name = COALESCE(excluded.first_name, users.first_name), "
+            "reseller_id = COALESCE(excluded.reseller_id, users.reseller_id)",
+            (user_id, username, first_name, reseller_id, _now()),
+        )
 
 
 def get_user(user_id: int):
@@ -1948,6 +2105,13 @@ def ensure_wallet_schema() -> None:
         except Exception as _e:
             print(f"⚠️ [expiry] add column extensions_applied failed: {_e}")
         # ۲) جدول تراکنش‌ها
+        # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-6): FOREIGN KEY(user_id)
+        # → users(user_id) ON DELETE CASCADE added so wallet_transactions
+        # rows are auto-cleaned when a user is deleted. The docstring
+        # above already claimed this; now it's actually enforced. The
+        # FK is also added to existing DBs via a migration in
+        # _migrate_schema. delete_user_completely also issues an
+        # explicit DELETE for belt-and-suspenders.
         c.execute(
             "CREATE TABLE IF NOT EXISTS wallet_transactions ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -1958,7 +2122,8 @@ def ensure_wallet_schema() -> None:
             "  ref TEXT,"                  # مرجع سفارش/پرداخت (اختیاری)
             "  reason TEXT,"
             "  created_by INTEGER,"
-            "  created_at TEXT NOT NULL"
+            "  created_at TEXT NOT NULL,"
+            "  FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE"
             ")"
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_wallet_user ON wallet_transactions(user_id, created_at DESC)")
@@ -2074,27 +2239,79 @@ def referral_stats(user_id: int) -> dict:
 def claim_referral_rewards(user_id: int) -> int:
     """
     جایزه‌های به‌دست‌آمده ولی دریافت‌نشده را اعمال می‌کند و تعدادشان را
-    برمی‌گرداند. اتمیک: شمارنده‌ی دریافت‌شده‌ها فقط وقتی بالا می‌رود که
-    اشتراک واقعاً ساخته شده باشد.
+    برمی‌گرداند.
+
+    PATCH (PATCH-8-USERMGMT UM-MED-2): atomic با _conn_immediate + UPDATE
+    شرطی. قبلاً خواندنِ referral_stats در یک _conn و UPDATE در یک _connِ
+    جدا بود — دو فراخوانیِ هم‌زمان (مثلاً دو بار باز کردنِ صفحه‌ی
+    دعوت) هر دو همان pending را می‌دیدند و هر دو N اشتراک می‌ساختند و
+    referral_rewards را به 2N افزایش می‌دادند. حالا همه‌چیز در یک
+    تراکنش با قفلِ نوشتن (BEGIN IMMEDIATE) انجام می‌شود: وضعیت خوانده
+    می‌شود، UPDATE شرطی (WHERE referral_rewards = ?) فقط در صورت برابر
+    بودن با مقدارِ خوانده‌شده موفق می‌شود (rowcount=1) و فقط در این
+    صورت اشتراک ساخته می‌شود. به‌جای فراخوانیِ create_subscription که
+    خودش _conn_immediate باز می‌کند و درونِ تراکنشِ ما deadlock
+    می‌داد، ساختِ اشتراک inline در همان تراکنش است (همه‌ی n پاداش
+    به‌صورتِ یک اشتراکِ n×REFERRAL_REWARD_DAYS روزه).
     """
-    st = referral_stats(user_id)
-    n = st["pending"]
-    if n <= 0:
-        return 0
     granted = 0
-    for _ in range(n):
-        try:
-            create_subscription(user_id, "هدیه دعوت", REFERRAL_REWARD_DAYS)
-            granted += 1
-        except Exception as e:
-            print(f"⚠️ [referral] ساخت اشتراک هدیه ناموفق: {type(e).__name__}: {e}")
-            break
-    if granted:
-        with _conn() as c:
+    with _conn_immediate() as c:
+        # ۱) خواندنِ referral_rewards و invited_count (درونِ تراکنش با قفل)
+        row = c.execute(
+            "SELECT referral_rewards, ("
+            "  SELECT COUNT(*) FROM users u2 WHERE u2.referred_by = ?"
+            ") AS invited FROM users WHERE user_id = ?",
+            (user_id, user_id),
+        ).fetchone()
+        if not row:
+            return 0
+        old_rewards = int(row["referral_rewards"] or 0)
+        invited = int(row["invited"] or 0)
+        earned = invited // REFERRAL_GOAL
+        n = max(0, earned - old_rewards)
+        if n <= 0:
+            return 0
+        # ۲) UPDATE شرطی: فقط در صورتی که referral_rewards هنوز همان
+        # مقدارِ خوانده‌شده باشد، اضافه می‌شود. اگر کسی هم‌زمان قبلاً
+        # claim کرده باشد، rowcount=0 و تراکنش rollback می‌شود.
+        cur = c.execute(
+            "UPDATE users SET referral_rewards = referral_rewards + ? "
+            "WHERE user_id = ? AND referral_rewards = ?",
+            (n, user_id, old_rewards),
+        )
+        if cur.rowcount == 0:
+            return 0  # رقابت باخت؛ فراخوانیِ هم‌زمان قبلاً claim کرده
+        # ۳) ساختِ اشتراکِ هدیه inline — در همان تراکنش، به‌جای
+        # فراخوانیِ create_subscription که _conn_immediate خودش را باز
+        # می‌کرد و deadlock می‌داد. همه‌ی n پاداش به‌صورتِ یک اشتراکِ
+        # طولانی‌تر ساخته می‌شود (n × REFERRAL_REWARD_DAYS روز).
+        existing = c.execute(
+            "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' "
+            "ORDER BY expire_date DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        now_utc = datetime.now(timezone.utc)
+        if existing:
+            existing_expire = _parse_date(existing["expire_date"])
+            base = existing_expire if existing_expire > now_utc else now_utc
+        else:
+            base = now_utc
+        start_str = _format_date(now_utc)
+        expire_str = _format_date(base + timedelta(days=n * REFERRAL_REWARD_DAYS))
+        if existing:
+            # UPDATE شرطی: فقط اگر هنوز active است (race-safety اضافی)
             c.execute(
-                "UPDATE users SET referral_rewards = COALESCE(referral_rewards, 0) + ? "
-                "WHERE user_id = ?", (granted, user_id),
+                "UPDATE subscriptions SET status = 'superseded' "
+                "WHERE id = ? AND status = 'active'",
+                (existing["id"],),
             )
+        c.execute(
+            "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, "
+            "license_id, selfbot_tag, created_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, ?)",
+            (user_id, "هدیه دعوت", start_str, expire_str, _now()),
+        )
+        granted = n
+    if granted:
         log_action(user_id, "referral_reward", f"{granted}×{REFERRAL_REWARD_DAYS}d")
     return granted
 
@@ -2171,21 +2388,42 @@ def wallet_credit(user_id: int, amount: int, created_by: int,
     # ولی فقط اگه user_id یکی از مشتری‌های خودش باشه (reseller_id == created_by)
     if actor_role not in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
         return {"error": "permission_denied"}
-    if actor_role == ROLE_RESELLER:
-        # چک کن که آیا user_id یکی از مشتری‌های این نماینده است
-        with _conn() as _check_c:
-            _u = _check_c.execute("SELECT reseller_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if _u is None or _u["reseller_id"] != created_by:
-            return {"error": "permission_denied"}
-        # RESELLER فقط credit می‌تونه بده (نه debit) — برای debit OWNER/ADMIN لازم است
+    # RESELLER فقط credit می‌تونه بده (نه debit) — برای debit OWNER/ADMIN لازم است
+    # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-3): ownership check moved
+    # inside _conn_immediate. Previously the reseller_id check ran in a
+    # separate _conn() (read-only, no lock) and the UPDATE ran in a
+    # different _conn_immediate, so a concurrent reassignment of
+    # users.reseller_id (e.g. activate_license / delete_user_completely)
+    # between the two connections could let a RESELLER credit a wallet
+    # that no longer belongs to them. Now we re-read reseller_id under the
+    # write lock and add `AND reseller_id = ?` to the UPDATE for RESELLER
+    # so the UPDATE fails atomically if ownership changed.
     with _conn_immediate() as c:
-        row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        row = c.execute(
+            "SELECT wallet_balance, reseller_id FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
         if row is None:
             return {"error": "user_not_found"}
+        if actor_role == ROLE_RESELLER and row["reseller_id"] != created_by:
+            # Ownership re-checked under the write lock
+            return {"error": "permission_denied"}
         current = int(row["wallet_balance"] or 0)
         new_balance = current + amount
-        c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?",
-                  (new_balance, user_id))
+        if actor_role == ROLE_RESELLER:
+            # Conditional UPDATE — atomic against reseller_id reassignment
+            cur_upd = c.execute(
+                "UPDATE users SET wallet_balance = ? WHERE user_id = ? AND reseller_id = ?",
+                (new_balance, user_id, created_by),
+            )
+            if cur_upd.rowcount == 0:
+                # reseller_id changed between SELECT and UPDATE — abort
+                return {"error": "permission_denied"}
+        else:
+            c.execute(
+                "UPDATE users SET wallet_balance = ? WHERE user_id = ?",
+                (new_balance, user_id),
+            )
         # v2.8.12: اگه RESELLER شارژ کرده، type = "reseller_credit"
         actual_tx_type = "reseller_credit" if actor_role == ROLE_RESELLER else tx_type
         cur = c.execute(
@@ -2498,13 +2736,56 @@ def auto_renew_subscription(user_id: int) -> dict:
     کیف پول کافی است، خودکار یه اشتراک جدید بساز.
     بازگشت: {"ok": True, "renewed": True/False, "reason": "..."}
 
-    v2.10.0: کل عملیات در یک _conn_immediate برای جلوگیری از race.
+    v2.10.0 (revised v2.12.31 / PATCH-3-DB-RACE / AUDIT-3-DB-2):
+    The original v2.10.0 docstring claimed "کل عملیات در یک
+    _conn_immediate برای جلوگیری از race" but in reality only the
+    initial `already_active` SELECT runs inside `_conn_immediate`
+    (the `with` block exits right after the SELECT). The rest of the
+    flow (last_sub lookup, get_pricing, get_wallet_balance,
+    wallet_pay_from_balance, create_subscription) runs across multiple
+    separate connections with no shared lock.
+
+    The actual atomicity guard against duplicate active subscriptions
+    is `create_subscription`'s own internal BEGIN IMMEDIATE +
+    conditional `UPDATE … WHERE status='active'` (see comment below).
+    The initial `_conn_immediate` here is just a fast-path read-only
+    guard to skip the wallet-debit cycle when a subscription is
+    obviously still active — it is NOT a full atomic lock.
+
     v2.12.21 (QA7-USER6 BUG#3): قبلاً already_active guard فقط status='active'
     رو چک می‌کرد، ولی _expiry_loop قبل از expire_subscription، auto_renew رو
     صدا می‌زنه — یعنی هنوز 'active' هست. حالا expiry-imminent (active با
     expire_date گذشته) هم به‌عنوان «نیاز به تمدید» در نظر گرفته می‌شه.
     """
-    # v2.10.0: atomic lock — دو فراخوانی هم‌زمان نمی‌تونن هر دو succeed کنن
+    # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-2): the v2.10.0 comment
+    # claimed "atomic lock — دو فراخوانی هم‌زمان نمی‌تونن هر دو succeed
+    # کنن" but the `with _conn_immediate()` block below holds the write
+    # lock ONLY for the initial `already_active` SELECT and exits at the
+    # closing `with`. The rest of the flow (last_sub lookup, get_pricing,
+    # get_wallet_balance, wallet_pay_from_balance, create_subscription)
+    # runs across multiple separate connections with no shared lock.
+    #
+    # Two concurrent auto_renew_subscription invocations (e.g., bot
+    # scheduler + web panel "Renew now" button) can both pass the
+    # already_active check. The actual atomicity guard against
+    # duplicate active subscriptions is `create_subscription`'s own
+    # internal BEGIN IMMEDIATE + conditional `UPDATE … WHERE
+    # status='active'` (line ~3381): two concurrent calls are
+    # serialized by that lock; the second one sees the first's new
+    # active sub and supersedes it (rather than creating a duplicate).
+    # This prevents two active subs for the same user, but does NOT
+    # prevent the second caller's `wallet_pay_from_balance` from
+    # succeeding — the user is debited twice but has only one active
+    # sub. In production this is acceptable because auto_renew is
+    # called only from the single-threaded `_expiry_loop` scheduler;
+    # concurrent calls only happen if a user also hits "Renew now" in
+    # the web panel at the exact moment the scheduler fires (a tiny
+    # race window). A full fix would require holding a single
+    # _conn_immediate across the entire flow (read active sub, fetch
+    # last plan, fetch pricing, check balance, deduct balance, and
+    # create subscription) which would require refactoring
+    # get_pricing / wallet_pay_from_balance / create_subscription to
+    # accept a cursor parameter — out of scope for this patch.
     with _conn_immediate() as c:
         # v2.12.21: فقط active با expire_date آینده رو «فعلی» در نظر بگیر.
         # اگه active ولی expire_date گذشته (در حال expire شدن)، نیاز به
@@ -2833,6 +3114,18 @@ async def delete_user_completely(user_id: int) -> bool:
         existing = c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if not existing:
             return False
+        # PATCH (PATCH-8-USERMGMT UM-MED-4): re-check for active subscription
+        # inside the write transaction. _cleanup_long_expired_users در یک
+        # حلقه‌ی for روی expired_user_ids اجرا می‌شود که در ابتدای تابع
+        # SELECT شده‌اند. بین SELECT و DELETEِ این کاربر، ممکن است کاربر
+        # تمدید کرده باشد (پرداخت یا auto-renew) و اشتراکِ فعالِ جدید
+        # ساخته شده باشد. این چکِ درونِ تراکنش، آن رقابت را می‌بندد:
+        # اگر اشتراکِ فعال هست، حذف لغو می‌شود و False برمی‌گردد.
+        if c.execute(
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active'",
+            (user_id,),
+        ).fetchone():
+            return False  # کاربر تمدید کرده — حذف لغو شود
         ticket_ids = [
             r["id"] for r in c.execute(
                 "SELECT id FROM tickets WHERE user_id = ?", (user_id,)
@@ -2844,6 +3137,30 @@ async def delete_user_completely(user_id: int) -> bool:
         c.execute("DELETE FROM payments WHERE user_id = ?", (user_id,))
         c.execute("DELETE FROM orders WHERE user_id = ?", (user_id,))
         c.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+        # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-6): explicit cleanup of
+        # wallet_transactions. The new FK on wallet_transactions(user_id)
+        # → users(user_id) ON DELETE CASCADE auto-deletes these rows when
+        # the users row is deleted, but we also do it explicitly here as
+        # belt-and-suspenders (the FK migration may not have run on every
+        # install yet). Without this, deleted users' wallet history
+        # accumulated as orphans forever.
+        c.execute("DELETE FROM wallet_transactions WHERE user_id = ?", (user_id,))
+        # PATCH (PATCH-8-USERMGMT UM-LOW-5): explicit cleanup of orphan-prone
+        # tables that have no FK with CASCADE on user_id. Without these
+        # DELETEs, rows belonging to the deleted user would remain
+        # orphaned in the database forever (e.g., reseller_applications
+        # staying in 'pending' state forever, scheduled_messages being
+        # inherited if a Telegram user_id is ever reused, discount codes
+        # still consumable after their creator is gone).
+        c.execute("DELETE FROM scheduled_messages WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM auto_replies WHERE user_id = ?", (user_id,))
+        c.execute(
+            "DELETE FROM affiliate_commissions "
+            "WHERE referrer_id = ? OR referred_id = ?",
+            (user_id, user_id),
+        )
+        c.execute("DELETE FROM discount_codes WHERE created_by = ?", (user_id,))
+        c.execute("DELETE FROM reseller_applications WHERE user_id = ?", (user_id,))
         # لایسنس‌های ساخته‌شده توسط این کاربر (مثلاً یک نماینده): حذف می‌شوند
         # تا کدهای مصرف‌نشده‌ی او بعد از حذفِ سازنده همچنان معتبر نمانند
         # (کد یک‌بارمصرفِ فعالِ متعلق به مالکِ حذف‌شده = مسیر دور زدن).
@@ -3463,6 +3780,41 @@ def deactivate_license(code: str) -> None:
         c.execute("UPDATE licenses SET is_active = 0 WHERE code = ?", (code,))
 
 
+def _update_reseller_application(user_id: int, status: str, reviewer_id: int) -> bool:
+    """
+    PATCH (PATCH-8-USERMGMT UM-MED-3): وضعیتِ درخواستِ نمایندگیِ یک کاربر را
+    به‌روز می‌کند — برای مسیرِ approve/reject از پنلِ OWNER در آینده، یا
+    برای تأییدِ خودکار هنگام فعال‌سازیِ لایسنسِ نمایندگی (activate_license).
+    فقط ردیف‌های 'pending' را به‌روز می‌کند تا تغییرِ وضعیت یک‌طرفه باشد
+    (یک ردیفِ 'approved' یا 'rejected' دیگر قابل تغییر نیست). اتمیک: در
+    یک تراکنشِ _conn_immediate.
+
+    پارامترها:
+      user_id    — کاربری که درخواست داده.
+      status     — 'approved' یا 'rejected' (سایر مقادیر ValueError).
+      reviewer_id— کاربری که این تصمیم را گرفته (مثلاً OWNER یا
+                    سازنده‌ی لایسنس).
+
+    بازمی‌گرداند: True اگر ردیفِ pending پیدا و به‌روز شد، False اگر ردیفی
+    نبود یا قابل تغییر نبود.
+    """
+    if status not in ("approved", "rejected"):
+        raise ValueError("status باید 'approved' یا 'rejected' باشد")
+    with _conn_immediate() as c:
+        cur = c.execute(
+            "UPDATE reseller_applications SET status = ?, reviewed_at = ?, reviewed_by = ? "
+            "WHERE user_id = ? AND status = 'pending'",
+            (status, _now(), reviewer_id, user_id),
+        )
+        updated = cur.rowcount > 0
+    if updated:
+        log_action(
+            reviewer_id, "reseller_application_update",
+            f"user_id={user_id}, status={status}",
+        )
+    return updated
+
+
 def activate_license(code: str, user_id: int, username: str = None) -> dict:
     """
     فعال‌سازی کامل یک لایسنس در یک تراکنش واحد: مصرفِ لایسنس (used_count) و
@@ -3606,6 +3958,19 @@ def activate_license(code: str, user_id: int, username: str = None) -> dict:
                 "ON CONFLICT(user_id) DO UPDATE SET role = excluded.role, "
                 "added_by = excluded.added_by, reseller_max_users = excluded.reseller_max_users",
                 (user_id, ROLE_RESELLER, creator, lic.get("reseller_user_limit"), _now()),
+            )
+            # PATCH (PATCH-8-USERMGMT UM-MED-3): تأییدِ خودکارِ درخواستِ
+            # نمایندگیِ pending کاربر —OWNER با ساختِ لایسنسِ نمایندگی
+            # به‌طور ضمنی تأیید کرده، پس ردیفِ pending را به 'approved'
+            # می‌بریم تا داده‌ها سازگار باشند (وگرنه ردیفِ pending برای
+            # همیشه باقی می‌ماند و کاربر نمی‌توانست دوباره درخواست بدهد).
+            # در همان تراکنش (atomic با فعال‌سازی) — اگر شکست خورد کلِ
+            # فعال‌سازی rollback می‌شود.
+            c.execute(
+                "UPDATE reseller_applications SET status = 'approved', "
+                "reviewed_at = ?, reviewed_by = ? "
+                "WHERE user_id = ? AND status = 'pending'",
+                (_now(), creator, user_id),
             )
             result = {"ok": True, "type": LICENSE_TYPE_RESELLER, "code": code}
         else:  # admin
@@ -3944,11 +4309,44 @@ def list_expired_orders() -> list:
 
 
 def expire_order(order_id: int) -> None:
-    with _conn() as c:
-        c.execute(
+    """Mark a pending order as expired.
+
+    v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-5): rollback discount_code
+    used_count on expiry — mirrors the fix already in cancel_order. If
+    an order had a discount_code applied and then expires (e.g. the
+    user never paid within the expiry window), the discount_code's
+    used_count is decremented so the slot is freed for other users.
+    Otherwise, a malicious user could create many orders with a
+    max_uses-limited discount code and let them all expire to lock
+    everyone else out of using that code. Both the SELECT, the
+    expire UPDATE, and the discount decrement run in one
+    _conn_immediate so a concurrent flow can't interleave.
+    """
+    with _conn_immediate() as c:
+        # Fetch the order's discount_code before marking it expired
+        row = c.execute(
+            "SELECT discount_code FROM orders WHERE id = ? AND status = 'pending'",
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            return  # nothing to expire
+        discount_code = row["discount_code"] if "discount_code" in row.keys() else None
+        # Mark expired
+        cur = c.execute(
             "UPDATE orders SET status = 'expired' WHERE id = ? AND status = 'pending'",
             (order_id,),
         )
+        # Rollback discount_code used_count if applicable
+        if cur.rowcount > 0 and discount_code:
+            try:
+                c.execute(
+                    "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
+                    "WHERE code = ? AND used_count > 0",
+                    (discount_code,),
+                )
+            except Exception as _e:
+                # rollback failure is not fatal — log and continue
+                print(f"⚠️ [expire_order] discount rollback failed: {_e}")
 
 
 def cancel_order(order_id: int, user_id: int) -> None:
@@ -4046,15 +4444,46 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
             # bot را activate کن (نه subscription).
             user_id = order["user_id"]
             if order["plan"] == DEDICATED_BOT_PLAN:
-                # Activate dedicated bot instead of creating subscription.
-                # _activate_dedicated_bot در main.py وجود دارد ولی برای
-                # جلوگیری از circular dependency، فقط log می‌کنیم و
-                # _process_dedicated_bot_payment در callback path آن را
-                # activate می‌کند.
-                log_action(user_id, "order_paid_trc20_dedicated",
-                           f"order={order_id}, plan=DEDICATED_BOT_PLAN")
+                # C1+DED-1 (PATCH-1-PAYMENT-CRIT): look up the pending
+                # dedicated bot for this user. If found, return bot_id so
+                # the caller (WIZ_TRX_HASH handler) can call
+                # _activate_dedicated_bot (which spawns the subprocess +
+                # updates dedicated_bots + sends Telegram messages —
+                # mirror of the card path's _activate_dedicated_bot call
+                # at the _owner_review_payment site). If not found,
+                # refund: mark the order as 'cancelled' and clear txid
+                # (so the user can retry with the same txid on a new
+                # order after first submitting a bot token via the
+                # dedicated_bot_token wizard).
+                bot_row = c.execute(
+                    "SELECT * FROM dedicated_bots "
+                    "WHERE reseller_id = ? AND status = 'pending_payment' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (user_id,)
+                ).fetchone()
+                if not bot_row:
+                    # Refund: mark order as cancelled + free the txid for
+                    # retry on a new order. Rollback discount_code
+                    # used_count too (mirror cancel_order's logic).
+                    c.execute(
+                        "UPDATE orders SET status = 'cancelled', txid = NULL "
+                        "WHERE id = ?",
+                        (order_id,)
+                    )
+                    if order.get("discount_code"):
+                        try:
+                            c.execute(
+                                "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
+                                "WHERE code = ? AND used_count > 0",
+                                (order["discount_code"],),
+                            )
+                        except Exception:
+                            pass
+                    return {"ok": False, "error": "no_pending_bot"}
+                bot = dict(bot_row)
                 return {"ok": True, "plan": order["plan"],
-                        "duration": 0, "dedicated": True}
+                        "duration": 0, "dedicated": True,
+                        "bot_id": bot["id"]}
             # اشتراک — منطق تمدید همان create_subscription است، ولی درون همین
             # تراکنش تا با paid شدن فاکتور اتمیک بماند.
             existing = c.execute(
@@ -5558,7 +5987,12 @@ SECURITY_ROUTES = (
     "tfa:", "tfareset:", "tfago:", "tfacancel:",
     "tfachange:", "tfaremove:", "tfaemail:",  # v2.12.31 (DEBUG-1 LOW-1)
     "getcode:", "codeget:", "codearm:",
-    "login_guard:",  # v2.12.24: محافظتِ ورود
+    # PATCH (PATCH-2-RBAC / RBAC-CRIT-2): "login_guard:" از این لیست حذف شد.
+    # گیتِ متمرکزِ authorize_sensitive_account_action (که فقط main_owner را
+    # می‌شناخت) قبل از رسیدن به _toggle_login_guard صدا زده می‌شد و شاخه‌ی
+    # OWNER_IDS-aware درون _toggle_login_guard را dead code می‌کرد. حالا
+    # _toggle_login_guard (line ~8387) خودش main_owner + OWNER_IDS را چک
+    # می‌کند و پیامِ UX اختصاصی «🔒 فقط مالک اصلی سلف...» را نشان می‌دهد.
 )
 
 
@@ -5786,16 +6220,37 @@ def grant_matches_account(grant: dict, acc: dict, tag: str, actor_id: int) -> bo
         bot = get_dedicated_bot(bot_id)
         if not bot or bot.get("status") in ("deleted", "rejected"):
             return False
-        
+
         # اگر در یک نمونه‌ی رباتِ اختصاصی هستیم، مجوز فقط در همان نمونه
         # معتبر است که DEDICATED_BOT_ID با scope_id برابر باشد.
         # این مانع از अधिकारِ مجوزهای dedicated_bot در نمونه‌ی اصلی
         # یا در رباتِ اختصاصیِ دیگر می‌شود.
-        if IS_DEDICATED_BOT:
-            return DEDICATED_BOT_ID == bot_id and account_belongs_to(acc, tag, bot.get("owner_id"))
-        
-        # در نمونه‌ی اصلی: اکانت باید متعلق به صاحبِ همان ربات باشد.
-        return account_belongs_to(acc, tag, bot.get("owner_id"))
+        if IS_DEDICATED_BOT and DEDICATED_BOT_ID != bot_id:
+            return False
+
+        # PATCH (PATCH-2-RBAC / RBAC-MED-3): سابقاً فقط bot.owner_id چک
+        # می‌شد که برای اکانت‌های مشتری در یک رباتِ اختصاصی کار نمی‌کرد
+        # (مشتریِ reseller، owner_id برابر با id خودِ مشتری دارد، نه idِ
+        # reseller). برچسبِ UI «فقط اکانت‌های این ربات» طبیعتاً همه‌ی
+        # اکانت‌های داخلِ ربات را شامل می‌شود. حالا اکانت‌های متعلق به هر
+        # یک از مواردِ زیر مجازند:
+        #   ۱) خودِ صاحبِ ربات (bot.owner_id) — قبل از patch تنها حالتِ کارکن
+        #   ۲) خودِ نماینده‌ی ثبت‌کننده‌ی ربات (bot.reseller_id)
+        #   ۳) مشتریانِ زیرمجموعه‌ی همان نماینده (list_users_for_reseller)
+        _owner_id = bot.get("owner_id")
+        _reseller_id = bot.get("reseller_id")
+        if _owner_id and account_belongs_to(acc, tag, _owner_id):
+            return True
+        if _reseller_id and account_belongs_to(acc, tag, _reseller_id):
+            return True
+        try:
+            customer_ids = (
+                [u["user_id"] for u in list_users_for_reseller(_reseller_id)]
+                if _reseller_id else []
+            )
+        except Exception:
+            return False
+        return any(account_belongs_to(acc, tag, cid) for cid in customer_ids)
 
     return False
 
@@ -5821,9 +6276,13 @@ def authorize_sensitive_account_action(actor_id: int, account_tag: str):
     if not isinstance(acc, dict):
         return False, "این اکانت دیگر وجود ندارد."
 
-    # ۲) owner bypass — فقط مالکِ اصلیِ سیستم (در رباتِ اختصاصی هیچ‌وقت).
-    main_owner = _security_main_owner_id()
-    if main_owner and actor_id == main_owner:
+    # ۲) owner bypass — مالکِ اصلیِ سیستم یا هر عضوِ OWNER_IDS (در رباتِ
+    #    اختصاصی هیچ‌وقت — is_owner_bypass خودش IS_DEDICATED_BOT را چک می‌کند).
+    # PATCH (PATCH-2-RBAC / RBAC-CRIT-1): سابقاً فقط actor_id == main_owner
+    # چک می‌شد و OWNER_IDS نادیده گرفته می‌شد. حالا is_owner_bypass (که
+    # ADMIN_ID + OWNER_IDS را پوشش می‌دهد) مرجعِ واحد است و با get_role و
+    # is_owner_bypassِ خط 882 سازگار می‌شود.
+    if is_owner_bypass(actor_id):  # includes ADMIN_ID + OWNER_IDS
         # v2.12.31 (DEBUG-1 HIGH-1): OWNER نباید بتواند login_guard را روی
         # اکانتِ کاربرِ دیگر (USER/RESELLER) فعال کند — این یک حمله‌ی DoS
         # بود که در آن OWNER می‌توانست اکانت کاربر را قفل کند تا کاربر
@@ -6748,7 +7207,14 @@ class AdminBot:
         self._sess_sel: dict = {}
         # قفل‌های هم‌زمانیِ عملیاتِ حساس، به ازای هر تگ: {tag: asyncio.Lock}.
         # برای محافظت از کلیکِ دوباره/هم‌زمان در عملیاتِ مخرب.
-        self._sec_locks: dict = {}
+        # PATCH (CON-LOW-6 / PATCH-9-CONCURRENCY): قبلاً به‌صورت
+        # `self._sec_locks` روی این نمونه نگه داشته می‌شد و هیچ‌گاه برای
+        # تگ‌های حذف‌شده تمیز نمی‌شد (رشدِ مونوتونیک). حالا به سطحِ ماژول
+        # (`_SEC_LOCKS`) منتقل شده تا `unregister_account` بتواند آن را
+        # به‌طور امن pop کند. برای حفظِ سازگاری با کدِ بیرونی (که شاید
+        # هنوز به `self._sec_locks` دسترسی داشته باشد)، این ویژگی به عنوان
+        # یک ویوی فقط-خواندنی به همان دیکشنرِ سراسری نگاشته می‌شود.
+        self._sec_locks = _SEC_LOCKS
         # پشته‌ی ناوبری. در حالت غیر-standalone، SaaSBot بلافاصله بعد از
         # ساخت، پشته‌ی خودش را اینجا جایگزین می‌کند تا هر دو پنل یک
         # تاریخچه‌ی مشترک داشته باشند — چون کاربر آزادانه بین آن‌ها جابه‌جا
@@ -6898,6 +7364,17 @@ class AdminBot:
             connection_retries=3, retry_delay=2, flood_sleep_threshold=10,
         )
         await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-2): چک سلامتِ سشن در
+        # ابتدای start() فقط وقتی فایل از قبل وجود داشته باشد chmod
+        # می‌کند. در اولین لاگین، فایل هنوز وجود ندارد و self.client.start
+        # آن را با umask پیش‌فرض (0644) می‌سازد. اینجا بلافاصله بعد از
+        # start آن را 0600 می‌کنیم تا سشنِ رباتِ مدیریت هرگز world-readable
+        # باقی نماند (سشنِ ادمین کنترلِ کلِ دیپلوی را می‌دهد — حساس‌ترین
+        # سشنِ پروژه).
+        try:
+            _chmod_private(session_path + ".session")
+        except Exception:
+            pass
         # v2.12.12: pre-warm dialog cache (مشابه SaaSBot.start)
         # v2.12.13: timeout aggregate اضافه شد.
         try:
@@ -7263,6 +7740,30 @@ class AdminBot:
                     pass
         return allowed, reason
 
+    # PATCH (PATCH-10-CLEANUP DEAD-CODE-1): `_can_view_security_tools` (below)
+    # and `_can_wipe_sessions` (further below) both reference
+    # `self._viewer_is_main_owner(...)`, but this method was never defined
+    # on AdminBot — so any call raised AttributeError. The audit
+    # (AUDIT-2-RBAC FINDING-1 + a separate dead-code sweep) found the
+    # method was missing. Adding it here (safer than removing the callers,
+    # which may be reachable from other code paths). The predicate mirrors
+    # the OWNER-bypass logic in `is_owner_bypass` (line ~891) and
+    # `authorize_sensitive_account_action` (post-FINDING-1 fix): the main
+    # owner OR any member of OWNER_IDS counts as a main owner. The
+    # `try/except NameError` defensive pattern is borrowed from `get_role`
+    # (line ~1822) in case OWNER_IDS isn't bound at the call site (e.g.,
+    # in a dedicated-bot subprocess where it's never set).
+    def _viewer_is_main_owner(self, sid: int) -> bool:
+        """آیا این کاربر مالکِ اصلیِ سیستم است؟ (OWNER_ID یا عضوِ OWNER_IDS)"""
+        main_owner = _security_main_owner_id()
+        if main_owner is not None and sid == main_owner:
+            return True
+        try:
+            extra_owners = OWNER_IDS
+        except NameError:
+            extra_owners = set()
+        return sid in extra_owners
+
     def _can_view_security_tools(self, tag: str, sender_id: int) -> bool:
         """
         آیا این کاربر *می‌بیند* که ابزارهای امنیتی برای این اکانت وجود
@@ -7565,6 +8066,10 @@ class AdminBot:
                        f"tag={tag} done={done} failed={failed}")
             note = f"{fa_digits(done)} دستگاه بسته شد." + (
                 f" ({fa_digits(failed)} ناموفق)" if failed else "")
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): explicit sesskill audit
+        # event — separate from the more detailed "sessions_terminated_selected"
+        # log above, for easier security audit queries.
+        log_action(event.sender_id, "sessions_killed", f"tag={tag}")
         await self._show_sessions(event, tag, flash=note)
 
     async def _show_antiban_warning(self, event, tag: str, token: str,
@@ -7703,6 +8208,12 @@ class AdminBot:
                 [UI.neutral("انصراف", f"sessions:{tag}")],
             ],
         )
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): audit the sesswipe
+        # confirmation request — the actual wipe happens in
+        # _terminate_sessions via the sessterm:{tag} callback, but
+        # logging here makes the user's intent visible even before the
+        # wipe is confirmed/executed.
+        log_action(event.sender_id, "sessions_wiped", f"tag={tag}")
 
     async def _terminate_sessions(self, event, tag: str, skip_antiban: bool = False):
         """همه‌ی نشست‌های دیگر را می‌بندد، بعد فهرستِ تازه را نشان می‌دهد."""
@@ -7749,6 +8260,10 @@ class AdminBot:
             note = ("همه‌ی دستگاه‌های دیگر بسته شدند." if n < 0
                     else f"{fa_digits(n)} دستگاهِ دیگر بسته شد." if n
                     else "دستگاهِ دیگری برای بستن نبود.")
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): explicit sessterm audit
+        # event — separate from the more detailed "sessions_terminated_all"
+        # log above, for easier security audit queries.
+        log_action(event.sender_id, "sessions_terminated", f"tag={tag}")
         await self._show_sessions(event, tag, flash=note)
 
     async def _sess_guard(self, event, tag: str):
@@ -7984,6 +8499,11 @@ class AdminBot:
 
     async def _start_2fa_change_wizard(self, event, tag: str, mode: str = "change"):
         """شروع ویزارد تغییر/حذف رمز 2FA — از کاربر رمز قدیم را می‌گیرد."""
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-3): اگر کاربر در حال
+        # ویزارد دیگری با temp_client فعال بود (مثلاً ویزارد افزودن اکانت
+        # که سوکتِ تلگرام + قفلِ فایلِ سشن دارد)، بدون این پاک‌سازی آن
+        # temp_client لو می‌رفت. الگوی مشابه start_login_wizard_for_user.
+        await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
         entry, ok = await self._sess_guard(event, tag)
         if not entry:
             return
@@ -8002,6 +8522,11 @@ class AdminBot:
 
     async def _start_2fa_email_wizard(self, event, tag: str):
         """شروع ویزارد تغییر ایمیل بازیابی 2FA — از کاربر رمز فعلی + ایمیل جدید را می‌گیرد."""
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-3): پاک‌سازی temp_clientِ
+        # ویزارد قبلی قبل از بازنویسی self.wizards[uid] — جلوگیری از لو
+        # رفتن سوکت/قفلِ فایل/phone_code_hash. الگوی مشابه
+        # start_login_wizard_for_user.
+        await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
         entry, ok = await self._sess_guard(event, tag)
         if not entry:
             return
@@ -8562,6 +9087,11 @@ class AdminBot:
         await self._show_appearance(event, tag)
 
     async def _start_edit_name_wizard(self, event, tag: str):
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-3): پاک‌سازی temp_clientِ
+        # ویزارد قبلی قبل از بازنویسی self.wizards[uid] — جلوگیری از لو
+        # رفتن سوکت/قفلِ فایل/phone_code_hash. الگوی مشابه
+        # start_login_wizard_for_user.
+        await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
             await event.answer("این اکانت الان روشن نیست.", alert=True)
@@ -8603,6 +9133,10 @@ class AdminBot:
             cfg[tag]["disabled"] = True
             cfg[tag]["disabled_reason"] = "manual"
             self.sb.save_config(cfg)
+            # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): audit account_disabled
+            # even on the partial-success path (runtime stop failed but
+            # disabled=True is persisted for next restart).
+            log_action(event.sender_id, "account_disabled", f"tag={tag}")
             await event.edit(
                 f"⚠️ توقف کامل اکانت «{tag}» زمان‌بر بود، ولی غیرفعال‌سازی ثبت شد.\n"
                 f"اکانت در restart بعدی روشن نمی‌شه.",
@@ -8612,6 +9146,8 @@ class AdminBot:
         cfg[tag]["disabled"] = True
         cfg[tag]["disabled_reason"] = "manual"
         self.sb.save_config(cfg)
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): audit account_disabled.
+        log_action(event.sender_id, "account_disabled", f"tag={tag}")
         await self._show_account_detail(event, tag)
 
     async def _enable_account(self, event, tag: str):
@@ -8619,6 +9155,27 @@ class AdminBot:
         if tag not in cfg:
             await event.answer("این اکانت وجود ندارد.", alert=True)
             return
+        # PATCH (PATCH-8-USERMGMT UM-HIGH-1): Bypassing subscription expiry.
+        # قبل از فعال‌سازی، چک کن که اکانتِ مالکِ خودش اشتراکِ فعال دارد یا
+        # نه.OWNER/ADMIN (owner_filter is None) همیشه مجاز است؛ برای
+        # viewerهای دیگر (RESELLER/USER) اگر disabled_reason ==
+        # 'subscription_expired' است و مالکِ اکانت اشتراکِ فعالی ندارد،
+        # رد کن — تا نتوانند با کلیکِ مجددِ «فعال‌سازی اکانت» سلف را
+        # رایگان و نامحدود روشن نگه دارند.
+        if self.owner_filter is not None:
+            acc_owner = cfg[tag].get("owner_user_id")
+            disabled_reason = cfg[tag].get("disabled_reason")
+            if acc_owner is not None and disabled_reason == "subscription_expired":
+                try:
+                    sub = get_active_subscription(acc_owner)
+                except Exception:
+                    sub = None
+                if not sub:
+                    await event.answer(
+                        "اشتراک شما منقضی شده. ابتدا اشتراک خود را تمدید کنید.",
+                        alert=True,
+                    )
+                    return
         await event.edit(f"⏳ در حال فعال‌سازی «{tag}»... (ممکن است چند ثانیه طول بکشد)")
         cfg[tag]["disabled"] = False
         # فعال‌سازی دستی → دلیل قبلی (اگر subscription_expired بود) پاک می‌شود
@@ -8633,6 +9190,11 @@ class AdminBot:
                 f"⚠️ اکانت «{tag}» هنوز آماده نشده (وضعیت: {_status_human(st)}). "
                 f"علت دقیق در لاگ سرور ثبت شده."
             )
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): audit account_enabled —
+        # fires after the enable intent is persisted (config saved) and
+        # the start attempt has been dispatched (whether or not the
+        # runtime is ready yet, the account IS enabled in config).
+        log_action(event.sender_id, "account_enabled", f"tag={tag}")
         await self._show_account_detail(event, tag)
 
     # ─────────────────────────────────────────────────────
@@ -8711,6 +9273,12 @@ class AdminBot:
         journal.pop(tag, None)
         _save_account_delete_journal(journal)
 
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): audit account_deleted —
+        # fires only on the clean success path (config popped, session
+        # removed, journal cleared). Partial/half-deleted paths above
+        # `return` before reaching here, so the audit log only records
+        # fully-completed deletions.
+        log_action(event.sender_id, "account_deleted", f"tag={tag}")
         await event.edit(
             f"✅ اکانت «{tag}» با موفقیت حذف شد (اگر روشن بود، اول تمیز خاموش شد).",
             buttons=[UI.nav_row()],
@@ -8739,6 +9307,11 @@ class AdminBot:
         await event.respond(title, buttons=buttons)
 
     async def _start_proxy_wizard(self, event, tag: str):
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-3): پاک‌سازی temp_clientِ
+        # ویزارد قبلی قبل از بازنویسی self.wizards[uid] — جلوگیری از لو
+        # رفتن سوکت/قفلِ فایل/phone_code_hash. الگوی مشابه
+        # start_login_wizard_for_user.
+        await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
         self.wizards[event.sender_id] = {
             "state": None,
             "data": {"tag": tag},
@@ -8797,6 +9370,11 @@ class AdminBot:
                 f"⚠️ اکانت «{tag}» هنوز آماده نشده (وضعیت: {_status_human(st)}). "
                 f"علت دقیق در لاگ سرور ثبت شده."
             )
+        # PATCH (PATCH-10-CLEANUP AUDIT-LOG-1): audit proxy_changed —
+        # fires after the proxy config is persisted and the restart
+        # dispatch has been issued (regardless of whether the runtime
+        # reached "ready" yet, the proxy IS changed in config.json).
+        log_action(event.sender_id, "proxy_changed", f"tag={tag}")
         await self._show_account_detail(event, tag)
 
     # ─────────────────────────────────────────────────────
@@ -8804,6 +9382,11 @@ class AdminBot:
     # ─────────────────────────────────────────────────────
 
     async def _start_send_msg_wizard(self, event, tag: str):
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-3): پاک‌سازی temp_clientِ
+        # ویزارد قبلی قبل از بازنویسی self.wizards[uid] — جلوگیری از لو
+        # رفتن سوکت/قفلِ فایل/phone_code_hash. الگوی مشابه
+        # start_login_wizard_for_user.
+        await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
             await event.answer("این اکانت الان روشن نیست.", alert=True)
@@ -9012,6 +9595,11 @@ class AdminBot:
         ساخته شود. در غیر این صورت، مالک از default_owner_id (scope پنل)
         گرفته می‌شود. preset_data داده‌ی اضافه‌ی ویزارد (مثل add_back).
         """
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-3): پاک‌سازی temp_clientِ
+        # ویزارد قبلی قبل از بازنویسی self.wizards[uid] — جلوگیری از لو
+        # رفتن سوکتِ تلگرام، قفلِ فایلِ سشن، و phone_code_hash. الگوی
+        # مشابه start_login_wizard_for_user.
+        await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
         data = dict(preset_data or {})
         if preset_owner_id is not None:
             # «افزودن SelfBot» توسط OWNER/ADMIN/RESELLER برای یک کاربر خاص:
@@ -9158,6 +9746,15 @@ class AdminBot:
         try:
             await asyncio.wait_for(temp_client.connect(), timeout=30)
             sent = await asyncio.wait_for(temp_client.send_code_request(phone), timeout=30)
+            # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-1): فایل سشن بلافاصله
+            # بعد از send_code_request با umask پیش‌فرض (0644 = world-readable)
+            # ساخته می‌شود. کلیدِ احراز هویتِ تلگرام داخلش است. تا قبل از
+            # SelfBot.start و check_session_health همین حالت باقی می‌ماند.
+            # اینجا بلافاصله آن را 0600 می‌کنیم تا پنجره‌ی افشا بسته شود.
+            try:
+                _chmod_private(session_path + ".session")
+            except Exception:
+                pass
         except errors.PhoneNumberBannedError:
             # PATCH (audit-5): شماره‌ی بلاک‌شده توسط تلگرام — پیام کاربرپسند،
             # نه خطای فنی. ویزارد لغو می‌شود چون هیچ retryای اینجا کمک
@@ -9554,6 +10151,14 @@ class AdminBot:
             await temp_client.disconnect()
             temp_client.session.save()
             temp_client.session.close()
+            # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-1): بعد از save/close
+            # نهایی، فایل سشن دوباره ممکن است با umask پیش‌فرض بازنویسی شده
+            # باشد. یک chmod صریح به 0600 می‌گذاریم تا هرگز world-readable
+            # باقی نماند (مخصوصاً در مسیر خطا که بازنویسی نهایی رخ می‌دهد).
+            try:
+                _chmod_private(os.path.join(self.sb.SESSIONS_DIR, tag + ".session"))
+            except Exception:
+                pass
         except Exception as e:
             # v2.12.9 (QA-EXPERT WATCH-3): در مسیر خطا، temp_client ممکن بود
             # وصل بماند (نشتی سوکت + قفلِ فایل سشن). حالا حتماً disconnect
@@ -9821,8 +10426,13 @@ class AdminBot:
             # مدیریت نشست‌ها و دریافت کد — هدفشان یک tag است، پس باید گارد
             # مالکیت بخورند (نماینده نتواند روی اکانتِ دیگری اجرا کند).
             "sessions:", "sesstog:", "sesskill:", "sesswipe:",
-            "sessterm:", "getcode:", "codeget:", "codearm:",
+            "sessterm:", "sesspage:",  # PATCH (PATCH-2-RBAC / RBAC-LOW-5)
+            "getcode:", "codeget:", "codearm:",
             "tfa:", "tfareset:", "tfago:", "tfacancel:",
+            "tfachange:", "tfaremove:", "tfaemail:",  # PATCH (PATCH-2-RBAC / RBAC-LOW-5)
+            "login_guard:",  # PATCH (PATCH-2-RBAC / RBAC-LOW-5) — defense-in-depth
+                             # حتی با حذف از SECURITY_ROUTES (RBAC-CRIT-2)،
+                             # گاردِ _account_visible برای RESELLERها می‌ماند.
         )
         if self.owner_filter is not None and any(data.startswith(p) for p in _TAG_PREFIXES):
             # استخراج تگ از فرمت‌های مختلف: "acc:TAG"، "toggle:TAG:feature"، "font_set:TAG:font"
@@ -10027,15 +10637,30 @@ class AdminBot:
             elif data.startswith("cap_revoke:"):
                 _, uid, scope = data.split(":", 2)
                 await self._owner_revoke_capability(event, safe_callback_int(uid, 0), scope)
-            elif data.startswith("dbcap:"):
-                bot_id = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_show_dbot_capability(event, bot_id)
-            elif data.startswith("dbcap_grant:"):
-                bot_id = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_grant_dbot_capability(event, bot_id)
-            elif data.startswith("dbcap_revoke:"):
-                bot_id = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_revoke_dbot_capability(event, bot_id)
+            elif data.startswith("dbcap:") or data.startswith("dbcap_grant:") or data.startswith("dbcap_revoke:"):
+                # DED-5 (PATCH-1-PAYMENT-CRIT): _owner_*_dbot_capability
+                # methods are defined on SaaSBot, not AdminBot. If self is
+                # an AdminBot instance without these methods (e.g., the
+                # standalone admin bot), answer with an alert instead of
+                # raising AttributeError. When self is the SaaSBot's
+                # admin_panel (with self.saas set), delegate to saas.
+                _saas = getattr(self, "saas", None)
+                if _saas is not None and hasattr(_saas, "_owner_show_dbot_capability"):
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    if data.startswith("dbcap:"):
+                        await _saas._owner_show_dbot_capability(event, bot_id)
+                    elif data.startswith("dbcap_grant:"):
+                        await _saas._owner_grant_dbot_capability(event, bot_id)
+                    else:
+                        await _saas._owner_revoke_dbot_capability(event, bot_id)
+                else:
+                    try:
+                        await event.answer(
+                            "این عملیات فقط در ربات اصلی قابل انجام است",
+                            alert=True,
+                        )
+                    except Exception:
+                        pass
             else:
                 return False
         except errors.MessageNotModifiedError:
@@ -10368,6 +10993,12 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
     """Verify a 2FA password against stored hash.
 
     v2.12.31: پشتیبانی از argon2id و SHA-256 (هم salted هم unsalted legacy).
+    PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-7): مقایسه‌ی constant-time
+    با hmac.compare_digest (به‌جای all(...) که روی اولین mismatch
+    short-circuit می‌کرد — side-channel زمانی).
+    PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-8): الگوریتم‌های ناشناخته
+    (شامل SHA-256 unsalted قدیمی از قبل از v2.12.31) fail-closed رد
+    می‌شوند — rainbow-table-vulnerable بودن، دیگر سکوتاً پذیرفته نمی‌شود.
     """
     if not tag or not password:
         return False
@@ -10394,17 +11025,22 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
             return False
         except Exception:
             return False
-    # SHA-256 (legacy or salted)
+    # SHA-256 salted (تگ به‌عنوان salt — از v2.12.31 به بعد)
     import hashlib
     if algo == "sha256_tagged":
         expected = hashlib.sha256(f"{tag}:{password}".encode("utf-8")).hexdigest()
     else:
-        # original unsalted SHA-256 (legacy)
-        expected = hashlib.sha256(password.encode("utf-8")).hexdigest()
-    # constant-time comparison
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-8): الگوریتم ناشناخته
+        # — شامل SHA-256 unsalted قدیمی از قبل از v2.12.31 که با
+        # rainbow-table به‌راحتی شکسته می‌شود. fail-closed رد می‌کنیم تا
+        # در صورت لو رفتن config.json، رمز قابل بازیابی نباشد.
+        print(f"⚠️ [2fa] rejecting legacy/unknown 2FA hash algo "
+              f"(algo={algo!r}) for tag={tag} — fail-closed")
+        return False
+    # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-7): مقایسه‌ی constant-time.
     if len(expected) != len(stored_hash):
         return False
-    return all(a == b for a, b in zip(expected, stored_hash))
+    return hmac.compare_digest(expected, stored_hash)
 
 
 def _purge_old_2fa_plaintext() -> None:
@@ -10480,14 +11116,36 @@ class SaaSBot:
         # بسته‌شده یک کپیِ جدیدِ روی‌هم از پیام گیت می‌سازد.
         self._gate_msg_id: dict = {}
         self._expiry_task = None
-        # قفل دسترسی به پنل مدیریت (یک نمونه‌ی مشترک بین همه‌ی کاربران است و
-        # scope آن قبل از هر فراخوانی بازنویسی می‌شود). بدون این قفل، یک رویداد
-        # هم‌زمان از کاربرِ دیگر می‌تواند وسطِ await یک dispatch (مثلاً لاگین که
-        # تا ۳۰ ثانیه طول می‌کشد) owner_filter/default_owner_id را عوض کند و
-        # رندرِ بعد-از-awaitِ کاربرِ اول با scope کاربرِ دیگر انجام شود — این
-        # قفل dispatch های پنل را سریال می‌کند (برای مقیاس رسیلری چند کاربرِ
-        # هم‌زمان کاملاً پذیرفتنی است) و کل این کلاس خطا را از بین می‌برد.
-        self._panel_lock = asyncio.Lock()
+        # قفل دسترسی به پنل مدیریت — به‌ازای هر کاربر یک قفلِ مستقل.
+        # PATCH (PATCH-9-CONCURRENCY / CON-MED-4): قبلاً یک `asyncio.Lock`
+        # مشترک بین همه‌ی کاربران بود و تمامِ dispatchهای پنلِ ادمین را
+        # سریال می‌کرد — یعنی اگر یک عملیاتِ طولانیِ کاربرِ A (مثلاً بکاپ
+        # ۶۰ ثانیه‌ای) در حال اجرا بود، callbackهای همه‌ی کاربرانِ دیگر
+        # تا ۶۰ ثانیه hang می‌شدند و تلگرام برایشان timeout می‌زد. حالا
+        # هر کاربر قفلِ خودش را دارد: عملیاتِ کاربرِ A روی کاربرِ B
+        # اثری ندارد. این امن است چون `_sync_admin_panel_scope(event.sender_id)`
+        # بلافاصله قبل از dispatch روی همان کاربر تنظیم می‌شود و dispatch
+        # در همان lockِ همان کاربر اجرا می‌شود — یعنی هیچ raceای بین
+        # scopeی کاربرِ مختلف رخ نمی‌دهد (هر dispatch در lockِ کاربرِ خودش
+        # سریال است).
+        self._panel_locks: "Dict[int, asyncio.Lock]" = {}
+
+    def _panel_lock_for(self, user_id: int) -> "asyncio.Lock":
+        """قفلِ per-userِ پنلِ ادمین (CON-MED-4 / PATCH-9-CONCURRENCY).
+
+        `setdefault` آرگومانِ default را همیشه ارزیابی می‌کند (حتی اگر
+        کلید موجود باشد) — یعنی `self._panel_locks.setdefault(uid,
+        asyncio.Lock())` در هر فراخوانی یک `asyncio.Lock` جدید (و
+        بلااستفاده) می‌سازد. این helper با `.get` و ساختِ شرطی، فقط در
+        اولین فراخوانیِ هر کاربر یک Lock می‌سازد و در فراخوانی‌های بعدی
+        همان نمونه را برمی‌گرداند — هم سریع‌تر، هم از نشتِ اشیاء‌ی
+        بلااستفاده جلوگیری می‌کند.
+        """
+        lock = self._panel_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._panel_locks[user_id] = lock
+        return lock
 
     async def start(self):
         # فیکس مهم و حیاتی: قبلاً این چک اصلاً اینجا نبود — SaaSBot.start()
@@ -10522,6 +11180,16 @@ class SaaSBot:
             connection_retries=3, retry_delay=2, flood_sleep_threshold=10,
         )
         await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-2): سااس‌بات از همان
+        # سشنِ رباتِ مدیریت استفاده می‌کند، ولی هیچ‌گاه check_session_health
+        # قبل از start فراخوانی نمی‌کند. پس در اولین لاگین فایل سشن با
+        # umask پیش‌فرض (0644) ساخته می‌شود و چون سااس‌بات یک SelfBot نیست،
+        # هیچ مسیر دیگری chmod آن را 0600 نمی‌کند. اینجا بلافاصله بعد از
+        # start آن را 0600 می‌کنیم.
+        try:
+            _chmod_private(session_path + ".session")
+        except Exception:
+            pass
 
         # ثبتِ رفرنس تا SelfBotها بتوانند «کدِ لاگین» را از طریقِ همین ربات
         # به مالک برسانند.
@@ -11642,15 +12310,48 @@ class SaaSBot:
                 await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
                 return
             if isinstance(order, dict) and "id" in order:
-                with _conn_immediate() as c:
-                    cur = c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
-                              (_now(), order["id"]))
-                    if cur.rowcount == 0:
-                        pass  # handle refund outside lock
-                # v2.11.5: refund outside lock
-                if cur.rowcount == 0:
-                    wallet_credit(uid, price, OWNER_ID, reason="refund: already paid")
-                    await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
+                # v2.12.31 (PATCH-3-DB-RACE / AUDIT-3-DB-4): wrap UPDATE in
+                # try/except + wallet_credit refund on UPDATE error, mirroring
+                # _pay_order_from_wallet. Previously:
+                #   - If c.execute(UPDATE) raised (lock timeout past 10s,
+                #     disk I/O error), `cur` was never bound and the outer
+                #     `if cur.rowcount == 0` (which ran OUTSIDE the with
+                #     block) raised NameError. The wallet had been debited
+                #     (committed by wallet_pay_from_balance) but no refund
+                #     was issued — the user lost Toman equivalent to the
+                #     dedicated-bot price and never got the bot activated.
+                #   - The rowcount check now runs inside the `with` block
+                #     (via `_won` flag) so `cur` is always bound in the
+                #     success path; the except branch issues a refund.
+                try:
+                    with _conn_immediate() as c:
+                        cur = c.execute(
+                            "UPDATE orders SET status = 'paid', pay_method = 'wallet', "
+                            "paid_at = ? WHERE id = ? AND status = 'pending'",
+                            (_now(), order["id"]),
+                        )
+                        _won = cur.rowcount > 0
+                    if not _won:
+                        # Race: another flow already marked this order paid.
+                        wallet_credit(uid, price, OWNER_ID,
+                                      reason="refund: already paid (race)")
+                        await event.answer(
+                            "❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.",
+                            alert=True,
+                        )
+                        return
+                except Exception as _e:
+                    print(f"⚠️ [dedicated_bot_pay] خطا در تأیید فاکتور: {_e}")
+                    # Refund on UPDATE failure (lock timeout, disk I/O, etc.)
+                    try:
+                        wallet_credit(uid, price, OWNER_ID,
+                                      reason="refund: dedicated_bot confirm failed")
+                        print(f"✅ [dedicated_bot_pay] refund شد: {price}")
+                    except Exception as _re:
+                        print(f"❌ [dedicated_bot_pay] refund FAILED: {_re}")
+                    await event.answer(
+                        "❌ خطا در تأیید فاکتور — مبلغ برگشت.", alert=True
+                    )
                     return
             await self._clear_admin_panel_wizard(uid)
             self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
@@ -11662,9 +12363,33 @@ class SaaSBot:
                 buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
             )
         elif method == "card":
-            order = create_order(uid, "ربات اختصاصی", price, 0.0)
+            # C3+DED-3 (PATCH-1-PAYMENT-CRIT): compute amount_usdt from
+            # price via _compute_order_amounts (mirror _user_plan_chosen).
+            # Previously hardcoded 0.0 — combined with the bug that
+            # _verify_trc20_transfer's min check passes for any non-negative
+            # value when min=0, this let a user "pay" 0.000001 USDT and get
+            # the order marked paid (C1 audit scenario).
+            # C2+DED-2 (PATCH-1-PAYMENT-CRIT): also start the
+            # dedicated_bot_token wizard (mirror the wallet path) so the
+            # user can submit a bot token BEFORE the admin approves the
+            # receipt — otherwise the user pays via card, admin approves,
+            # _activate_dedicated_bot is called but no dedicated_bots row
+            # exists (the user never submitted a token), so activation
+            # fails with "no pending bot found".
+            usdt, rate = await self._compute_order_amounts(price)
+            order = create_order(uid, "ربات اختصاصی", price, usdt)
             if isinstance(order, dict) and "id" in order:
-                await self._show_invoice(event, order, 0)
+                await self._clear_admin_panel_wizard(uid)
+                self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
+                await self._show_invoice(event, order, rate)
+                await event.respond(
+                    "🤖 **ربات اختصاصی**\n\n"
+                    "فاکتور بالا رو پرداخت کن (کارت یا تتر) و **همچنین** "
+                    "توکن رباتت رو از @BotFather بگیر و همینجا بفرست "
+                    "(فرمت: `123456789:AAF...`).\n\n"
+                    "توکن باید قبل از تایید ادمین ارسال بشه تا ربات "
+                    "اختصاصیت فعال بشه."
+                )
             else:
                 await event.answer("❌ خطا در ساخت سفارش.", alert=True)
 
@@ -12220,7 +12945,7 @@ class SaaSBot:
         if tag not in cfg:
             await self._nav_heal(event, "این سلف دیگر وجود ندارد.")
             return
-        async with self._panel_lock:
+        async with self._panel_lock_for(event.sender_id):
             self._sync_admin_panel_scope(event.sender_id)
             await self.admin_panel._show_account_detail(event, tag)
 
@@ -12898,7 +13623,7 @@ class SaaSBot:
         """نمایش «🤖 سلف من» — فقط خودِ کاربر (role USER) و فقط اکانت‌های خودش.
         scope پنل (owner_filter) هم قبل از هر چیز روی همین کاربر تنظیم می‌شود
         تا رندر لیست و عملیات بعدی با scope کهنه‌ی کاربرِ دیگری برخورد نکنند."""
-        async with self._panel_lock:
+        async with self._panel_lock_for(event.sender_id):
             self._sync_admin_panel_scope(event.sender_id)
             text, buttons = self._build_my_bots_view(event.sender_id)
         await event.edit(text, buttons=buttons)
@@ -12912,7 +13637,7 @@ class SaaSBot:
         if not account_belongs_to(acc, tag, event.sender_id):
             await self._nav_heal(event, "این اکانت متعلق به تو نیست یا وجود ندارد.")
             return
-        async with self._panel_lock:
+        async with self._panel_lock_for(event.sender_id):
             self._sync_admin_panel_scope(event.sender_id)
             await self.admin_panel._show_account_detail(event, tag)
 
@@ -12927,7 +13652,7 @@ class SaaSBot:
             await event.answer("❌ برای افزودن SelfBot باید اشتراک فعال داشته باشید.", alert=True)
             return
         await self._clear_admin_panel_wizard(event.sender_id)
-        async with self._panel_lock:
+        async with self._panel_lock_for(event.sender_id):
             self._sync_admin_panel_scope(event.sender_id)
             await self.admin_panel.start_login_wizard_for_user(event, event.sender_id)
 
@@ -13414,8 +14139,15 @@ class SaaSBot:
 
         loop = asyncio.get_event_loop()
         try:
+            # v2.13.4 (UP-MED-3): pass the main asyncio loop through to
+            # apply_update so the disable-accounts hook can be scheduled
+            # on the main loop via run_coroutine_threadsafe (the hook's
+            # Telethon coroutines are bound to this loop). The previous
+            # code let apply_update call asyncio.run(hook()) from the
+            # worker thread, which created a new loop and silently failed
+            # with "Future attached to a different loop".
             success, msg = await loop.run_in_executor(
-                None, updater.apply_update
+                None, lambda: updater.apply_update(main_loop=loop)
             )
         except Exception as e:
             await event.edit(
@@ -13508,12 +14240,34 @@ class SaaSBot:
 
         # v2.8.13 C6: اگه فعال شد، loop رو همین حالا spawn کن —
         # نیاز به restart نباشه.
+        #
+        # PATCH (PATCH-5-TELEGRAM / TG-CRIT-1): قبلاً اینجا از
+        # `asyncio.create_task(...)` خام استفاده می‌شد — نه ارجاعِ قوی
+        # (GC risk طبق مستندات CPython) و نه duplicate-guard. هر toggleِ
+        # off→on یه حلقه‌ی جدیدِ `while True` spawn می‌کرد و چند toggle
+        # در چند دقیقه N حلقه‌ی هم‌زمان روی هم‌سان `apply_update()` می‌ساخت
+        # که می‌تونست in-place upgrade را خراب کند. حالا از `_spawn_bg`
+        # (با ارجاعِ قوی در `_BG_TASKS`) و از `_AUTO_UPDATE_TASK` سراسری
+        # به‌عنوان duplicate-guard استفاده می‌کنیم.
         if new_value == "1":
-            try:
-                asyncio.create_task(_auto_update_loop_wrapper())
+            global _AUTO_UPDATE_TASK
+            if _AUTO_UPDATE_TASK is None or _AUTO_UPDATE_TASK.done():
+                _AUTO_UPDATE_TASK = _spawn_bg(
+                    _auto_update_loop_wrapper(), "auto-update"
+                )
                 print("🌐 [auto_update] loop هم‌اکنون spawn شد")
-            except Exception as _e:
-                print(f"⚠️ [auto_update] spawn loop ناموفق: {_e}")
+            else:
+                print("ℹ️ [auto_update] loop از قبل در حال اجراست — spawn جدید skip شد")
+        else:
+            # اگه OFF شد، تسکِ در حال اجرا را cancel کن تا loop در next
+            # iteration متوقف بشه (همون رفتاری که در پیامِ answer وعده
+            # داده می‌شه).
+            if _AUTO_UPDATE_TASK is not None and not _AUTO_UPDATE_TASK.done():
+                try:
+                    _AUTO_UPDATE_TASK.cancel()
+                    print("⏹️ [auto_update] loop cancel شد — در next iteration متوقف می‌شه")
+                except Exception as _e:
+                    print(f"⚠️ [auto_update] cancel loop ناموفق: {_e}")
 
         # v2.8.13 C7: استفاده از نام سرویس واقعی
         svc_name = os.environ.get("CIANET_SERVICE_NAME", "selfbot")
@@ -13664,6 +14418,26 @@ class SaaSBot:
         if not main_py.exists():
             main_py = _Path(_os.path.abspath(__file__))
 
+        # v2.13.4 (UP-HIGH-1): path traversal prevention. The previous
+        # code joined the URL-decoded `name` directly into
+        # `versions_dir / name` and additionally fell back to
+        # `_Path(name)` (an absolute path), which allowed a callback
+        # like `owner_rollback_go:%2Fetc%2Fpasswd` to escape the
+        # `versions/` directory and overwrite `main.py` with any
+        # attacker-chosen file (then `systemctl restart` would re-run
+        # the substituted code as the service user). Reject anything
+        # that isn't a bare filename and verify the resolved candidate
+        # stays inside `versions_dir`.
+        if "/" in name or "\\" in name or name.startswith(".") or os.path.isabs(name):
+            await event.answer("نام فایل نامعتبر است.", alert=True)
+            return
+        _candidate_check = versions_dir / name
+        # Resolve and verify it's still inside versions_dir (defence
+        # in depth even after the separator/absolute checks above).
+        if not os.path.abspath(_candidate_check).startswith(os.path.abspath(versions_dir) + os.sep):
+            await event.answer("نام فایل نامعتبر است.", alert=True)
+            return
+
         # پیدا کردن فایلِ مبدا
         src_path = None
         candidate1 = versions_dir / name
@@ -13673,12 +14447,10 @@ class SaaSBot:
             candidate2 = versions_dir / "stable" / name
             if candidate2.is_file():
                 src_path = candidate2
-        if src_path is None:
-            # fallback: کل path
-            candidate3 = _Path(name)
-            if candidate3.is_file():
-                src_path = candidate3
-
+        # v2.13.4 (UP-HIGH-1): the absolute-path `candidate3 = _Path(name)`
+        # fallback has been removed — it allowed callbacks containing
+        # `/tmp/evil.py` or `/etc/passwd` to bypass the `versions/`
+        # containment and overwrite main.py with arbitrary content.
         if src_path is None:
             await event.edit(
                 f"❌ نسخه‌ی `{name}` پیدا نشد.",
@@ -13693,6 +14465,17 @@ class SaaSBot:
             backup_path = versions_dir / backup_name
             versions_dir.mkdir(parents=True, exist_ok=True)
             _shutil.copy2(main_py, backup_path)
+            # v2.13.4 (UP-MED-6): chmod 0600 — shutil.copy2 preserves
+            # the source mode (typically 0644 for main.py), leaving the
+            # backup world-readable inside `versions/` (default mode 0755).
+            # The auto-update backup path (cianet_updater._backup_main_py)
+            # already applies 0600; mirror that here so the rollback
+            # backup of the full main.py source isn't readable by every
+            # local user.
+            try:
+                os.chmod(backup_path, 0o600)
+            except OSError:
+                pass  # best-effort (FS may not support chmod)
             backup_str = str(backup_path)
         except Exception as e:
             await event.edit(
@@ -14079,11 +14862,27 @@ class SaaSBot:
                             + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
                         )
                         print(f"ℹ️ [dedicated_bot] bot#{bot_id} expired — fresh 30d window set.")
+                        # PATCH (PATCH-10-CLEANUP DED-11): the silent
+                        # expire_date refresh on stopped→active toggle
+                        # bypasses the payment flow (only OWNER/ADMIN can
+                        # reach this code path, so it's admin-side abuse, not
+                        # a user exploit). Until a confirmation dialog or
+                        # "system OWNER only" gate is added, log every silent
+                        # extension so the audit trail shows who granted it
+                        # and the new expiry.
+                        log_action(event.sender_id, "dedicated_bot_extend_silent",
+                                   f"bot#{bot_id} new_expire={_fresh_expire}")
                 except Exception:
                     _fresh_expire = _format_date(
                         datetime.now(timezone.utc)
                         + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
                     )
+                    # PATCH (PATCH-10-CLEANUP DED-11): the stored expire_date
+                    # was unparseable — we can't verify it isn't in the past,
+                    # so the bot is also being given a fresh 30d window. Log
+                    # it for the same audit reason as the path above.
+                    log_action(event.sender_id, "dedicated_bot_extend_silent",
+                               f"bot#{bot_id} new_expire={_fresh_expire} reason=parse_failed")
             else:
                 _fresh_expire = _format_date(
                     datetime.now(timezone.utc)
@@ -14363,10 +15162,16 @@ class SaaSBot:
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("فقط OWNER به Backup دسترسی دارد.", alert=True)
             return
-        if self._panel_lock.locked():
+        # PATCH (PATCH-9-CONCURRENCY / CON-MED-4): قبلاً اینجا از یک
+        # `self._panel_lock` مشترک استفاده می‌شد و اگر هر کاربری (حتی
+        # کاربرِ دیگر) در حال اجرای عملیاتِ پنل بود، این چک True می‌شد
+        # و OWNER را reject می‌کرد. حالا چک فقط به قفلِ per-userِ همین
+        # OWNER نگاه می‌کند — یعنی فقط از دوبار‌کلیکِ خودِ OWNER روی
+        # همین دکمه جلوگیری می‌کند، نه از فعالیتِ کاربرانِ دیگر.
+        if self._panel_lock_for(event.sender_id).locked():
             await event.answer("⏳ یک عملیات پنل در حال اجراست؛ کمی صبر کن.", alert=True)
             return
-        async with self._panel_lock:
+        async with self._panel_lock_for(event.sender_id):
             await self._owner_show_backup_locked(event)
 
     async def _owner_show_backup_locked(self, event):
@@ -15487,6 +16292,56 @@ class SaaSBot:
             # با regex از نام پلن می‌خوندیم که برای نام‌های فارسی (۱ ماهه)
             # اشتباه می‌داد.
             plan_name = order["plan"]
+            # DED-4 (PATCH-1-PAYMENT-CRIT): DEDICATED_BOT_PLAN نباید
+            # create_subscription بسازد (get_pricing برای این پلن None
+            # برمی‌گرداند و یک اشتراکِ ۳۰ روزه‌ی بی‌معنی با plan_name
+            # "ربات اختصاصی" ساخته می‌شد). به‌جایش، یک ربات اختصاصیِ
+            # در انتظار برای این کاربر پیدا کن و آن را activate کن
+            # (mirror pay_order_trc20_atomic و approve_card_payment_atomic).
+            if plan_name == DEDICATED_BOT_PLAN:
+                bot = get_pending_dedicated_bot_for_reseller(event.sender_id)
+                if not bot:
+                    # Refund: wallet credit + mark order as cancelled.
+                    try:
+                        wallet_credit(event.sender_id, amount, OWNER_ID,
+                                      reason="refund: dedicated_bot no pending bot")
+                    except Exception as _re:
+                        print(f"❌ [wallet_pay] refund FAILED: {_re}")
+                    try:
+                        with _conn_immediate() as _rc:
+                            _rc.execute(
+                                "UPDATE orders SET status = 'cancelled' "
+                                "WHERE id = ? AND status = 'paid'",
+                                (oid,),
+                            )
+                    except Exception:
+                        pass
+                    await event.edit(
+                        f"❌ پرداخت برداشته شد، ولی هیچ درخواستِ ربات "
+                        f"اختصاصیِ در انتظاری برای تو پیدا نشد.\n\n"
+                        f"اول از منوی «🤖 ربات اختصاصی» توکن رباتت رو "
+                        f"بفرست، بعد دوباره پرداخت کن. مبلغ {fa_digits(amount)} "
+                        f"Toman به کیف پولت برگشت.",
+                        buttons=[UI.nav_row()],
+                    )
+                    return
+                # Activate the dedicated bot (mirror _activate_dedicated_bot
+                # call in _owner_review_payment).
+                try:
+                    await self._activate_dedicated_bot(
+                        {"user_id": event.sender_id, "id": order["id"]}
+                    )
+                except Exception as _ae:
+                    print(f"⚠️ [wallet_pay] _activate_dedicated_bot failed: {_ae}")
+                await event.edit(
+                    f"✅ پرداخت با کیف پول انجام شد\n\n"
+                    f"🧾 فاکتور: `{order['order_no']}`\n"
+                    f"💰 مبلغ: {fa_digits(amount)} Toman\n"
+                    f"💳 موجودی جدید: {fa_digits(pay_result['balance'])} Toman\n\n"
+                    f"✅ ربات اختصاصی #{bot['id']} فعال شد!",
+                    buttons=[UI.nav_row()],
+                )
+                return
             days = 30  # default fallback
             try:
                 _pricing = get_pricing(plan_name)
@@ -15827,11 +16682,59 @@ class SaaSBot:
                 # حالا فقط 6 کاراکتر اول (bot_id prefix، که public هست) لاگ
                 # می‌شود و secret کاملاً protected است.
                 log_action(uid, "dedicated_bot_request", f"token={token[:6]}...")
-                await event.respond(
-                    f"✅ **ربات اختصاصی ثبت شد!**\n\n"
-                    f"🤖 توکن: `{token[:20]}...`\n"
-                    f"⏳ OWNER باید فعالش کنه."
-                )
+                # PATCH (PATCH-10-CLEANUP DED-8): user-facing message also
+                # used `token[:20]` (bot_id + ':' + ~9 chars of secret) —
+                # inconsistent with the audit-log fix above. Reduced to
+                # `token[:6]` (bot_id prefix only, which is public).
+                # C2+DED-1 wallet path (PATCH-1-PAYMENT-CRIT): if the user
+                # already has a paid DEDICATED_BOT_PLAN order with
+                # pay_method='wallet' (e.g., from _process_dedicated_bot_payment's
+                # wallet branch, which debits the wallet + marks the order
+                # paid BEFORE the wizard starts), activate the bot
+                # immediately instead of leaving it stuck in pending_payment
+                # forever. The OWNER has no UI path to activate a wallet-
+                # paid bot since there is no `payments` row for
+                # _owner_review_payment to act on. Restrict to
+                # pay_method='wallet' so we don't grab a card-paid order
+                # (handled by admin approval) or a TRC20-paid order
+                # (handled by pay_order_trc20_atomic's C1+DED-1 patch).
+                # Exclude orders already linked to a dedicated_bots row
+                # via payment_id (so a new token doesn't grab an already-
+                # used paid order).
+                _paid_order = None
+                try:
+                    with _conn() as _pc:
+                        _paid_order = _pc.execute(
+                            "SELECT id FROM orders "
+                            "WHERE user_id = ? AND plan = ? AND status = 'paid' "
+                            "AND pay_method = 'wallet' "
+                            "AND id NOT IN (SELECT payment_id FROM dedicated_bots "
+                            "               WHERE payment_id IS NOT NULL) "
+                            "ORDER BY id DESC LIMIT 1",
+                            (uid, DEDICATED_BOT_PLAN),
+                        ).fetchone()
+                except Exception:
+                    _paid_order = None
+                if _paid_order:
+                    _paid_order_id = dict(_paid_order)["id"]
+                    try:
+                        await self._activate_dedicated_bot(
+                            {"user_id": uid, "id": _paid_order_id}
+                        )
+                    except Exception as _ae:
+                        print(f"⚠️ [wiz_dedicated_bot_token] _activate_dedicated_bot failed: {_ae}")
+                        await event.respond(
+                            f"✅ **ربات اختصاصی ثبت شد!**\n\n"
+                            f"🤖 توکن: `{token[:6]}...`\n"
+                            f"❌ فعال‌سازی خودکار با خطا مواجه شد — "
+                            f"با پشتیبانی تماس بگیر."
+                        )
+                else:
+                    await event.respond(
+                        f"✅ **ربات اختصاصی ثبت شد!**\n\n"
+                        f"🤖 توکن: `{token[:6]}...`\n"
+                        f"⏳ حالا فاکتور رو پرداخت کن تا ربات فعال بشه."
+                    )
             except Exception as e:
                 await event.respond(f"❌ خطا: {e}")
             return True
@@ -16198,6 +17101,20 @@ class SaaSBot:
                         await event.respond(
                             "❌ این فاکتور دیگر معتبر نیست (منقضی یا پرداخت شده)."
                         )
+                    elif res["error"] == "no_pending_bot":
+                        # C1+DED-1 (PATCH-1-PAYMENT-CRIT): DEDICATED_BOT_PLAN
+                        # paid via TRC20 but no pending dedicated bot exists
+                        # for this user. The order has been refunded
+                        # (status=cancelled, txid freed) — instruct the user
+                        # to first submit a bot token via the dedicated bot
+                        # purchase menu, then pay again.
+                        await event.respond(
+                            "❌ پرداخت تایید شد ولی هیچ درخواستِ ربات اختصاصیِ "
+                            "در انتظاری برای تو پیدا نشد. مبلغ فاکتور لغو شد "
+                            "و هش تراکنش آزاد شد.\n\n"
+                            "اول از منوی «🤖 ربات اختصاصی» توکن رباتت رو بفرست، "
+                            "بعد دوباره پرداخت کن."
+                        )
                     else:
                         await event.respond(
                             "❌ خطا در ثبت پرداخت؛ با پشتیبانی تماس بگیر."
@@ -16205,24 +17122,50 @@ class SaaSBot:
                     self.wizards.pop(event.sender_id, None)
                     return True
                 self.wizards.pop(event.sender_id, None)
-                # بعد از پرداخت موفق، اگر سلف‌باتِ کاربر به‌خاطر انقضای قبلی
-                # متوقف شده بود، دوباره فعال می‌شود (رزوم).
-                try:
-                    await self._resume_user_selfbots(event.sender_id)
-                except Exception:
-                    pass
-                await event.respond(
-                    f"✅ پرداخت تایید شد ({msg}) و اشتراک «{res['plan']}» فعال شد! 🎉\n\n"
-                    "برای لاگین اکانت تلگرامت از منوی اصلی اقدام کن."
-                )
-                try:
-                    await self._notify_owner(
-                        f"💵 **پرداخت خودکار تتر تایید شد**\n"
-                        f"فاکتور {order['order_no']} — کاربر `{event.sender_id}` — "
-                        f"{order['amount_usdt']:.2f} USDT\nپلن: {order['plan']}"
+                if res.get("dedicated"):
+                    # C1+DED-1 (PATCH-1-PAYMENT-CRIT): DEDICATED_BOT_PLAN
+                    # paid via TRC20 + a pending bot exists for this user.
+                    # Activate it now (mirror the card path's
+                    # _activate_dedicated_bot call at _owner_review_payment).
+                    # pay["id"] is the order_id, which gets stored as
+                    # payment_id on the dedicated_bots row.
+                    try:
+                        await self._activate_dedicated_bot(
+                            {"user_id": event.sender_id, "id": order["id"]}
+                        )
+                    except Exception as _ae:
+                        print(f"⚠️ [wiz_trx_hash] _activate_dedicated_bot failed: {_ae}")
+                    await event.respond(
+                        f"✅ پرداخت تایید شد ({msg}) و ربات اختصاصی فعال شد! 🎉\n\n"
+                        "مالک می‌تونه از /start توی ربات جدیدش استفاده کنه."
                     )
-                except Exception:
-                    pass
+                    try:
+                        await self._notify_owner(
+                            f"💵 **پرداخت خودکار تتر تایید شد (ربات اختصاصی)**\n"
+                            f"فاکتور {order['order_no']} — کاربر `{event.sender_id}` — "
+                            f"{order['amount_usdt']:.2f} USDT\nپلن: {order['plan']}"
+                        )
+                    except Exception:
+                        pass
+                else:
+                    # بعد از پرداخت موفق، اگر سلف‌باتِ کاربر به‌خاطر انقضای قبلی
+                    # متوقف شده بود، دوباره فعال می‌شود (رزوم).
+                    try:
+                        await self._resume_user_selfbots(event.sender_id)
+                    except Exception:
+                        pass
+                    await event.respond(
+                        f"✅ پرداخت تایید شد ({msg}) و اشتراک «{res['plan']}» فعال شد! 🎉\n\n"
+                        "برای لاگین اکانت تلگرامت از منوی اصلی اقدام کن."
+                    )
+                    try:
+                        await self._notify_owner(
+                            f"💵 **پرداخت خودکار تتر تایید شد**\n"
+                            f"فاکتور {order['order_no']} — کاربر `{event.sender_id}` — "
+                            f"{order['amount_usdt']:.2f} USDT\nپلن: {order['plan']}"
+                        )
+                    except Exception:
+                        pass
             else:
                 await event.respond(
                     f"❌ {msg}\n\nاگر هش درست است، چند دقیقه صبر کن و دوباره بفرست."
@@ -17027,11 +17970,15 @@ class SaaSBot:
             # ویزاردِ بازِ مخصوصِ همین کاربر کاری نمی‌کند؛ برای OWNER/ADMIN/
             # RESELLER (که همیشه مجازند) و برای USER عادیِ وسطِ ویزاردِ
             # لاگین (تگ/شماره/کد) دقیقاً همین مسیر است. scope پنل هم درست
-            # قبل از فراخوانی روی همین کاربر تنظیم می‌شود — و چون پنل یک
-            # singleton مشترک است، کل (sync + dispatch) زیر _panel_lock می‌رود
-            # تا رویدادِ هم‌زمانِ کاربرِ دیگر نتواند وسطِ dispatch scope را
-            # عوض کند.
-            async with self._panel_lock:
+            # قبل از فراخوانی روی همین کاربر تنظیم می‌شود.
+            # PATCH (PATCH-9-CONCURRENCY / CON-MED-4): قبلاً یک
+            # `_panel_lock` مشترک بین همه‌ی کاربران بود و کل (sync +
+            # dispatch) زیر آن سریال می‌شد تا رویدادِ هم‌زمانِ کاربرِ دیگر
+            # نتواند وسطِ dispatch scope را عوض کند. ولی این یعنی هر
+            # عملیاتِ طولانیِ یک کاربر، همه‌ی کاربرانِ دیگر را hang می‌کرد.
+            # حالا هر کاربر قفلِ خودش را دارد (`_panel_lock_for`) — همان
+            # امنیتِ scope را دارد، ولی دیگران از آن متاثر نمی‌شوند.
+            async with self._panel_lock_for(event.sender_id):
                 self._sync_admin_panel_scope(event.sender_id)
                 await self.admin_panel.handle_message(event)
 
@@ -17149,6 +18096,24 @@ class SaaSBot:
                     _, uid, scope = data.split(":", 2)
                     await self._owner_revoke_capability(event, safe_callback_int(uid, 0), scope)
                     return
+                # DED-5 (PATCH-1-PAYMENT-CRIT): dbcap_* routes were only
+                # routed in AdminBot.handle_callback, where self is the
+                # AdminBot instance and the _owner_*_dbot_capability methods
+                # (defined on SaaSBot) raise AttributeError. Mirror the
+                # v1.9.0 cap_* fix: route at the SaaSBot level too, gated
+                # by role == ROLE_OWNER.
+                if data.startswith("dbcap:") and role == ROLE_OWNER:
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_show_dbot_capability(event, bot_id)
+                    return
+                if data.startswith("dbcap_grant:") and role == ROLE_OWNER:
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_grant_dbot_capability(event, bot_id)
+                    return
+                if data.startswith("dbcap_revoke:") and role == ROLE_OWNER:
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_revoke_dbot_capability(event, bot_id)
+                    return
                 if data == "user_account":
                     await self._show_account_card(event)
                     return
@@ -17174,7 +18139,7 @@ class SaaSBot:
                         await event.answer("⛔ دسترسی نداری", alert=True)
                         return
                     self.wizards.pop(event.sender_id, None)
-                    async with self._panel_lock:
+                    async with self._panel_lock_for(event.sender_id):
                         self._sync_admin_panel_scope(event.sender_id)
                         await self.admin_panel._show_main_menu(event.chat_id, edit_event=event)
                     return
@@ -17477,7 +18442,7 @@ class SaaSBot:
                     # نباید خود event.data را دستکاری کنیم — telethon آن را
                     # read-only نگه می‌دارد. به‌جایش admin_panel.handle_callback
                     # را با data override صدا می‌زنیم.
-                    async with self._panel_lock:
+                    async with self._panel_lock_for(event.sender_id):
                         self._sync_admin_panel_scope(event.sender_id)
                         await self.admin_panel.handle_callback(event, data=route)
                     return
@@ -18198,7 +19163,7 @@ class SaaSBot:
                     # تنظیم می‌کنیم (owner_filter={user_id}) تا اگر لاگین
                     # موفق شد و کاربر به پنل «مدیریت اکانت‌های سلف» فرود آمد،
                     # فقط اکانت‌های خودش را ببیند و هیچ‌چیز دیگری.
-                    async with self._panel_lock:
+                    async with self._panel_lock_for(event.sender_id):
                         self._sync_admin_panel_scope(event.sender_id)
                         await self.admin_panel.start_login_wizard_for_user(event, event.sender_id)
                     return
@@ -18280,7 +19245,7 @@ class SaaSBot:
             #   (۳) همه‌ی عملیاتِ روی اکانت‌ها با owner_filter (که الان
             #       روی همین کاربر تنظیم شده) گارد می‌شوند — برای USER
             #       یعنی فقط اکانت‌های خودش.
-            async with self._panel_lock:
+            async with self._panel_lock_for(event.sender_id):
                 self._sync_admin_panel_scope(event.sender_id)
                 await self.admin_panel.handle_callback(event, data=data)
 
@@ -18533,6 +19498,16 @@ class HelperBot:
         )
         await asyncio.wait_for(
             self.client.start(bot_token=HELPER_BOT_TOKEN), timeout=30)
+        # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-2): HelperBot.start هیچ‌گاه
+        # check_session_health را صدا نمی‌زند، پس فایل سشن با umask پیش‌فرض
+        # (0644) ساخته می‌شود و تا ابد world-readable می‌ماند. حتی اگر توکنِ
+        # رباتِ راهنما کنترلِ چندانی ندهد، کلیدِ احراز هویتِ تلگرام در
+        # سشن ذخیره می‌شود و افشای آن می‌تواند به هویت‌سپاری/جعل منجر شود.
+        # بلافاصله 0600 می‌کنیم.
+        try:
+            _chmod_private(session_path + ".session")
+        except Exception:
+            pass
         self._register()
         me = await self.client.get_me()
         print(f"🤖 ربات راهنما بالا آمد: @{getattr(me, 'username', '?')}")
@@ -18830,7 +19805,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.13.3"
+BUILD_VERSION = "2026-10-06-v2.14.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -19106,7 +20081,11 @@ def cleanup_orphan_sessions() -> None:
             f"(مسیر: {CONFIG_FILE}). هیچ سشنی حذف نشد."
         )
         return
-    known = set(cfg.keys()) | {ADMIN_BOT_SESSION_NAME}
+    known = set(cfg.keys()) | {ADMIN_BOT_SESSION_NAME, HELPER_SESSION_NAME}
+    # PATCH (PATCH-6-SESSION-2FA / AUDIT-1-AUTH-5): HELPER_SESSION_NAME
+    # ("helper_bot") باید در مجموعه‌ی known باشد تا cleanup_orphan_sessions
+    # سشنِ رباتِ راهنما را یتیم نشناخت و هر استارتاپ حذف نکند. حذفِ هر
+    # استارتاپی باعث re-loginِ غیرضروری + خطر 409 Conflict می‌شد.
     now = time.time()
     removed = 0
     for fname in os.listdir(SESSIONS_DIR):
@@ -19314,15 +20293,25 @@ def unregister_account(tag: str) -> None:
     # وگرنه مونوتونیک رشد می‌کنند:
     #   ۱. BOT_STATUS[tag] — وضعیت runtime (starting/ready/error/...)
     #      هیچ‌وقت بعد از توقفِ دائمی پاک نمی‌شد.
-    #   ۲. _TAG_LOCKS[tag] — قفل per-tag برای جلوگیری از دو run_bot هم‌زمان.
-    #      اگر اکانت دیگر وجود ندارد، قفل هم دیگر لازم نیست.
-    #   ۳. _START_LOCKS[tag] — قفلِ مرکزیِ ensure_started. همان بالا.
+    #   ۲. _SEC_LOCKS[tag] — قفلِ هم‌زمانیِ عملیاتِ حساسِ پنلِ ادمین
+    #      (CON-LOW-6 / PATCH-9-CONCURRENCY): قبلاً فقط مونوتونیک رشد
+    #      می‌کرد و برای تگ‌های حذف‌شده هرگز تمیز نمی‌شد. حالا در همین
+    #      مسیر تمیز می‌شود.
     # نکته: `_PENDING_STARTS[tag]` و `_RUNTIME_TASKS[tag]` خودشان با
     # done_callback و در `finally` تمیز می‌شوند، پس نیازی به لمسِ
     # آن‌ها اینجا نیست. `_STOP_INFLIGHT[tag]` هم در finally پاک می‌شود.
+    #
+    # PATCH (PATCH-9-CONCURRENCY / CON-HIGH-1): `_TAG_LOCKS.pop` و
+    # `_START_LOCKS.pop` از این تابع حذف و به `finally` بیرونیِ `run_bot`
+    # منتقل شدند. قبلاً اینجا pop می‌شدند و چون `unregister_account`
+    # داخلِ finallyِ داخلیِ `run_bot` صدا زده می‌شود (که قبل از
+    # `lock.release()` در finallyِ بیرونی است)، در طولِ پنجره‌ی backoff
+    # sleep، lock از روی تگ پاک بود ولی هنوز توسطِ این نمونه‌ی run_bot
+    # hold می‌شد — این اجازه می‌داد `ensure_started` یک `run_bot` جدید
+    # روی همان سشن بسازد و فایلِ سشن را خراب کند. حالا pop فقط بعد از
+    # `lock.release()` در finallyِ بیرونی انجام می‌شود.
     BOT_STATUS.pop(tag, None)
-    _TAG_LOCKS.pop(tag, None)
-    _START_LOCKS.pop(tag, None)
+    _SEC_LOCKS.pop(tag, None)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -19348,6 +20337,14 @@ _PENDING_STARTS: dict = {}
 # TelegramClient) برای هر تگ در هر لحظه؛ جلوگیری از دو کلاینت هم‌زمان روی
 # یک فایل سشن.
 _TAG_LOCKS: dict = {}
+
+# _SEC_LOCKS: tag → asyncio.Lock — قفلِ هم‌زمانیِ عملیاتِ حساسِ پنلِ ادمین
+# (CON-LOW-6 / PATCH-9-CONCURRENCY): قبلاً به‌صورت `self._sec_locks` روی
+# نمونه‌ی AdminBot نگه داشته می‌شد و هیچ‌گاه برای تگ‌های حذف‌شده تمیز
+# نمی‌شد (رشدِ مونوتونیک). حالا به سطحِ ماژول منتقل شده تا
+# `unregister_account` بتواند آن را به‌طور امن pop کند. AdminBot با
+# `self._sec_lock(tag)` از همین دیکشنرِ سراسری استفاده می‌کند.
+_SEC_LOCKS: dict = {}
 
 
 _STATUS_HUMAN = {
@@ -19701,8 +20698,14 @@ async def _auto_update_loop_wrapper() -> None:
             # apply — PATCH (v2.5.0 H1 FIX): در thread executor اجرا کن
             # تا event loop block نشه. قبلاً sync apply_update() مستقیم
             # صدا زده می‌شد که ~۱۰۰s event loop رو block می‌کرد.
+            # v2.13.4 (UP-MED-3): pass the main asyncio loop through to
+            # apply_update so the disable-accounts hook can be scheduled
+            # on the main loop via run_coroutine_threadsafe (the hook's
+            # Telethon coroutines are bound to this loop).
             loop = asyncio.get_event_loop()
-            success, msg = await loop.run_in_executor(None, apply_update)
+            success, msg = await loop.run_in_executor(
+                None, lambda: apply_update(main_loop=loop)
+            )
             print(f"🔄 [auto-update] apply_update: {msg}")
             if success:
                 # قبل از restart یه notify دیگه بفرست
@@ -21390,7 +22393,14 @@ class SelfBot:
         self._enemy_rate: dict = {}
         # {chat_id: bool} — آیا طرفِ مقابلِ این پیوی ربات است؟ یک بار
         # تشخیص داده می‌شود و بعد به‌ازای هر پیام دوباره resolve نمی‌شود.
-        self._bot_chat_cache: dict = {}
+        # PATCH (PATCH-9-CONCURRENCY / CON-LOW-5): قبلاً یک `dict` ساده با
+        # سقفِ ۵۱۲ بود و در سرریز، کلِ کش را `clear()` می‌کرد — یعنی
+        # بعد از هر سرریز، ۵۱۲ چتِ فعالِ بعدی هرکدام یک `get_entity`
+        # شبکه‌ای (cache stampede) می‌خوردند. حالا یک `OrderedDict` با
+        # سیاستِ LRU است: هر دسترسی با `move_to_end` به انتهای صف
+        # می‌رود و در سرریز فقط قدیمی‌ترین (`popitem(last=False)`) یک
+        # به‌یک drop می‌شود — هم کشِ پایدار، هم هیچ stampede‌ای.
+        self._bot_chat_cache: "OrderedDict[int, bool]" = OrderedDict()
         # شمارنده‌ی زنده‌ی مجموع بایت‌های مدیای کش‌شده.
         self._media_bytes = 0
 
@@ -22269,8 +23279,24 @@ class SelfBot:
                 # چک کن FloodWait recovery فعال نیست
                 import time as _t_chk
                 if self._flood_until and _t_chk.time() < self._flood_until:
-                    skipped += 1
-                    continue
+                    # PATCH (PATCH-9-CONCURRENCY / CON-MED-3): قبلاً اینجا
+                    # `skipped += 1; continue` بود — یعنی به‌محضِ اولین
+                    # FloodWait، `_flood_until` ست می‌شد و همه‌ی dialogهای
+                    # باقی‌مانده در یک حلقه‌ی تایت (بدون sleep) skip
+                    # می‌شدند؛ کاربر آمارِ «sent=X, skipped=N-X» می‌دید و
+                    # فکر می‌کرد ارسال کامل شد، در حالی که اکثر چت‌ها پیام
+                    # نگرفتند. حالا به‌جای skip، تا انقضای پنجره‌ی
+                    # FloodWait sleep می‌کنیم و بعد همین dialog را ارسال
+                    # می‌کنیم — broadcast واقعاً بعد از recover ادامه
+                    # می‌یابد، نه اینکه بی‌صدا تمامِ بقیه را رها کند.
+                    _sleep = self._flood_until - _t_chk.time()
+                    if _sleep > 0:
+                        print(f"⏳ [broadcast:{self.tag}] FloodWait window "
+                              f"still active — sleeping {_sleep:.1f}s before "
+                              f"continuing dialog {d.id}")
+                        await asyncio.sleep(_sleep)
+                    # حالا پنجره‌ی FloodWait منقضی شده؛ ادامه می‌دهیم و
+                    # همین dialog را ارسال می‌کنیم (نه skip).
 
                 # ارسال (forward)
                 try:
@@ -22290,10 +23316,31 @@ class SelfBot:
                     try:
                         await reply_msg.forward_to(d.id)
                         sent_ok += 1
+                    except errors.FloodWaitError as _fwe2:
+                        # PATCH (PATCH-5-TELEGRAM / TG-HIGH-2): قبلاً این
+                        # بلوک یه `except Exception` بود که FloodWaitError را
+                        # هم می‌گرفت ولی `_flood_until` را به‌روز نمی‌کرد —
+                        # بنابراین iteration بعدی بی‌وقفه send می‌کرد و
+                        # FloodWaitها از چند ثانیه به چند دقیقه escalate
+                        # می‌کردند (soft-ban risk). حالا جداً catch می‌شود
+                        # و `_flood_until` به‌روز می‌شود.
+                        _wait2 = (_fwe2.seconds or 30) + 2
+                        self._flood_until = _t.time() + _wait2
+                        sent_fail += 1
+                        print(f"⏳ [broadcast:{self.tag}] retry FloodWait "
+                              f"{_wait2}s to {d.id} — فوروارد این چت skip شد")
+                        await asyncio.sleep(_wait2)
                     except Exception as _e:
                         sent_fail += 1
                         print(f"⚠️ [broadcast:{self.tag}] retry fail to {d.id}: "
                               f"{type(_e).__name__}")
+                    # PATCH (PATCH-5-TELEGRAM / TG-HIGH-2): بعد از retry —
+                    # چه موفق، چه ناموفق — همیشه jitter ۱-۳ ثانیه‌ای قبل
+                    # از چتِ بعدی. قبلاً این sleep فقط در مسیرِ success
+                    # اصلی بود؛ مسیرِ retry مستقیم به چتِ بعدی می‌رفت و
+                    # بدون jitter ارسال می‌کرد (anti-ban pattern شکن).
+                    _delay = 1.0 + _random.random() * 2.0
+                    await asyncio.sleep(_delay)
                 except Exception as _e:
                     sent_fail += 1
                     print(f"⚠️ [broadcast:{self.tag}] send fail to {d.id}: "
@@ -22515,6 +23562,12 @@ class SelfBot:
         """
         cached = self._bot_chat_cache.get(chat_id)
         if cached is not None:
+            # PATCH (PATCH-9-CONCURRENCY / CON-LOW-5): LRU — هر دسترسی
+            # این کلید را به انتهای صف می‌برد تا قدیمی‌ترین‌ها در سرریز
+            # به‌جای کلِ کش، فقط یکی‌شان drop شوند. اینجا فقط `move_to_end`
+            # کافی است چون `chat_id` در یک چتِ پیوی ثابت است و چندین
+            # پیامِ پشت‌سرهم از همان چت، همین کش را تازه نگه می‌دارد.
+            self._bot_chat_cache.move_to_end(chat_id)
             return cached
 
         ent = None
@@ -22536,8 +23589,15 @@ class SelfBot:
 
         result = self._entity_is_bot(ent)
         # سقفِ کش: یک عدد به‌ازای هر چتِ پیوی، با سقفِ سخت
-        if len(self._bot_chat_cache) > 512:
-            self._bot_chat_cache.clear()
+        # PATCH (PATCH-9-CONCURRENCY / CON-LOW-5): LRU eviction به‌جای
+        # `clear()` کلِ کش. قبلاً با عبور از ۵۱۲، همه‌چیز پاک می‌شد و
+        # ۵۱۲ چتِ بعدی هرکدام یک `get_entity` شبکه‌ای می‌خوردند (cache
+        # stampede). حالا فقط قدیمی‌ترین (`popitem(last=False)`) drop
+        # می‌شود و بقیه‌ی کش پایدار باقی می‌ماند. `popitem` در یک while
+        # صدا زده می‌شود تا اطمینان حاصل شود که حجم به زیرِ سقف برسد
+        # (هرچند معمولاً فقط یک بار کافی است).
+        while len(self._bot_chat_cache) >= 512:
+            self._bot_chat_cache.popitem(last=False)
         self._bot_chat_cache[chat_id] = result
         if result:
             # اگر قبلاً (پیش از این تشخیص) چیزی از این چت کش شده بود، آزادش کن
@@ -22602,7 +23662,18 @@ class SelfBot:
                             media_bytes = await message.download_media(file=bytes)
                             if media_bytes and len(media_bytes) > self._MAX_MEDIA_CACHE_BYTES:
                                 media_bytes = None
-                        except Exception:
+                        except Exception as _e:
+                            # PATCH (PATCH-5-TELEGRAM / TG-HIGH-4):
+                            # `download_media` هم می‌تواند FloodWaitError
+                            # بزند (مخصوصاً برای آلبوم‌های چندتایی). قبلاً
+                            # بی‌صدا swallow می‌شد و download بعدی بی‌وقفه
+                            # fire می‌کرد. حالا FloodWait را re-raise
+                            # می‌کنیم تا `_safe_handler` (که `_cache_message`
+                            # را در بر گرفته) `_flood_until` را coordinate
+                            # کند.
+                            if isinstance(_e, errors.FloodWaitError):
+                                self._flood_until = time.time() + (_e.seconds or 30) + 2
+                                raise
                             media_bytes = None
 
             # جایگزینیِ یک کلیدِ موجود (ادیتِ همان پیام) نباید بایت‌ها را
@@ -23524,8 +24595,17 @@ class SelfBot:
         ):
             try:
                 await event.reply(random.choice(ENEMY_REPLIES))
-            except Exception:
-                pass
+            except Exception as _e:
+                # PATCH (PATCH-5-TELEGRAM / TG-HIGH-4): قبلاً FloodWaitError
+                # اینجا بی‌صدا swallow می‌شد و `_flood_until` هیچ‌وقت ست
+                # نمی‌شد — پاسخِ بعدیِ دشمن بی‌وقفه fire می‌کرد و FloodWait
+                # escalate می‌کرد. حالا FloodWait را re-raise می‌کنیم تا
+                # `_safe_handler` (که این handler را در بر گرفته) در
+                # except مخصوصش `_flood_until` را coordinate کند.
+                if isinstance(_e, errors.FloodWaitError):
+                    self._flood_until = time.time() + (_e.seconds or 30) + 2
+                    raise
+                # خطاهای دیگر را همچنان swallow کن (spew in logs نکن).
 
         # سکوت
         if self._is_silenced(event.chat_id, event.is_private):
@@ -23613,8 +24693,15 @@ class SelfBot:
         )
         try:
             await self.client.send_message("me", msg)
-        except Exception:
-            pass
+        except Exception as _e:
+            # PATCH (PATCH-5-TELEGRAM / TG-HIGH-4): گزارشِ ادیت در tracker
+            # هم بی‌صدا FloodWait را swallow می‌کرد. یه ویرایشِ ربات با
+            # شمارنده‌ی اینلاین می‌تواند ۲۰+ گزارش/ثانیه تولید کند که
+            # اگر rate-limited بشه، بدون coordination، FloodWait escalate
+            # می‌کند. حالا re-raise تا `_safe_handler` coordinate کند.
+            if isinstance(_e, errors.FloodWaitError):
+                self._flood_until = time.time() + (_e.seconds or 30) + 2
+                raise
 
         if cached:
             cached["text"] = new_text
@@ -23720,8 +24807,14 @@ class SelfBot:
         )
         try:
             await self.client.send_message("me", summary)
-        except Exception:
-            pass
+        except Exception as _e:
+            # PATCH (PATCH-5-TELEGRAM / TG-HIGH-4): گزارشِ حذف در tracker
+            # هم مثل گزارشِ ادیت FloodWait را بی‌صدا swallow می‌کرد. حالا
+            # re-raise تا `_safe_handler` بتواند `_flood_until` را coordinate
+            # کند و iteration بعدی بی‌وقفه send نکند.
+            if isinstance(_e, errors.FloodWaitError):
+                self._flood_until = time.time() + (_e.seconds or 30) + 2
+                raise
 
         try:
             html_path = await self._build_chat_html(chat_id, sender_name, deleted_ids=set(deleted_ids))
@@ -24113,8 +25206,20 @@ class SelfBot:
         cd = OUT_COOLDOWN_SEC / (WARMUP_RATE_MULTIPLIER if now < self._warmup_until else 1.0)
         if self._out_last_ts and (now - self._out_last_ts) < cd:
             return False
-        # all checks passed — update counters
-        self._out_today += 1
+        # all checks passed — update cooldown timestamp so a concurrent/
+        # burst call to this gate (before the actual send finishes) gets
+        # gated by the cooldown.
+        #
+        # PATCH (PATCH-5-TELEGRAM / TG-MED-6): قبلاً `self._out_today += 1`
+        # هم همینجا (قبل از send واقعی) increment می‌شد. اگر `orig_send_*`
+        # FloodWaitError یا ConnectionError می‌زد، شمارنده‌ی روزانه بدون
+        # اینکه حتی یک پیام رسانده شود، بالا می‌رفت — و با ۲۰۰ تا ارسالِ
+        # ناموفق، کل سقفِ روزانه بدون خروجیِ واقعی مصرف می‌شد. حالا
+        # increment از اینجا حذف شده و در `wrapped_send_*` فقط بعد از
+        # success واقعی انجام می‌شود؛ روی exception، refund (decrement)
+        # می‌کنیم. `_out_last_ts` را همینجا ست می‌کنیم چون حتی درخواستِ
+        # ناموفق هم یک «درخواست» به سرورِ تلگرام است و cooldown نباید
+        # دور زده شود.
         self._out_last_ts = now
         return True
 
@@ -24141,7 +25246,27 @@ class SelfBot:
             # v2.9.1: gate check — اگه rate-limited، silent skip
             if not self._gate_outbound():
                 return None
-            result = await orig_send_message(*args, **kwargs)
+            # PATCH (PATCH-5-TELEGRAM / TG-MED-6): قبلاً `_out_today` در
+            # `_gate_outbound` قبل از send واقعی increment می‌شد و در صورت
+            # exception هیچ refundی نبود. حالا increment از gate حذف شده و
+            # فقط بعد از success واقعی اینجا انجام می‌شود. در صورت
+            # FloodWaitError، علاوه بر اینکه increment نمی‌کنیم،
+            # `_flood_until` را هم coordinate می‌کنیم (این قبلاً در
+            # gate نبود).
+            try:
+                result = await orig_send_message(*args, **kwargs)
+            except errors.FloodWaitError as _fe:
+                import time as _t
+                self._flood_until = _t.time() + (_fe.seconds or 30) + FLOOD_RECOVER_GRACE
+                print(f"⏳ [{self.tag}] FloodWait {_fe.seconds}s در wrapped_send_message")
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # increment نشده پس refund هم لازم نیست؛ فقط propagate
+                raise
+            # موفقیت واقعی — حالا increment
+            self._out_today += 1
             await self._preserve_offline()
             return result
 
@@ -24149,7 +25274,21 @@ class SelfBot:
             # v2.10.0: gate check (قبلاً missing بود)
             if not self._gate_outbound():
                 return None
-            result = await orig_send_file(*args, **kwargs)
+            # PATCH (PATCH-5-TELEGRAM / TG-MED-6): همان fixِ
+            # wrapped_send_message برای send_file هم اعمال شد — increment
+            # فقط بعد از success، coordination روی FloodWait.
+            try:
+                result = await orig_send_file(*args, **kwargs)
+            except errors.FloodWaitError as _fe:
+                import time as _t
+                self._flood_until = _t.time() + (_fe.seconds or 30) + FLOOD_RECOVER_GRACE
+                print(f"⏳ [{self.tag}] FloodWait {_fe.seconds}s در wrapped_send_file")
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise
+            self._out_today += 1
             await self._preserve_offline()
             return result
 
@@ -25147,12 +26286,21 @@ class SelfBot:
                         f"تکمیل شده. فردا دوباره تلاش کن."
                     )
                     return
-                self._broadcast_today_count = _broadcast_today + 1
-                self._broadcast_day_id = _broadcast_day_id
+                # PATCH (PATCH-5-TELEGRAM / TG-HIGH-5): قبلاً incrementِ
+                # `_broadcast_today_count` قبل از چکِ cooldown بود — یعنی
+                # هر بار که کاربر داخل پنجره‌ی ۶۰ ثانیه‌ی cooldown این
+                # دستور را می‌زد، شمارنده را بالا می‌برد بدون اینکه واقعاً
+                # ارسالی انجام شود. با ۵ بار mistap در ۵ دقیقه، شمارنده
+                # به سقف می‌رسید و کاربر تا آخر روز lockout می‌شد. حالا
+                # increment فقط بعد از رد شدن cooldown انجام می‌شود (یعنی
+                # فقط وقتی واقعاً broadcast اجرا می‌شود).
                 if _now - _last_broadcast < _BROADCAST_COOLDOWN:
                     _remain = int(_BROADCAST_COOLDOWN - (_now - _last_broadcast))
                     await event.edit(f"⏳ لطفاً {_remain} ثانیه دیگر صبر کن و دوباره امتحان کن.")
                     return
+                # فقط حالا — بعد از رد شدن cooldown — increment کن.
+                self._broadcast_today_count = _broadcast_today + 1
+                self._broadcast_day_id = _broadcast_day_id
                 # v2.12.18: ست کنِ فوریِ cooldown
                 self._last_broadcast_at = _now
 
@@ -25350,8 +26498,38 @@ class SelfBot:
                     # اگر تلگرام FloodWait داد، به‌جای sleep ثابت، دقیقاً
                     # به مدت خواسته‌شده صبر می‌کنیم تا اکانت گزارش/محدود
                     # نشود.
-                    wait_s = max(getattr(e, "seconds", 2) for e in flood_errors)
-                    await asyncio.sleep(wait_s + 2)
+                    #
+                    # PATCH (PATCH-5-TELEGRAM / TG-HIGH-3): قبلاً اینجا فقط
+                    # `asyncio.sleep(wait_s + 2)` اجرا می‌شد ولی
+                    # `self._flood_until` به‌روز نمی‌شد. چون دایس از
+                    # `wrapped_send_message` (و `_gate_outbound`) می‌گذرد،
+                    # iteration بعدی بی‌وقفه از gate رد می‌شد و دوباره
+                    # FloodWait می‌زد — escalade از چند ثانیه به چند دقیقه،
+                    # ریسکِ soft-ban. حالا `_flood_until` را coordinate
+                    # می‌کنیم تا gate بتواند FloodWait recovery را رعایت کند.
+                    wait_s = max(getattr(e, "seconds", 2) for e in flood_errors) + FLOOD_RECOVER_GRACE
+                    self._flood_until = time.time() + wait_s
+                    await asyncio.sleep(wait_s)
+                elif all(r is None for r in results):
+                    # PATCH (PATCH-5-TELEGRAM / TG-HIGH-3): gate مسدود
+                    # شده (daily cap تکمیل یا FloodWait recovery فعال) و
+                    # `wrapped_send_message` برای هر سه دایس `None` برگردانده.
+                    # قبلاً حلقه در این حالت هر ۰.۵ ثانیه spin می‌کرد تا
+                    # `_DICE_SAFETY_CEILING = 3600` (یک ساعت) بدون اینکه
+                    # هیچ‌وقت برنده پیدا شود — `_dice_running` می‌ماند True
+                    # و کاربر تا یک ساعت نمی‌توانست بازیِ جدیدی شروع کند.
+                    # حالا abort می‌کنیم و به کاربر اطلاع می‌دهیم.
+                    print(f"⚠️ [{self.tag}] دایس {emoji}: gate مسدود است — "
+                          f"daily cap یا FloodWait. خروج به‌جای spin بیهوده.")
+                    try:
+                        await self.client.send_message(
+                            chat_id,
+                            "❌ دایس اجرا نشد — سقف روزانه‌ی ارسال اکانت "
+                            "تکمیل شده یا FloodWait فعال است. بعداً تلاش کن."
+                        )
+                    except Exception:
+                        pass
+                    return
                 else:
                     await asyncio.sleep(0.5)
 
@@ -25986,6 +27164,19 @@ async def run_bot(tag, config, interactive=False):
         if _PENDING_STARTS.get(tag) is pending and pending.done():
             _PENDING_STARTS.pop(tag, None)
         lock.release()
+        # PATCH (PATCH-9-CONCURRENCY / CON-HIGH-1): pop قفل‌های per-tag فقط
+        # بعد از release. قبلاً این popها در `unregister_account` (که داخلِ
+        # finallyِ داخلی صدا زده می‌شود، قبل از `lock.release()`) انجام
+        # می‌شدند — در نتیجه در طولِ پنجره‌ی backoff sleep (10-300s) قفل
+        # از روی تگ پاک بود ولی هنوز توسطِ همین run_bot hold می‌شد، و
+        # `ensure_started`/`run_bot` جدیدی می‌توانست روی همان سشنِ
+        # SQLite باز شود و دیتابیس را corrupt کند. حالا pop فقط بعد از
+        # release انجام می‌شود تا در طولِ backoff همچنان `_TAG_LOCKS[tag]
+        # is lock` و `lock.locked()` True باقی بماند و هر تلاشِ هم‌زمان
+        # برای استارتِ مجددِ همان تگ، در همان چکِ `if lock.locked()` در
+        # ابتدای run_bot رد شود.
+        _TAG_LOCKS.pop(tag, None)
+        _START_LOCKS.pop(tag, None)
 
 
 async def _run_all_accounts(cfg: dict) -> None:
@@ -26041,11 +27232,23 @@ async def _run_all_accounts(cfg: dict) -> None:
     # تنظیم شده باشه، یه background task هر ۶ ساعت check می‌کنه و اگه
     # آپدیت جدیدی باشه، apply می‌کنه (با notify به OWNER). قبل از restart
     # هم یه پیام به OWNER می‌فرسته.
+    #
+    # PATCH (PATCH-5-TELEGRAM / TG-CRIT-1): اینجا هم از همان
+    # `_AUTO_UPDATE_TASK` سراسری استفاده می‌کنیم که toggle path (env
+    # handler) روی همان بنویسد. duplicate-guard در toggle چک می‌کنه که
+    # آیا تسک از قبل در حال اجراست — اگر startup اینجا را قبل از toggle
+    # پر کرده باشد، toggle دوم spawn نمی‌کند.
+    global _AUTO_UPDATE_TASK
     auto_update_task = None
     if os.environ.get("CIANET_AUTO_UPDATE", "0").strip() in ("1", "true", "yes"):
         try:
-            auto_update_task = _spawn_bg(_auto_update_loop_wrapper(), "auto-update")
-            print("🔄 [auto-update] loop شروع شد (هر ۶ ساعت چک می‌کنه)")
+            if _AUTO_UPDATE_TASK is None or _AUTO_UPDATE_TASK.done():
+                _AUTO_UPDATE_TASK = _spawn_bg(_auto_update_loop_wrapper(), "auto-update")
+                auto_update_task = _AUTO_UPDATE_TASK
+                print("🔄 [auto-update] loop شروع شد (هر ۶ ساعت چک می‌کنه)")
+            else:
+                auto_update_task = _AUTO_UPDATE_TASK
+                print("ℹ️ [auto-update] loop از قبل در حال اجراست — respawn skip شد")
         except Exception as e:
             print(f"⚠️ [auto-update] loop شروع نشد: {e}")
 
