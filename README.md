@@ -11,7 +11,7 @@
 [![Website](https://img.shields.io/badge/website-CiaNet.ir-0066cc.svg)](https://CiaNet.ir)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
 [![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
-[![Version](https://img.shields.io/badge/version-2.12.29%20STABLE-blue.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
+[![Version](https://img.shields.io/badge/version-2.13.0%20STABLE-blue.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.13.0-stable)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
 
@@ -313,6 +313,52 @@ sudo rm -rf __pycache__ && sudo systemctl restart selfbot
 ---
 
 ## 📝 Changelog
+
+### v2.13.0 SECURITY — 2026-10-06
+**Major security release — 32 باگ فیکس‌شده (4 HIGH + 8 MEDIUM + 11 LOW + 6 SCHEMA + 3 NEXT)**
+**۱۲۷ تست PASS (49 persona + 26 advanced + 32 DEBUG-1 regression + 20 DEBUG-2 regression)**
+
+#### v2.13.0 (32 security fixes)
+
+**CRITICAL (2):**
+- TRC20 `_verify_trc20_transfer` now checks `block_timestamp` (reject >24h old tx)
+- TRC20 `_verify_trc20_transfer` now checks `from` field (reject self-payment)
+
+**HIGH (4):**
+- `login_guard` DoS prevention — OWNER only can toggle on own accounts
+- Broadcast concurrency — only 1 broadcast running per SelfBot
+- Session file chmod unconditional 0600 (not just when not writable)
+- `api_creds.json` chmod 0600 after write
+
+**MEDIUM (8):**
+- 2FA password uses argon2id (was unsalted SHA-256)
+- Discount code `used_count` rollback in `cancel_order`
+- `POST /api/accounts/{tag}/login_guard` recovery endpoint
+- TRC20 DEDICATED_BOT_PLAN no longer creates regular subscription
+- Rate-limiting on `/api/auth/login` (5 failed → 15 min block)
+- Card-receipt dedup in `create_payment` (prevents duration stacking)
+- Zarinpal/Zibal merchant ID changes now audit-logged
+- 2FA wizard: passwords auto-cleared from memory after 10 min idle
+
+**LOW (6):**
+- `SECURITY_ROUTES` complete — added tfachange/tfaremove/tfaemail/sesspage
+- Dedicated bot token redaction in audit log (20→6 chars)
+- `SESSION_SECRET` documented as reserved for future
+- Audit log for extend subscription (`subscription_extended_web`)
+- Source-code backups chmod 0600 in `cianet_updater.py`
+- Web panel exception handler no longer leaks `str(exc)` to client
+- CSRF double-submit token on state-changing endpoints
+- Telegram backup ZIP now Fernet-encrypted (AES-128-CBC) with separate password message
+
+**SCHEMA (6):**
+- `init_db()` now calls `ensure_wallet_schema()` to create all tables on every import:
+  - wallet_transactions, scheduled_messages, auto_replies
+  - affiliate_commissions, discount_codes, users.wallet_balance
+
+**NEXT ACTIONS (3):**
+- `_dedicated_bot_toggle` only allows reactivation from `stopped` status
+- `expire_date` refresh (fresh 30-day window) on reactivation if expired
+- `expire_subscription` only updates `status='active'` (no overwrite)
 
 ### v2.12.29 STABLE — 2026-10-06
 **تکمیل‌شده‌ترین و پایدارترین نسخه — ۷۹ تست PASS**

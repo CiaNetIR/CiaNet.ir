@@ -75,6 +75,10 @@ _PROJECT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_PROJECT_DIR))
 
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, status
+# v2.13.0 (DEBUG-2 CSRF): Header dependency for X-CSRF-Token validation.
+# به‌عنوان _Header import شده تا با HTML <header> که در template‌ها ممکنه
+# تعریف بشه، تداخل نداشته باشه.
+from fastapi import Header as _Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -97,7 +101,15 @@ PANEL_ADMIN_USER = os.environ.get("PANEL_ADMIN_USER", "admin").strip()
 # در صورت تنظیم‌نبودن، خطا در startup لاگ می‌شه ولی پنل همچنان بالا میاد
 # (با empty-hash می‌شه لاگین به‌صورت disabled).
 PANEL_ADMIN_PASS_HASH = os.environ.get("PANEL_ADMIN_PASS_HASH", "").strip()
+# v2.12.31 (DEBUG-1 LOW-3): SESSION_SECRET قبلاً dead code بود — تعریف
+# می‌شد ولی هیچ‌جا استفاده نمی‌شد (cookie‌ها opaque token، نه signed).
+# حالا: اگر در آینده‌ی دور cookie signing خواستیم، موجود است ولی
+# warning نمی‌دهد (به‌جای رها کردن dead code misleading).
+# با docstring روشن که در حال حاضر استفاده نمی‌شود.
 SESSION_SECRET = os.environ.get("PANEL_SESSION_SECRET", "") or secrets.token_hex(32)
+# NOTE: SESSION_SECRET is reserved for future cookie signing. As of v2.12.31,
+# cookie auth uses opaque tokens stored in _sessions dict (server-side), so
+# SESSION_SECRET is NOT used — but reserved for HMAC-signed cookies in future.
 SESSION_TTL_SEC = 8 * 3600  # 8 hours
 
 # CORS: dev + production
@@ -112,6 +124,12 @@ BOT_DB = _main().DB_NAME if hasattr(_main(), 'DB_NAME') else (DATA_DIR / "bot_da
 # در production به‌تر است در Redis ذخیره بشه ولی برای single-instance اون
 # پنل کافیه. در صورت restart، session‌ها expire می‌شن (کاربر دوباره login کنه).
 _sessions: Dict[str, float] = {}  # token -> created_at
+
+# v2.13.0 (DEBUG-2 CSRF): per-session CSRF tokens for double-submit cookie pattern.
+# جلسات جدید (بعد از پچ) هم در _sessions و هم در این dict هستند. legacy
+# session‌ها (قبل از پچ) فقط در _sessions هستند و backward-compat در
+# require_csrf اجازه عبور می‌دهد (چون cianet_csrf_token cookie ندارند).
+_sessions_with_csrf: Dict[str, dict] = {}  # token -> {"created_at": float, "csrf": str}
 
 
 def _create_session() -> str:
@@ -133,10 +151,41 @@ def _valid_session(request: Request) -> bool:
     return True
 
 
+def _valid_session_with_csrf(request: Request) -> tuple:
+    """Returns (valid: bool, csrf_token: str or None).
+
+    v2.13.0 (DEBUG-2 CSRF): برای state-changing endpoints که نیاز به CSRF
+    validation دارند. هم در _sessions_with_csrf (جلسات جدید با CSRF) و هم
+    در _sessions (legacy session‌های بدون CSRF) رو چک می‌کنه تا backward-compat
+    حفظ بشه. اگه session جدید بود، csrf token ذخیره‌شده برمی‌گرده. اگه legacy
+    بود، None برمی‌گرده و require_csrf اجازه عبور می‌ده (backward-compat).
+    """
+    token = request.cookies.get("cianet_panel_session")
+    if not token:
+        return False, None
+    # Check CSRF-enabled session store first (new sessions after patch)
+    sess = _sessions_with_csrf.get(token)
+    if sess:
+        if time.time() - sess["created_at"] > SESSION_TTL_SEC:
+            _sessions_with_csrf.pop(token, None)
+            return False, None
+        return True, sess.get("csrf")
+    # Backward-compat: legacy session (only in _sessions, before CSRF patch)
+    created = _sessions.get(token)
+    if created:
+        if time.time() - created > SESSION_TTL_SEC:
+            _sessions.pop(token, None)
+            return False, None
+        return True, None  # valid legacy session — no CSRF token stored
+    return False, None
+
+
 def _invalidate_session(request: Request) -> None:
     token = request.cookies.get("cianet_panel_session")
     if token:
         _sessions.pop(token, None)
+        # v2.13.0 (DEBUG-2 CSRF): also drop the CSRF-enabled session entry
+        _sessions_with_csrf.pop(token, None)
 
 
 # ─── License-based user auth (separate from admin) ─────────────
@@ -193,6 +242,36 @@ def require_auth(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized — login required",
         )
+
+
+# v2.13.0 (DEBUG-2 CSRF): double-submit cookie CSRF protection.
+# - یک CSRF token به‌عنوان cookie (httponly=False تا JS بخواند) set می‌شه.
+# - همان token در سرور در _sessions_with_csrf ذخیره می‌شه.
+# - state-changing endpoints (POST/PATCH/DELETE) باید X-CSRF-Token header
+#   ارسال کنند که باید با cookie match کنه.
+# - GET endpoints نیازی به CSRF ندارن (طبق spec).
+# - backward-compat: legacy session‌ها (قبل از پچ) فقط cookie session دارند
+#   و CSRF cookie ندارند — این جلسات بدون چک CSRF عبور می‌کنند تا migration
+#   به‌صورت تدریجی انجام بشه.
+def require_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
+    valid, expected_csrf = _valid_session_with_csrf(request)
+    if not valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized — login required",
+        )
+    # Backward-compat: اگه cianet_csrf_token cookie وجود نداره (legacy
+    # session قبل از پچ)، اجازه عبور بده تا migration تدریجی انجام بشه.
+    csrf_cookie = request.cookies.get("cianet_csrf_token")
+    if not csrf_cookie:
+        # Legacy session — no CSRF cookie yet, allow through
+        return True
+    if not x_csrf_token or x_csrf_token != expected_csrf:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token invalid — refresh the page",
+        )
+    return True
 
 
 # ─── Password verification (bcrypt) ──────────────────────────────────
@@ -319,28 +398,97 @@ async def _startup():
 
 @app.exception_handler(Exception)
 async def _global_exc_handler(request: Request, exc: Exception):
-    # در production، جزئیات خطا به کلاینت نشون داده نمی‌شه
+    # v2.13.0 (DEBUG-2 EXC-LEAK): قبلاً str(exc)[:200] به کلاینت نشون داده
+    # می‌شد که می‌توانست schema دیتابیس، مسیر فایل، یا stack trace رو لو بده.
+    # حالا: فقط لاگ سرور-side، پیام عمومی به کلاینت.
     import traceback
-    print(f"❌ [web_panel] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    import secrets as _sec
+    # Generate a unique error ID so admin can correlate with server logs
+    _err_id = _sec.token_hex(8)
+    print(f"❌ [web_panel][{_err_id}] {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
     traceback.print_exc()
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal error: {type(exc).__name__}", "message": str(exc)[:200]},
+        content={
+            "detail": "Internal server error",
+            "error_id": _err_id,
+            "message": "خطای داخلی سرور — با پشتیبانی تماس بگیرید و کد خطا را ارائه دهید.",
+        },
     )
 
 
 # ─── Auth endpoints ──────────────────────────────────────────────────
+# v2.12.31 (DEBUG-1 MEDIUM-5): Rate-limiting برای admin login.
+# قبلاً هیچ rate-limit نبود و admin password می‌توانست brute-force شود.
+# حالا: 5 تلاش ناموفق در 5 دقیقه → 15 دقیقه block.
+_login_failures: Dict[str, list] = {}  # ip → [timestamps]
+_LOGIN_FAIL_WINDOW = 300   # 5 minutes
+_LOGIN_FAIL_THRESHOLD = 5  # 5 failures
+_LOGIN_BLOCK_DURATION = 900  # 15 minutes block
+_login_blocks: Dict[str, float] = {}  # ip → block_until
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP, considering X-Forwarded-For (nginx)."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(ip: str) -> tuple:
+    """Returns (allowed, retry_after_seconds)."""
+    now = time.time()
+    # Check if blocked
+    block_until = _login_blocks.get(ip)
+    if block_until and now < block_until:
+        return False, int(block_until - now)
+    if block_until and now >= block_until:
+        _login_blocks.pop(ip, None)
+        _login_failures.pop(ip, None)
+    # Check recent failures
+    failures = _login_failures.get(ip, [])
+    failures = [t for t in failures if now - t < _LOGIN_FAIL_WINDOW]
+    _login_failures[ip] = failures
+    if len(failures) >= _LOGIN_FAIL_THRESHOLD:
+        _login_blocks[ip] = now + _LOGIN_BLOCK_DURATION
+        return False, _LOGIN_BLOCK_DURATION
+    return True, 0
+
+
+def _record_login_failure(ip: str):
+    now = time.time()
+    failures = _login_failures.get(ip, [])
+    failures.append(now)
+    _login_failures[ip] = failures
+
+
 @app.post("/api/auth/login")
-async def auth_login(req: LoginRequest, response: Response):
+async def auth_login(req: LoginRequest, request: Request, response: Response):
     if not PANEL_ADMIN_PASS_HASH:
         raise HTTPException(503, "Login disabled — set PANEL_ADMIN_PASS_HASH env var")
+    # v2.12.31 (DEBUG-1 MEDIUM-5): rate-limiting
+    client_ip = _get_client_ip(request)
+    allowed, retry_after = _check_login_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(429, f"Too many failed attempts. Try again in {retry_after//60} min.")
     # PATCH (v2.1.5): case-insensitive و trim — قبلاً «Admin» و «admin»
     # متفاوت محسوب می‌شدند و کاربر گیج می‌شد.
     if (req.username or "").strip().lower() != PANEL_ADMIN_USER.strip().lower():
+        _record_login_failure(client_ip)
         raise HTTPException(401, "Invalid credentials")
     if not _verify_password(req.password, PANEL_ADMIN_PASS_HASH):
+        _record_login_failure(client_ip)
         raise HTTPException(401, "Invalid credentials")
+    # Clear failures on successful login
+    _login_failures.pop(client_ip, None)
+    _login_blocks.pop(client_ip, None)
     token = _create_session()
+    # v2.13.0 (DEBUG-2 CSRF): generate CSRF token, store in _sessions_with_csrf,
+    # set as separate non-HttpOnly cookie so JS can read and include in
+    # X-CSRF-Token header on state-changing requests (double-submit pattern).
+    csrf_token = secrets.token_urlsafe(32)
+    _sessions_with_csrf[token] = {"created_at": time.time(), "csrf": csrf_token}
     response.set_cookie(
         key="cianet_panel_session",
         value=token,
@@ -349,6 +497,14 @@ async def auth_login(req: LoginRequest, response: Response):
         max_age=SESSION_TTL_SEC,
         secure=True,  # nginx terminates SSL — set to True in production via env
     )
+    response.set_cookie(
+        key="cianet_csrf_token",
+        value=csrf_token,
+        httponly=False,  # JS must read this to include in X-CSRF-Token header
+        samesite="lax",
+        max_age=SESSION_TTL_SEC,
+        secure=True,
+    )
     return {"ok": True, "user": {"username": req.username, "role": "OWNER"}}
 
 
@@ -356,6 +512,8 @@ async def auth_login(req: LoginRequest, response: Response):
 async def auth_logout(request: Request, response: Response):
     _invalidate_session(request)
     response.delete_cookie("cianet_panel_session")
+    # v2.13.0 (DEBUG-2 CSRF): also drop the CSRF cookie
+    response.delete_cookie("cianet_csrf_token")
     return {"ok": True}
 
 
@@ -492,7 +650,10 @@ async def users_list(
                 "page_size": page_size,
             }
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.get("/api/users/{user_id}")
@@ -526,11 +687,14 @@ async def user_detail(user_id: int, request: Request, _: None = Depends(require_
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.patch("/api/users/{user_id}")
-async def user_update(user_id: int, update: UserUpdate, request: Request, _: None = Depends(require_auth)):
+async def user_update(user_id: int, update: UserUpdate, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     try:
         with m._conn() as c:
@@ -555,11 +719,14 @@ async def user_update(user_id: int, update: UserUpdate, request: Request, _: Non
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.delete("/api/users/{user_id}")
-async def user_delete(user_id: int, request: Request, _: None = Depends(require_auth)):
+async def user_delete(user_id: int, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     if user_id == m.ADMIN_ID:
         raise HTTPException(400, "Cannot delete OWNER")
@@ -595,11 +762,14 @@ async def user_delete(user_id: int, request: Request, _: None = Depends(require_
             m.save_config(cfg)
         return {"ok": True, "removed_accounts": to_remove}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.post("/api/users/{user_id}/extend")
-async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: None = Depends(require_auth)):
+async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     if req.days <= 0 or req.days > 3650:
         raise HTTPException(400, "days must be 1-3650")
@@ -640,9 +810,24 @@ async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: Non
                      datetime.now().isoformat(), new_expire.isoformat()),
                 )
             c.commit()
+        # v2.12.31 (DEBUG-1 LOW-AUDIT): audit log برای extend subscription
+        try:
+            with m._conn() as c:
+                c.execute(
+                    "INSERT INTO logs (actor_id, action, details, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (m.ADMIN_ID, "subscription_extended_web",
+                     f"user={user_id} days={req.days} plan={req.plan or 'inherit'}",
+                     m._now()),
+                )
+        except Exception:
+            pass
         return {"ok": True, "new_expire": new_expire.isoformat()}
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 # ─── Accounts (selfbots) endpoints ───────────────────────────────────
@@ -704,7 +889,7 @@ async def account_detail(tag: str, request: Request, _: None = Depends(require_a
 
 
 @app.post("/api/accounts/{tag}/enable")
-async def account_enable(tag: str, request: Request, _: None = Depends(require_auth)):
+async def account_enable(tag: str, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     cfg = m.load_config()
     if tag not in cfg:
@@ -727,7 +912,7 @@ async def account_enable(tag: str, request: Request, _: None = Depends(require_a
 
 
 @app.post("/api/accounts/{tag}/disable")
-async def account_disable(tag: str, request: Request, _: None = Depends(require_auth)):
+async def account_disable(tag: str, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     cfg = m.load_config()
     if tag not in cfg:
@@ -744,8 +929,46 @@ async def account_disable(tag: str, request: Request, _: None = Depends(require_
     return {"ok": True}
 
 
+# v2.12.31 (DEBUG-1 MEDIUM-3): login_guard OFF endpoint — recovery path
+# برای OWNER self-lockout. قبلاً اگر OWNER خودش login_guard را روی اکانت
+# خودش روشن می‌کرد و بعد گوشی‌اش رو گم می‌کرد، هیچ راه recovery از داخل
+# ربات نبود (login_guard هر کد ورود را invalidate می‌کرد). حالا: OWNER
+# می‌تواند از پنل وب (با PANEL_ADMIN_PASS_HASH) login_guard را خاموش کند.
+@app.post("/api/accounts/{tag}/login_guard")
+async def account_login_guard(tag: str, request: Request, _: None = Depends(require_csrf)):
+    """Toggle login_guard on/off via web panel.
+
+    Body: {"enabled": false}  → disable login_guard
+    Body: {"enabled": true}   → enable login_guard
+
+    این endpoint برای recovery از lockout طراحی شده — وقتی OWNER در
+    اکانت تلگرام خودش login_guard را روشن کرده ولی دسترسی‌اش رو از دست داده.
+    """
+    m = _main()
+    cfg = m.load_config()
+    if tag not in cfg:
+        raise HTTPException(404, "Account not found")
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+    cfg[tag]["login_code_guard"] = enabled
+    m.save_config(cfg)
+    # Log to audit
+    try:
+        with m._conn() as c:
+            c.execute(
+                "INSERT INTO logs (actor_id, action, details, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (m.ADMIN_ID, "login_guard_toggled_web",
+                 f"tag={tag} state={'on' if enabled else 'off'}",
+                 m._now()),
+            )
+    except Exception:
+        pass
+    return {"ok": True, "tag": tag, "login_code_guard": enabled}
+
+
 @app.delete("/api/accounts/{tag}")
-async def account_delete(tag: str, request: Request, _: None = Depends(require_auth)):
+async def account_delete(tag: str, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     cfg = m.load_config()
     if tag not in cfg:
@@ -773,7 +996,7 @@ async def account_delete(tag: str, request: Request, _: None = Depends(require_a
 
 
 @app.patch("/api/accounts/{tag}/proxy")
-async def account_proxy_update(tag: str, update: ProxyUpdate, request: Request, _: None = Depends(require_auth)):
+async def account_proxy_update(tag: str, update: ProxyUpdate, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     cfg = m.load_config()
     if tag not in cfg:
@@ -830,7 +1053,7 @@ async def finance_payments(
 
 
 @app.post("/api/finance/payments/{pay_id}/approve")
-async def finance_approve(pay_id: int, request: Request, _: None = Depends(require_auth)):
+async def finance_approve(pay_id: int, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     try:
         with m._conn() as c:
@@ -846,11 +1069,14 @@ async def finance_approve(pay_id: int, request: Request, _: None = Depends(requi
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.post("/api/finance/payments/{pay_id}/reject")
-async def finance_reject(pay_id: int, request: Request, _: None = Depends(require_auth)):
+async def finance_reject(pay_id: int, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     try:
         with m._conn() as c:
@@ -862,7 +1088,10 @@ async def finance_reject(pay_id: int, request: Request, _: None = Depends(requir
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.get("/api/finance/stats")
@@ -941,11 +1170,14 @@ async def ticket_detail(ticket_id: int, request: Request, _: None = Depends(requ
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.post("/api/tickets/{ticket_id}/reply")
-async def ticket_reply(ticket_id: int, reply: TicketReply, request: Request, _: None = Depends(require_auth)):
+async def ticket_reply(ticket_id: int, reply: TicketReply, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     try:
         with m._conn() as c:
@@ -967,7 +1199,10 @@ async def ticket_reply(ticket_id: int, reply: TicketReply, request: Request, _: 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"DB error: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
+        # file paths, stack traces) to client — log server-side only.
+        print(f"❌ [endpoint] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 # ─── Audit log ────────────────────────────────────────────────────────
@@ -1071,7 +1306,7 @@ async def version_info(request: Request, _: None = Depends(require_auth)):
 
 
 @app.post("/api/version/apply-update")
-async def version_apply(request: Request, _: None = Depends(require_auth)):
+async def version_apply(request: Request, _: None = Depends(require_csrf)):
     # این endpoint از cianet_updater.apply_update استفاده می‌کنه
     # و در thread executor اجرا می‌شه تا event loop block نشه
     try:
@@ -1083,11 +1318,13 @@ async def version_apply(request: Request, _: None = Depends(require_auth)):
         else:
             return {"ok": False, "message": msg}
     except Exception as e:
-        raise HTTPException(500, f"Update failed: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
+        print(f"❌ [endpoint] Update failed: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطا در به‌روزرسانی — با پشتیبانی تماس بگیرید.")
 
 
 @app.post("/api/version/rollback")
-async def version_rollback(request: Request, body: dict, _: None = Depends(require_auth)):
+async def version_rollback(request: Request, body: dict, _: None = Depends(require_csrf)):
     """Body: {"filename": "main.py.pre-rollback.1727..."}"""
     filename = body.get("filename")
     if not filename:
@@ -1134,7 +1371,7 @@ async def settings_get(request: Request, _: None = Depends(require_auth)):
 
 
 @app.patch("/api/settings")
-async def settings_update(update: SettingsUpdate, request: Request, _: None = Depends(require_auth)):
+async def settings_update(update: SettingsUpdate, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     if update.maintenance_mode is not None:
         if hasattr(m, '_MAINTENANCE_MODE'):
@@ -1167,7 +1404,7 @@ async def tools_api_creds(request: Request, _: None = Depends(require_auth)):
 
 
 @app.post("/api/tools/api-creds")
-async def tools_api_creds_add(cred: ApiCredAdd, request: Request, _: None = Depends(require_auth)):
+async def tools_api_creds_add(cred: ApiCredAdd, request: Request, _: None = Depends(require_csrf)):
     """Add a new api_id/api_hash pair — applied to newly-added accounts going forward."""
     # در حال حاضر، api_id/api_hash به‌صورت per-account در config.json ذخیره می‌شه.
     # این endpoint فقط در یک جدول جدا ذخیره می‌کنه برای استفاده‌ی آینده.
@@ -1185,13 +1422,23 @@ async def tools_api_creds_add(cred: ApiCredAdd, request: Request, _: None = Depe
             "added_at": int(time.time()),
         })
         creds_file.write_text(json.dumps(existing, indent=2))
+        # v2.12.31 (DEBUG-1 HIGH-4): chmod 0600 — قبلاً بدون chmod بود و روی
+        # default umask 022 با mode 0644 روی دیسک ذخیره می‌شد. این فایل شامل
+        # api_id + api_hash در plaintext است که هر کسی روی همون VPS بتونه
+        # بخونه، می‌تونه با Telegram API لاگین کنه. حالا: همیشه chmod 0600.
+        try:
+            os.chmod(creds_file, 0o600)
+        except OSError:
+            pass  # best-effort
         return {"ok": True, "total": len(existing)}
     except Exception as e:
-        raise HTTPException(500, f"Save failed: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
+        print(f"❌ [endpoint] Save failed: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطا در ذخیره‌سازی — با پشتیبانی تماس بگیرید.")
 
 
 @app.post("/api/tools/api-creds/rotate")
-async def tools_api_creds_rotate(request: Request, _: None = Depends(require_auth)):
+async def tools_api_creds_rotate(request: Request, _: None = Depends(require_csrf)):
     """Rotate api_id/api_hash on ALL accounts to the next one in the pool."""
     creds_file = _PROJECT_DIR / "data" / "api_creds.json"
     if not creds_file.exists():
@@ -1445,7 +1692,9 @@ async def user_pay_order_with_wallet(order_id: int, request: Request):
         m.create_subscription(uid, plan_name, days)
         return {"ok": True, "balance": pay_result["balance"], "subscription_days": days}
     except Exception as e:
-        raise HTTPException(500, f"خطا در تأیید فاکتور: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
+        print(f"❌ [endpoint] Invoice confirm error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطا در تأیید فاکتور — با پشتیبانی تماس بگیرید.")
 
 # v2.9.0: Reseller dashboard
 @app.get("/api/user/reseller-dashboard")
@@ -1516,7 +1765,7 @@ async def admin_get_user_wallet(user_id: int, request: Request, _: None = Depend
 
 @app.post("/api/users/{user_id}/wallet/credit")
 async def admin_credit_user_wallet(user_id: int, req: WalletCreditRequest,
-                                  request: Request, _: None = Depends(require_auth)):
+                                  request: Request, _: None = Depends(require_csrf)):
     """شارژ کیف پول کاربر — فقط OWNER/ADMIN.
 
     توجه: این endpoint از session ادمین استفاده می‌کند، ولی نقش
@@ -1544,7 +1793,7 @@ async def admin_credit_user_wallet(user_id: int, req: WalletCreditRequest,
 
 @app.post("/api/users/{user_id}/wallet/debit")
 async def admin_debit_user_wallet(user_id: int, req: WalletDebitRequest,
-                                  request: Request, _: None = Depends(require_auth)):
+                                  request: Request, _: None = Depends(require_csrf)):
     """کسر از کیف پول کاربر — فقط OWNER/ADMIN."""
     m = _main()
     actor_id = m.OWNER_ID
@@ -2197,7 +2446,9 @@ async def user_list_chats(request: Request, limit: int = 50):
                 "unread": dialog.unread_count or 0,
             })
     except Exception as e:
-        raise HTTPException(500, f"خطا در گرفتن چت‌ها: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
+        print(f"❌ [endpoint] Get chats error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطا در گرفتن چت‌ها — با پشتیبانی تماس بگیرید.")
     return {"chats": chats, "count": len(chats)}
 
 @app.get("/api/user/chats/{chat_id}/messages")
@@ -2220,7 +2471,9 @@ async def user_get_messages(chat_id: int, request: Request, limit: int = 50):
                 "out": bool(msg.out),
             })
     except Exception as e:
-        raise HTTPException(500, f"خطا: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
+        print(f"❌ [endpoint] Get messages error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطا در دریافت پیام‌ها — با پشتیبانی تماس بگیرید.")
     # برعکس کن — قدیمی‌ها اول
     messages.reverse()
     return {"chat_id": chat_id, "messages": messages}
@@ -2236,7 +2489,9 @@ async def user_send_message(chat_id: int, req: SendMessageRequest, request: Requ
         result = await client.send_message(entity, req.text)
         return {"ok": True, "message_id": result.id, "date": result.date.isoformat() if result.date else None}
     except Exception as e:
-        raise HTTPException(500, f"خطا در ارسال: {e}")
+        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
+        print(f"❌ [endpoint] Send message error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطا در ارسال پیام — با پشتیبانی تماس بگیرید.")
 
 
 # ─── v2.8.4: Live Session API — user picks a selfbot & enters "control mode" ───

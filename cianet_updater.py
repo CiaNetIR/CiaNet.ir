@@ -559,6 +559,15 @@ def _backup_main_py(repo_dir: str = None) -> Optional[str]:
         backup = Path(repo_dir) / "versions" / f"main.py.pre-auto-update.{ts}"
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(main_py, backup)
+        # v2.13.0 (DEBUG-2 BACKUP-CHMOD): explicit chmod 0600 — قبلاً با
+        # default umask (0644) روی دیسک ذخیره می‌شد و world-readable بود.
+        # این backup‌ها source code هستند (نه credentials) ولی logic قدیمی
+        # رو برای مهاجمی که سیستم رو مطالعه می‌کنه، expose می‌کنند. 0600
+        # فقط owner رو read/write می‌کنه.
+        try:
+            os.chmod(backup, 0o600)
+        except OSError:
+            pass  # best-effort — اگه FS از chmod پشتیبانی نکنه (مثلاً FAT)
         # v2.12.23 (QA10-STABILITY BUG#5): پاکسازی backup‌های قدیمی.
         # فقط ۱۰ تا backup اخیر رو نگه دار. بقیه حذف بشن تا disk پر نشه.
         try:

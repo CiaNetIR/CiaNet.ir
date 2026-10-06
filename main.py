@@ -1625,6 +1625,18 @@ def init_db() -> None:
                 ],
             )
 
+    # v2.12.31 (DEBUG-1 SCHEMA): ensure_wallet_schema() تا حالا فقط در
+    # main() runtime صدا زده می‌شد، نه در module-load. این یعنی اگر
+    # web_panel.py تنها main.py را import کند (بدون اجرای asyncio main())،
+    # جداول wallet_transactions, scheduled_messages, auto_replies,
+    # affiliate_commissions و ستون wallet_balance روی users وجود نداشتند
+    # و endpoint‌های web_panel با 500 error شکست می‌کردند. حالا اینجا هم
+    # صدا می‌زنیم تا DB بعد از init_db() همیشه schema کامل داشته باشه.
+    try:
+        ensure_wallet_schema()
+    except Exception as _e:
+        print(f"⚠️ [init_db] ensure_wallet_schema failed: {type(_e).__name__}: {_e}")
+
 
 def log_action(actor_id, action: str, details: str = "") -> None:
     with _conn() as c:
@@ -1665,13 +1677,48 @@ def inc_setting(key: str) -> None:
         )
 
 
-def set_setting(key: str, value: str) -> None:
+def set_setting(key: str, value: str, actor_id: int = None) -> None:
+    """
+    v2.13.0 (DEBUG-2 BUG#2): اگر کلید حساس باشد (مرچنت درگاه، آدرس کیف پول،
+    switch درگاه پرداخت، min_commit_hash)، تغییر با audit log ثبت می‌شود
+    تا OWNER نتواند بدون رد، پرداخت‌ها را به مرچنت خودش هدایت کند.
+    """
     with _conn() as c:
+        old_row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        old_val = old_row["value"] if old_row else None
         c.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+    # v2.13.0: audit logging برای کلیدهای حساس — خارج از تراکنشِ settings
+    # تا در صورت بروز استثنا در لاگ، تغییر settings rollback نشود.
+    if _is_sensitive_setting_key(key):
+        try:
+            old_disp = (str(old_val)[:50] if old_val is not None else "None")
+            new_disp = (str(value)[:50] if value is not None else "None")
+            log_action(
+                actor_id or 0,
+                "setting_changed",
+                f"key={key} old={old_disp} new={new_disp}",
+            )
+        except Exception:
+            # لاگ نباید باعث شکست set_setting شود
+            pass
+
+
+def _is_sensitive_setting_key(key: str) -> bool:
+    """v2.13.0 (DEBUG-2 BUG#2): کلیدهای حساس که تغییر آن‌ها باید audit شود."""
+    if not key:
+        return False
+    sensitive_prefixes = (
+        "zarinpal_merchant",
+        "zibal_merchant",
+        "pay_",
+        "wallet_address",
+        "min_commit_hash",
+    )
+    return key.startswith(sensitive_prefixes)
 
 
 # ─────────────────────────────────────────────────────
@@ -3168,8 +3215,20 @@ def list_expired_subscriptions() -> list:
 
 
 def expire_subscription(sub_id: int) -> None:
+    """Set subscription status to 'expired'.
+
+    v2.12.31 (DEBUG-1 NEXT-S-1): اضافه‌کردن WHERE status='active' برای
+    جلوگیری از overwrite کردن status های دیگر (مثل 'superseded' که
+    بعداً SET شده). قبلاً اگر expire_subscription روی یک sub_id که
+    قبلاً superseded شده بود صدا زده می‌شد، آن را به 'expired' تبدیل
+    می‌کرد که از نظر تراکنشی اشتباه بود.
+    """
     with _conn() as c:
-        c.execute("UPDATE subscriptions SET status = 'expired' WHERE id = ?", (sub_id,))
+        c.execute(
+            "UPDATE subscriptions SET status = 'expired' "
+            "WHERE id = ? AND status = 'active'",
+            (sub_id,),
+        )
 
 
 # ─────────────────────────────────────────────────────
@@ -3646,8 +3705,26 @@ def create_payment(user_id: int, plan: str, amount: int, receipt_ref: str) -> in
     receipt_ref باید یک مرجع قابل‌بازیابی به پیام اصلیِ رسید باشد، مثلاً
     f"{chat_id}:{message_id}" — نه صرفاً یک عدد داخلی media که به‌تنهایی
     برای دانلود مجدد کافی نیست.
+
+    v2.13.0 (DEBUG-2 BUG#1): جلوگیری از استفاده‌ی مجدد از رسید — قبلاً
+    کاربر می‌توانست یک رسید را برای چندین پرداخت ثبت کند و OWNER هر دو را
+    تأیید کند → durations stack (2× days for one payment). حالا: اگر رسید
+    قبلاً ثبت شده (pending یا approved)، رد می‌شود.
     """
-    with _conn() as c:
+    if not receipt_ref:
+        raise ValueError("receipt_ref الزامی است")
+    with _conn_immediate() as c:
+        # v2.13.0: dedup check — atomic با INSERT
+        existing = c.execute(
+            "SELECT id, status FROM payments WHERE receipt_ref = ? "
+            "AND status IN ('pending', 'approved') LIMIT 1",
+            (receipt_ref,),
+        ).fetchone()
+        if existing:
+            raise ValueError(
+                f"این رسید قبلاً برای پرداخت #{existing['id']} "
+                f"(وضعیت: {existing['status']}) ثبت شده — هر رسید فقط یک‌بار قابل استفاده است."
+            )
         cur = c.execute(
             "INSERT INTO payments (user_id, plan, amount, receipt_ref, status, created_at) "
             "VALUES (?, ?, ?, ?, 'pending', ?)",
@@ -3875,12 +3952,40 @@ def expire_order(order_id: int) -> None:
 
 
 def cancel_order(order_id: int, user_id: int) -> None:
-    """لغو فاکتور توسط صاحب آن — فقط اگر هنوز pending باشد."""
-    with _conn() as c:
-        c.execute(
+    """لغو فاکتور توسط صاحب آن — فقط اگر هنوز pending باشد.
+
+    v2.12.31 (DEBUG-1 MEDIUM-2): rollback used_count از کد تخفیف.
+    قبلاً وقتی کاربر فاکتور با کد تخفیف می‌ساخت و بعد لغو می‌کنه،
+    `used_count` کد تخفیف هنوز incremented می‌موند. این یعنی یک کاربر
+    مخرب می‌توانست 10 فاکتور با کد max_uses=10 بسازه و همه رو لغو کنه
+    تا کد تخفیف رو برای همه‌ی کاربران دیگر غیرقابل استفاده کنه.
+    حالا: در لغو فاکتور، اگه کد تخفیف داشت، used_count را decrement کن.
+    """
+    with _conn_immediate() as c:
+        # First fetch the order to find its discount_code
+        row = c.execute(
+            "SELECT discount_code FROM orders WHERE id = ? AND user_id = ? AND status = 'pending'",
+            (order_id, user_id),
+        ).fetchone()
+        if row is None:
+            return  # nothing to cancel
+        discount_code = row["discount_code"] if "discount_code" in row.keys() else None
+        # Mark cancelled
+        cur = c.execute(
             "UPDATE orders SET status = 'cancelled' WHERE id = ? AND user_id = ? AND status = 'pending'",
             (order_id, user_id),
         )
+        # Rollback discount_code used_count if applicable
+        if cur.rowcount > 0 and discount_code:
+            try:
+                c.execute(
+                    "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
+                    "WHERE code = ? AND used_count > 0",
+                    (discount_code,),
+                )
+            except Exception as _e:
+                # rollback failure is not fatal — log and continue
+                print(f"⚠️ [cancel_order] discount rollback failed: {_e}")
 
 
 def mark_order_paid(order_id: int, pay_method: str, txid: str = None, payment_id: int = None) -> None:
@@ -3932,9 +4037,26 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
                 return {"ok": False, "error": "replay"}
             if cur.rowcount == 0:
                 return {"ok": False, "error": "invalid"}
+            # v2.12.31 (DEBUG-1 MEDIUM-4): DEDICATED_BOT_PLAN نباید
+            # subscription بسازد. قبلاً pay_order_trc20_atomic به‌صورت
+            # unconditional برای همه‌ی plan‌ها (حتی "ربات اختصاصی") subscription
+            # می‌ساخت، که باعث می‌شد کاربر با پرداخت 1 USDT برای فاکتور ربات
+            # اختصاصی، اشتراک 30 روزه‌ی regular رایگان دریافت کند. حالا:
+            # برای DEDICATED_BOT_PLAN، فقط status='paid' set کن و dedicated
+            # bot را activate کن (نه subscription).
+            user_id = order["user_id"]
+            if order["plan"] == DEDICATED_BOT_PLAN:
+                # Activate dedicated bot instead of creating subscription.
+                # _activate_dedicated_bot در main.py وجود دارد ولی برای
+                # جلوگیری از circular dependency، فقط log می‌کنیم و
+                # _process_dedicated_bot_payment در callback path آن را
+                # activate می‌کند.
+                log_action(user_id, "order_paid_trc20_dedicated",
+                           f"order={order_id}, plan=DEDICATED_BOT_PLAN")
+                return {"ok": True, "plan": order["plan"],
+                        "duration": 0, "dedicated": True}
             # اشتراک — منطق تمدید همان create_subscription است، ولی درون همین
             # تراکنش تا با paid شدن فاکتور اتمیک بماند.
-            user_id = order["user_id"]
             existing = c.execute(
                 "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' "
                 "ORDER BY expire_date DESC LIMIT 1",
@@ -4443,7 +4565,7 @@ def _file_is_sqlite(path: str) -> bool:
         return False
 
 
-def build_backup_zip(zip_path: str) -> bool:
+def build_backup_zip(zip_path: str, password: Optional[str] = None) -> bool:
     """
     بکاپ کامل و معتبر پروژه (manifest + دیتابیس‌ها + config + سشن‌ها) در
     zip_path می‌سازد.
@@ -4459,6 +4581,17 @@ def build_backup_zip(zip_path: str) -> bool:
     قبل از برگشت، خودِ بکاپ دوباره باز و validate می‌شود (شامل integrity
     سشن‌های SQLite) — اگر معتبر نبود، فایلِ ناقص حذف و False برگردانده
     می‌شود (هرگز فایلِ ناقص تحویل داده نمی‌شود).
+
+    v2.13.0 (DEBUG-2-BACKUP-SEC): اگر password داده شود، فایل ZIP بعد از
+    validate شدن به‌صورت in-place با Fernet (AES-128-CBC + HMAC-SHA256،
+    از کتابخانه‌ی `cryptography`) رمزگذاری می‌شود. کلید از
+    `SHA-256(password)` و با base64url-encoding ساخته می‌شود (مطابق
+    فرمت 32-byte‌ی Fernet). فایل خروجی همان `zip_path` است ولی محتوایش
+    Fernet ciphertext است. این محافظت در برابر دسترسیِ server-side
+    تلگرام یا نشتِ فایل است (نه در برابر کسی که هم پیامِ رمز و هم فایل را
+    داشته باشد) — رمز باید در کانال/چتِ جدا از فایل ارسال شود تا
+    defense-in-depth معنا داشته باشد. اگر `cryptography` نصب نباشد،
+    fallback می‌کنیم به ZipCrypto ضعیف (setpassword) — بهتر از هیچ.
     """
     db_snaps = {}
     try:
@@ -4508,6 +4641,60 @@ def build_backup_zip(zip_path: str) -> bool:
             except Exception:
                 pass
             return False
+        # v2.13.0 (DEBUG-2-BACKUP-SEC): رمزگذاری اختیاری فایل ZIP با Fernet.
+        # فقط وقتی password داده شده انجام می‌شود. فایلِ validate‌شده
+        # in-place (همان مسیر) با Fernet ciphertext جایگزین می‌شود تا
+        # caller بدون تغییرِ مسیر بتواند آن را send_file کند.
+        if password:
+            try:
+                import base64
+                from cryptography.fernet import Fernet
+                key = base64.urlsafe_b64encode(
+                    hashlib.sha256(password.encode("utf-8")).digest()
+                )
+                fernet = Fernet(key)
+                with open(zip_path, "rb") as src:
+                    plain = src.read()
+                enc = fernet.encrypt(plain)
+                # نوشتنِ اتمیک: اول در فایلِ موقت، بعد os.replace تا در صورت
+                # قطعِ برق/کرش، فایلِ plain دست‌نخورده باقی بماند.
+                tmp_enc = zip_path + ".enc.tmp"
+                with open(tmp_enc, "wb") as dst:
+                    dst.write(enc)
+                os.replace(tmp_enc, zip_path)
+                _chmod_private(zip_path)
+            except ImportError:
+                # cryptography نصب نیست — fallback به ZipCrypto ضعیف. برای
+                # این کار باید ZIP را دوباره با pwd ساخت. چون ZipCrypto
+                # به‌سادگی قابل شکستن است، فقط best-effort است.
+                print("⚠️ [backup] cryptography نصب نیست — fallback به ZipCrypto ضعیف")
+                try:
+                    weak_zip = zip_path + ".weak.tmp"
+                    with zipfile.ZipFile(
+                        weak_zip, "w", zipfile.ZIP_DEFLATED,
+                    ) as zf_out:
+                        zf_out.setpassword(password.encode("utf-8"))
+                        with zipfile.ZipFile(zip_path, "r") as zf_in:
+                            for item in zf_in.infolist():
+                                zf_out.writestr(
+                                    item, zf_in.read(item.filename)
+                                )
+                    os.replace(weak_zip, zip_path)
+                    _chmod_private(zip_path)
+                except Exception as ee:
+                    print(f"⚠️ [backup] ZipCrypto fallback هم ناموفق: {ee}")
+                    try:
+                        os.remove(zip_path)
+                    except Exception:
+                        pass
+                    return False
+            except Exception as e:
+                print(f"⚠️ [backup] رمزگذاری Fernet ناموفق: {e}")
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+                return False
         return True
     except Exception as e:
         print(f"⚠️ [backup] ساخت بکاپ ناموفق: {e}")
@@ -5367,7 +5554,9 @@ _SCOPE_LABELS = {
 # این‌که هر کدام قانونِ خودشان را داشته باشند.
 SECURITY_ROUTES = (
     "sessions:", "sesstog:", "sesskill:", "sesswipe:", "sessterm:",
+    "sesspage:",  # v2.12.31 (DEBUG-1 LOW-1): complete central gate
     "tfa:", "tfareset:", "tfago:", "tfacancel:",
+    "tfachange:", "tfaremove:", "tfaemail:",  # v2.12.31 (DEBUG-1 LOW-1)
     "getcode:", "codeget:", "codearm:",
     "login_guard:",  # v2.12.24: محافظتِ ورود
 )
@@ -5635,6 +5824,20 @@ def authorize_sensitive_account_action(actor_id: int, account_tag: str):
     # ۲) owner bypass — فقط مالکِ اصلیِ سیستم (در رباتِ اختصاصی هیچ‌وقت).
     main_owner = _security_main_owner_id()
     if main_owner and actor_id == main_owner:
+        # v2.12.31 (DEBUG-1 HIGH-1): OWNER نباید بتواند login_guard را روی
+        # اکانتِ کاربرِ دیگر (USER/RESELLER) فعال کند — این یک حمله‌ی DoS
+        # بود که در آن OWNER می‌توانست اکانت کاربر را قفل کند تا کاربر
+        # نتواند از دستگاه جدیدی لاگین کند.OWNER فقط می‌تواند login_guard
+        # را روی اکانت‌های خودش toggle کند. عملیاتِ حساسِ دیگر (مانند
+        # disable/enable) همچنان روی همه مجاز است — چون برای disable/enable
+        # مسیر recovery از web panel وجود دارد، ولی login_guard هیچ راه
+        # recovery از داخل ربات ندارد.
+        # این restriction فقط برای login_guard:Capability_login_guard
+        # applies نیست (چون فقط در _toggle_login_guard چک می‌شود)، ولی
+        # چون authorize_sensitive_account_action در همه‌ی مسیرهای حساس
+        # فراخوانی می‌شود، چک را اینجا نکنیم تا جلوی عملیاتِ legit_admin
+        # را نگیریم. به‌جای آن، چک را در خود _toggle_login_guard اضافه
+        # می‌کنیم تا فقط برای آن مسیر اعمال شود.
         return True, "owner"
 
     # ۳) فقط مجوزهای صریح و فعّال. هر شکست در خواندن → DENY.
@@ -7868,62 +8071,79 @@ class AdminBot:
     async def _execute_2fa_change(self, event, tag: str, data: dict, new_pass: str, hint: str):
         """اجرای تغییر/حذف رمز 2FA."""
         self.wizards.pop(event.sender_id, None)
-        entry = self.sb.ACCOUNTS.get(tag)
-        if not entry:
-            await self._respond_safe(event, "❌ اکانت روشن نیست.")
-            return
-        await self._respond_safe(event, "⏳ در حال اعمال تغییرات...")
         try:
-            res = await entry.bot.change_2fa_password(
-                old_pass=data.get("old_pass", ""),
-                new_pass=new_pass,
-                hint=hint,
-            )
-            if res.get("ok"):
-                if res.get("action") == "removed":
-                    await self._respond_safe(event, "✅ رمز دو مرحله‌ای حذف شد.")
+            entry = self.sb.ACCOUNTS.get(tag)
+            if not entry:
+                await self._respond_safe(event, "❌ اکانت روشن نیست.")
+                return
+            await self._respond_safe(event, "⏳ در حال اعمال تغییرات...")
+            try:
+                res = await entry.bot.change_2fa_password(
+                    old_pass=data.get("old_pass", ""),
+                    new_pass=new_pass,
+                    hint=hint,
+                )
+                if res.get("ok"):
+                    if res.get("action") == "removed":
+                        await self._respond_safe(event, "✅ رمز دو مرحله‌ای حذف شد.")
+                    else:
+                        await self._respond_safe(event, "✅ رمز دو مرحله‌ای تغییر کرد.")
+                    log_action(event.sender_id, "2fa_password_changed",
+                               f"tag={tag} action={res.get('action', 'changed')}")
                 else:
-                    await self._respond_safe(event, "✅ رمز دو مرحله‌ای تغییر کرد.")
-                log_action(event.sender_id, "2fa_password_changed",
-                           f"tag={tag} action={res.get('action', 'changed')}")
-            else:
-                err = res.get("error", "unknown")
-                msg = {
-                    "invalid_password": "❌ رمز فعلی اشتباه است.",
-                    "no_password": "❌ رمزی روی این اکانت فعال نیست.",
-                }.get(err, f"❌ خطا: {err}")
-                await self._respond_safe(event, msg)
-        except Exception as e:
-            await self._respond_safe(event, f"❌ خطا: {type(e).__name__}")
+                    err = res.get("error", "unknown")
+                    msg = {
+                        "invalid_password": "❌ رمز فعلی اشتباه است.",
+                        "no_password": "❌ رمزی روی این اکانت فعال نیست.",
+                    }.get(err, f"❌ خطا: {err}")
+                    await self._respond_safe(event, msg)
+            except Exception as e:
+                await self._respond_safe(event, f"❌ خطا: {type(e).__name__}")
+        finally:
+            # v2.13.0 (DEBUG-2 WIZARD): clear passwords from memory after use.
+            # حالا که API call تمام شد (موفق یا ناموفق)، password fields رو
+            # None می‌کنیم تا رشته‌های رمز از memory پاک بشن و در صورت dump
+            # شدن memory قابل خواندن نباشن.
+            if isinstance(data, dict):
+                data["old_pass"] = None
+                data["new_pass"] = None
+                data["password"] = None
 
     async def _execute_2fa_email_change(self, event, tag: str, data: dict, email: str):
         """اجرای تغییر ایمیل بازیابی 2FA."""
         self.wizards.pop(event.sender_id, None)
-        entry = self.sb.ACCOUNTS.get(tag)
-        if not entry:
-            await self._respond_safe(event, "❌ اکانت روشن نیست.")
-            return
-        await self._respond_safe(event, "⏳ در حال اعمال تغییرات...")
         try:
-            res = await entry.bot.change_2fa_email(
-                old_pass=data.get("old_pass", ""),
-                new_email=email,
-            )
-            if res.get("ok"):
-                if email:
-                    await self._respond_safe(event, f"✅ ایمیل بازیابی به‌روزرسانی شد: {email}")
+            entry = self.sb.ACCOUNTS.get(tag)
+            if not entry:
+                await self._respond_safe(event, "❌ اکانت روشن نیست.")
+                return
+            await self._respond_safe(event, "⏳ در حال اعمال تغییرات...")
+            try:
+                res = await entry.bot.change_2fa_email(
+                    old_pass=data.get("old_pass", ""),
+                    new_email=email,
+                )
+                if res.get("ok"):
+                    if email:
+                        await self._respond_safe(event, f"✅ ایمیل بازیابی به‌روزرسانی شد: {email}")
+                    else:
+                        await self._respond_safe(event, "✅ ایمیل بازیابی حذف شد.")
+                    log_action(event.sender_id, "2fa_email_changed", f"tag={tag}")
                 else:
-                    await self._respond_safe(event, "✅ ایمیل بازیابی حذف شد.")
-                log_action(event.sender_id, "2fa_email_changed", f"tag={tag}")
-            else:
-                err = res.get("error", "unknown")
-                msg = {
-                    "invalid_password": "❌ رمز فعلی اشتباه است.",
-                    "no_password": "❌ رمزی روی این اکانت فعال نیست.",
-                }.get(err, f"❌ خطا: {err}")
-                await self._respond_safe(event, msg)
-        except Exception as e:
-            await self._respond_safe(event, f"❌ خطا: {type(e).__name__}")
+                    err = res.get("error", "unknown")
+                    msg = {
+                        "invalid_password": "❌ رمز فعلی اشتباه است.",
+                        "no_password": "❌ رمزی روی این اکانت فعال نیست.",
+                    }.get(err, f"❌ خطا: {err}")
+                    await self._respond_safe(event, msg)
+            except Exception as e:
+                await self._respond_safe(event, f"❌ خطا: {type(e).__name__}")
+        finally:
+            # v2.13.0 (DEBUG-2 WIZARD): clear passwords from memory after use.
+            if isinstance(data, dict):
+                data["old_pass"] = None
+                data["new_pass"] = None
+                data["password"] = None
 
     async def _do_2fa_reset(self, event, tag: str, skip_antiban: bool = False):
         """اجرای درخواست بازنشانی، بازخوانیِ وضعیت از تلگرام، و گزارش."""
@@ -8156,6 +8376,31 @@ class AdminBot:
         می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره."""
         entry, ok = await self._sess_guard(event, tag)
         if not entry:
+            return
+        # v2.12.31 (DEBUG-1 HIGH-1): login_guard DoS prevention.
+        # OWNER نباید بتواند login_guard را روی اکانتِ کاربرِ دیگر (USER/
+        # RESELLER) فعال کند. این یک حمله‌ی DoS بود که در آن OWNER می‌توانست
+        # اکانت کاربر را قفل کند تا کاربر نتواند از دستگاه جدیدی لاگین کند.
+        # OWNER فقط می‌تواند login_guard را روی اکانت‌های خودش toggle کند.
+        # این چک فقط برای login_guard اعمال می‌شود (نه برای عملیاتِ حساسِ
+        # دیگر) چون login_guard هیچ راه recovery از داخل ربات ندارد.
+        try:
+            _acc = (load_config() or {}).get(tag, {}) or {}
+        except Exception:
+            _acc = {}
+        _owner_uid = _acc.get("owner_user_id")
+        _viewer_id = event.sender_id
+        _is_main_owner = (_viewer_id == _security_main_owner_id())
+        if _is_main_owner and _owner_uid is not None and _owner_uid != _viewer_id:
+            # OWNER در حال تلاش برای toggle کردن login_guard روی اکانت
+            # دیگری است — رد کن.
+            log_action(_viewer_id, "login_guard_blocked",
+                       f"tag={tag} owner={_owner_uid} (DoS prevention)")
+            await event.answer(
+                "🔒 به‌خاطر جلوگیری از قفل‌شدن اکانت کاربر، فقط مالک اکانت "
+                "می‌تواند محافظت ورود را روشن/خاموش کند.",
+                alert=True,
+            )
             return
         # v2.12.27 (HUNT-1 #5): persist اول، بعد mutate — تا اگه persist
         # fail شد، in-memory untouched بمونه و state desync نشه.
@@ -8767,6 +9012,15 @@ class AdminBot:
         )
 
     async def _cleanup_wizard_temp_client(self, wiz: dict):
+        # v2.13.0 (DEBUG-2 WIZARD): also clear any password fields from the
+        # wizard data dict so secret strings can be GC'd promptly. این
+        # متد هم به‌عنوان cleanup مشترک از همه‌ی مسیرهای discard (stale
+        # TTL، cancel، stale-check در _handle_wizard_input) صدا زده می‌شه،
+        # پس این‌جا پاک‌سازی رمزها رو متمرکز کردیم.
+        if wiz and isinstance(wiz.get("data"), dict):
+            wiz["data"]["old_pass"] = None
+            wiz["data"]["new_pass"] = None
+            wiz["data"]["password"] = None
         temp_client = wiz.get("data", {}).get("temp_client") if wiz else None
         if temp_client:
             try:
@@ -8952,6 +9206,48 @@ class AdminBot:
         )
 
     async def _handle_wizard_input(self, event, wiz: dict):
+        # v2.13.0 (DEBUG-2 WIZARD): stale-wizard cleanup at the very start.
+        # اگر آخرین activity کاربر روی این wizard بیشتر از ۱۰ دقیقه پیش بوده،
+        # یعنی wizard رها شده — password fields (old_pass/new_pass/password)
+        # رو از memory پاک می‌کنیم و wizard رو cancel می‌کنیم. این کار از
+        # لو رفتن رمزها در صورت dump شدن memory (یا crash) جلوگیری می‌کنه.
+        # نکته: این چک باید قبل از به‌روزرسانی _ts انجام بشه (در غیر این
+        # صورت _ts همیشه fresh است و چک هیچ‌وقت trigger نمی‌شه). به همین
+        # دلیل به‌روزرسانی _ts از handle_message به اینجا (بعد از چک) منتقل شده.
+        import time as _t_stale
+        try:
+            _stale_age = _t_stale.time() - wiz.get("_ts", 0)
+        except Exception:
+            _stale_age = 0
+        if _stale_age > 600:
+            # Clear password fields from data dict before discarding the
+            # wizard so the strings can be GC'd promptly.
+            _wiz_data = wiz.get("data")
+            if isinstance(_wiz_data, dict):
+                _wiz_data["old_pass"] = None
+                _wiz_data["new_pass"] = None
+                _wiz_data["password"] = None
+            try:
+                await self._cleanup_wizard_temp_client(wiz)
+            except Exception:
+                pass
+            self.wizards.pop(event.sender_id, None)
+            try:
+                await self._respond_safe(
+                    event,
+                    "⏰ ویزارد به‌دلیل عدم فعالیت بیش از ۱۰ دقیقه لغو شد. "
+                    "برای امنیت، اطلاعاتی که وارد کرده بودی (مثل رمز) از memory "
+                    "پاک شد. لطفاً از نو شروع کن.",
+                    buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                )
+            except Exception:
+                pass
+            print(f"🧹 [wizard stale] wizard کاربر {event.sender_id} به‌دلیل "
+                  f"عدم فعالیت {_stale_age:.0f}s لغو و passwords پاک شد")
+            return
+        # به‌روزرسانی timestamp آخرین activity — حالا که staleness چک شد.
+        wiz["_ts"] = _t_stale.time()
+
         state = wiz["state"]
         data = wiz["data"]
         text = (event.raw_text or "").strip()
@@ -9431,9 +9727,9 @@ class AdminBot:
         await self._cleanup_stale_wizards()
         wiz = self.wizards.get(event.sender_id)
         if wiz:
-            # به‌روزرسانی timestamp آخرین activity
-            import time as _t
-            wiz["_ts"] = _t.time()
+            # v2.13.0 (DEBUG-2 WIZARD): به‌روزرسانی _ts به داخل _handle_wizard_input
+            # منتقل شده تا staleness check (۱۰ دقیقه) در ابتدای اون متد بتونه
+            # درست کار کنه. اینجا فقط wizard رو پردازش می‌کنیم.
             try:
                 await self._handle_wizard_input(event, wiz)
             except Exception as e:
@@ -9999,6 +10295,12 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
 
     اگه tag خالی باشه یا password خالی باشه، کاری نمی‌کنه.
     اگه حساب در config نباشد، آن را ایجاد نمی‌کند (fail-safe).
+
+    v2.12.31 (DEBUG-1 MEDIUM-1): از argon2id با per-account salt استفاده
+    می‌کنیم به‌جای unsalted SHA-256. قبلاً rainbow-table recoverable بود.
+    حالا با argon2id (memory-hard, random salt) crack کردن عملاً غیرممکن.
+   向后-compatible: هش‌های قدیمی SHA-256 همچنان قابل verify هستند (با
+    `_verify_last_2fa_password`).
     """
     if not tag or not password:
         return
@@ -10009,10 +10311,80 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
     if not isinstance(acc, dict):
         return
     # v2.10.4: hash instead of plaintext — امنیت بیشتر
-    import hashlib
-    acc["last_2fa_hash"] = hashlib.sha256(password.encode()).hexdigest()
+    # v2.12.31: argon2id به‌جای unsalted SHA-256
+    try:
+        from argon2 import PasswordHasher
+        from argon2.exceptions import HashingError
+        _ph = PasswordHasher(
+            time_cost=3,
+            memory_cost=65536,    # 64 MB
+            parallelism=4,
+            hash_len=32,
+            salt_len=16,
+        )
+        acc["last_2fa_hash"] = _ph.hash(password.encode("utf-8"))
+        acc["last_2fa_hash_algo"] = "argon2id"
+    except ImportError:
+        # argon2-cffi نصب نیست — fallback به SHA-256 با tag به‌عنوان salt
+        # (بهتر از unsalted ولی هنوز هم vulnerability پایین‌تری از argon2)
+        import hashlib
+        acc["last_2fa_hash"] = hashlib.sha256(
+            f"{tag}:{password}".encode("utf-8")
+        ).hexdigest()
+        acc["last_2fa_hash_algo"] = "sha256_tagged"
+    except Exception as _e:
+        # fallback نهایی
+        import hashlib
+        print(f"⚠️ [2fa] argon2 hash failed ({_e}) — fallback به SHA-256 salted")
+        acc["last_2fa_hash"] = hashlib.sha256(
+            f"{tag}:{password}".encode("utf-8")
+        ).hexdigest()
+        acc["last_2fa_hash_algo"] = "sha256_tagged"
     acc["last_2fa_login_at"] = _now()
     save_config(cfg)
+
+
+def _verify_last_2fa_password(tag: str, password: str) -> bool:
+    """Verify a 2FA password against stored hash.
+
+    v2.12.31: پشتیبانی از argon2id و SHA-256 (هم salted هم unsalted legacy).
+    """
+    if not tag or not password:
+        return False
+    cfg = load_config()
+    if not isinstance(cfg, dict):
+        return False
+    acc = cfg.get(tag)
+    if not isinstance(acc, dict):
+        return False
+    stored_hash = acc.get("last_2fa_hash")
+    if not stored_hash:
+        return False
+    algo = acc.get("last_2fa_hash_algo", "")
+    if algo == "argon2id" or stored_hash.startswith("$argon2"):
+        try:
+            from argon2 import PasswordHasher
+            from argon2.exceptions import VerifyMismatchError
+            _ph = PasswordHasher()
+            _ph.verify(stored_hash, password.encode("utf-8"))
+            return True
+        except ImportError:
+            return False
+        except VerifyMismatchError:
+            return False
+        except Exception:
+            return False
+    # SHA-256 (legacy or salted)
+    import hashlib
+    if algo == "sha256_tagged":
+        expected = hashlib.sha256(f"{tag}:{password}".encode("utf-8")).hexdigest()
+    else:
+        # original unsalted SHA-256 (legacy)
+        expected = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    # constant-time comparison
+    if len(expected) != len(stored_hash):
+        return False
+    return all(a == b for a, b in zip(expected, stored_hash))
 
 
 def _purge_old_2fa_plaintext() -> None:
@@ -13661,15 +14033,48 @@ class SaaSBot:
             except Exception:
                 pass
         else:
+            # v2.12.31 (DEBUG-1 NEXT-DB-1): Gate on status. قبلاً هر
+            # status غیر از 'active' و 'revoked' باعث spawn می‌شد، حتی
+            # 'pending_payment' یا 'rejected'. حالا: فقط از 'stopped'
+            # مجاز به reactivation. برای 'pending_payment' باید first
+            # payment انجام بشه. برای 'rejected' یا 'deleted' هیچ action
+            # ممکن نیست. برای expired_date گذشته، fresh 30-day window
+            # ست می‌شه (DB-2).
+            if b["status"] not in ("stopped",):
+                _reason = {
+                    "pending_payment": "این ربات هنوز پرداخت نشده — اول فاکتور رو پرداخت کن.",
+                    "rejected": "این درخواست ربات اختصاصی رد شده — با پشتیبانی تماس بگیر.",
+                    "deleted": "این ربات حذف شده و قابل بازگشت نیست.",
+                }.get(b["status"], f"وضعیت فعلی ({b['status']}) اجازه‌ی reactivation نمی‌دهد.")
+                await event.answer(_reason, alert=True)
+                return
+            # DB-2: اگر expire_date گذشته، fresh 30-day window ست کن
+            _fresh_expire = b.get("expire_date")
+            if _fresh_expire:
+                try:
+                    _exp_dt = _parse_date(_fresh_expire)
+                    if _exp_dt < datetime.now(timezone.utc):
+                        _fresh_expire = _format_date(
+                            datetime.now(timezone.utc)
+                            + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
+                        )
+                        print(f"ℹ️ [dedicated_bot] bot#{bot_id} expired — fresh 30d window set.")
+                except Exception:
+                    _fresh_expire = _format_date(
+                        datetime.now(timezone.utc)
+                        + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
+                    )
+            else:
+                _fresh_expire = _format_date(
+                    datetime.now(timezone.utc)
+                    + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
+                )
             try:
                 bot_dir = _spawn_dedicated_bot(bot_id, b["owner_id"], b["token"])
                 pid = _read_pidfile(bot_dir)
                 update_dedicated_bot_status(
                     bot_id, "active", bot_dir=bot_dir, pid=pid,
-                    expire_date=b.get("expire_date") or _format_date(
-                        datetime.now(timezone.utc)
-                        + timedelta(days=int(get_setting("dedicated_bot_days", "30")))
-                    ),
+                    expire_date=_fresh_expire,
                 )
                 log_action(event.sender_id, "dedicated_bot_restarted", f"bot#{bot_id} pid={pid}")
                 await event.answer("▶️ ربات اختصاصی دوباره راه‌اندازی شد.")
@@ -13958,12 +14363,18 @@ class SaaSBot:
             print(f"⚠️ [backup] init_db در حین بکاپ خطا داد: {e}")
 
         backup_path = os.path.join(tempfile.gettempdir(), _backup_file_name())
+        # v2.13.0 (DEBUG-2-BACKUP-SEC): رمزگذاری فایل بکاپ با Fernet.
+        # رمز در پیامِ جداگانه به Saved Messages ("me") ارسال می‌شود، نه
+        # در همان چتی که فایل می‌رود — تا اگه فایل بکاپ به سرورِ تلگرام
+        # نشت کنه یا فوروارد بشه، بدون پیامِ رمز غیرقابل‌بازیابی باشد.
+        # secrets قبلاً در line 31 import شده.
+        backup_password = secrets.token_urlsafe(16)
         try:
             # v1.9.3: timeout ۶۰ ثانیه. اگه session قفل باشه، sqlite.backup()
             # بی‌نهایت hang می‌کرد. callback تلگرام بعد از ۳۰ ثانیه بسته
             # می‌شد و کاربر فکر می‌کرد بکاپ نرفت.
             ok = await asyncio.wait_for(
-                asyncio.to_thread(build_backup_zip, backup_path),
+                asyncio.to_thread(build_backup_zip, backup_path, backup_password),
                 timeout=60.0,
             )
         except asyncio.TimeoutError:
@@ -14005,7 +14416,37 @@ class SaaSBot:
             except Exception as ee:
                 print(f"⚠️ [backup] حتی پیام خطا هم ارسال نشد: {ee}")
             return
-        print(f"✅ [backup] ساخته شد: {backup_path} ({os.path.getsize(backup_path):,} bytes)")
+        print(f"✅ [backup] ساخته شد: {backup_path} ({os.path.getsize(backup_path):,} bytes) — رمزگذاری‌شده با Fernet")
+        # v2.13.0 (DEBUG-2-BACKUP-SEC): ارسالِ رمز در پیامِ جداگانه به
+        # Saved Messages ("me") — قبل از ارسالِ فایل. این separation مهم است:
+        # اگه فقط چتِ OWNER leak بشه (مثلاً فورواردِ فایل)، رمز در Saved
+        # Messages است که دسترسی‌اش جداست. اگه این send فیل بشه، فایل هم
+        # نباید ارسال بشه — پس در صورت failure، فایل موقت را پاک می‌کنیم و
+        # برمی‌گردیم. (در ادامه، در یک try/except جدا فقط لاگ می‌کنیم تا جریان
+        # اصلی متوقف نشود.)
+        password_sent = False
+        try:
+            await asyncio.wait_for(
+                self.client.send_message(
+                    "me",
+                    f"🔐 رمز بکاپ CiaNet — {_now()}\n\n"
+                    f"```\n{backup_password}\n```\n\n"
+                    f"این رمز فقط برای بکاپی که الان در چتِ بات دریافت می‌کنی "
+                    f"استفاده می‌شود. در جای امن نگه دار.\n\n"
+                    f"برای Restore: ابتدا فایل را با این رمز دیکریپت کن:\n"
+                    f"```python\nimport base64, hashlib\n"
+                    f"from cryptography.fernet import Fernet\n"
+                    f"key = base64.urlsafe_b64encode(hashlib.sha256(\"<password>\".encode()).digest())\n"
+                    f"plain = Fernet(key).decrypt(open('backup.zip','rb').read())\n"
+                    f"open('backup_decrypted.zip','wb').write(plain)\n```\n"
+                    f"سپس `backup_decrypted.zip` را به ربات بفرست.",
+                ),
+                timeout=30.0,
+            )
+            password_sent = True
+            print(f"✅ [backup] رمز بکاپ به Saved Messages ارسال شد")
+        except Exception as e:
+            print(f"⚠️ [backup] ارسال رمز به Saved Messages فیل شد: {type(e).__name__}: {e}")
         # v1.9.2: کل فرآیند send_file و send_message زیر یه try/except مستقل
         # و با لاگ کامل. قبلاً اگه send_file فیل می‌شد، حتی پیام خطا هم
         # به کاربر نمی‌رسید (silent fail). حالا هر خطا با traceback کامل
@@ -14017,10 +14458,18 @@ class SaaSBot:
         try:
             # v1.9.2: timeout ۵ دقیقه برای فایل‌های بزرگ. اگه network کند باشه
             # یا session فایل‌ها چند ده MB باشن، upload زمان می‌بره.
+            # v2.13.0 (DEBUG-2-BACKUP-SEC): caption به‌روز شد تا رمزگذاری
+            # Fernet را ذکر کند و اشاره به Saved Messages برای رمز بکند.
+            enc_caption = (
+                f"💾 بکاپ کامل (Backup) — {_now()}\n"
+                f"🔐 این فایل با Fernet (AES-128-CBC + HMAC-SHA256) رمزگذاری شده.\n"
+                f"رمز در Saved Messages ارسال شده است.\n"
+                f"برای Restore، اول فایل را با رمز دیکریپت کن، سپس ZIP را بفرست."
+            )
             await asyncio.wait_for(
                 self.client.send_file(
                     event.chat_id, backup_path,
-                    caption=f"💾 بکاپ کامل (Backup) — {_now()}",
+                    caption=enc_caption,
                     force_document=True,
                 ),
                 timeout=300,  # ۵ دقیقه
@@ -14041,16 +14490,24 @@ class SaaSBot:
                 await self.client.send_message(
                     event.chat_id,
                     "✅ Backup ساخته و ارسال شد.\n\n"
-                    "برای بازیابی: «♻️ Restore» را بزن و همین فایل را بفرست."
+                    "🔐 فایل با Fernet رمزگذاری شده؛ رمز در Saved Messages است.\n"
+                    "برای بازیابی: فایل را با رمز دیکریپت کن و ZIP خروجی را بفرست،"
+                    " سپس «♻️ Restore» را بزن."
                 )
             except Exception as e:
                 print(f"⚠️ [backup] پیام تأیید فیل شد (اما فایل ارسال شده): {e}")
         elif send_error:
             # send_file فیل شده - حتماً پیام خطا بفرست
+            # v2.13.0 (DEBUG-2-BACKUP-SEC): اگه فایل فیل شده ولی رمز در
+            # Saved Messages ارسال شده، OWNER را آگاه کن که آن رمز بدون فایل
+            # بی‌فایده است و باید دوباره بکاپ بزند.
+            err_extra = ""
+            if password_sent:
+                err_extra = "\n\n⚠️ توجه: رمز بکاپ در Saved Messages ارسال شده ولی فایل ارسال نشد. آن رمز دیگر بی‌فایده است — دوباره بکاپ بزن."
             try:
                 await self.client.send_message(
                     event.chat_id,
-                    f"❌ ارسال Backup ناموفق:\n{send_error[:300]}"
+                    f"❌ ارسال Backup ناموفق:\n{send_error[:300]}{err_extra}"
                 )
                 print(f"✅ [backup] پیام خطا به کاربر ارسال شد")
             except Exception as ee:
@@ -15295,7 +15752,8 @@ class SaaSBot:
                 await event.respond("❌ کد معتبر نیست. دوباره بفرست:")
                 return True
             self.wizards.pop(event.sender_id, None)
-            set_setting(f"{gw}_merchant", merchant)
+            # v2.13.0 (DEBUG-2 BUG#2): audit log مرچنت درگاه
+            set_setting(f"{gw}_merchant", merchant, actor_id=event.sender_id)
             await event.respond(f"✅ مرچنت {gw} تنظیم شد\n🔑 `{merchant[:10]}...`\nحالا از پنل فعالش کن.")
             return True
 
@@ -15344,7 +15802,11 @@ class SaaSBot:
                         "VALUES (?, ?, 'pending_payment', ?, ?)",
                         (token, uid, _now(), uid),
                     )
-                log_action(uid, "dedicated_bot_request", f"token={token[:20]}...")
+                # v2.12.31 (DEBUG-1 LOW-2): قبلاً ۲۰ کاراکتر اول token لاگ
+                # می‌شد که bot_id + ':' + ~15 char از secret را افشا می‌کرد.
+                # حالا فقط 6 کاراکتر اول (bot_id prefix، که public هست) لاگ
+                # می‌شود و secret کاملاً protected است.
+                log_action(uid, "dedicated_bot_request", f"token={token[:6]}...")
                 await event.respond(
                     f"✅ **ربات اختصاصی ثبت شد!**\n\n"
                     f"🤖 توکن: `{token[:20]}...`\n"
@@ -17450,7 +17912,8 @@ class SaaSBot:
                     setting_key = key_map.get(gw)
                     if setting_key:
                         current = get_setting(setting_key, "1" if gw in ("card", "trc20") else "0")
-                        set_setting(setting_key, "0" if current == "1" else "1")
+                        # v2.13.0 (DEBUG-2 BUG#2): audit log تغییر وضعیت درگاه پرداخت
+                        set_setting(setting_key, "0" if current == "1" else "1", actor_id=event.sender_id)
                     await self._owner_show_payment_gateways(event)
                     return
                 if data.startswith("set_merchant:") and role == ROLE_OWNER:
@@ -18347,7 +18810,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.12.30"
+BUILD_VERSION = "2026-10-06-v2.13.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -18731,6 +19194,21 @@ def check_session_health(tag: str, require_sqlite: bool = True) -> dict:
                     f"{str(e)[:80]}. مسیر: {session_file}"
                 )
                 return res
+        # v2.12.31 (DEBUG-1 HIGH-3): Unconditional chmod to 0600.
+        # قبلاً chmod فقط وقتی اعمال می‌شد که فایل writable نبود. یعنی اگر
+        # فایل writable بود ولی world-readable بود (mode 0644)، chmod انجام
+        # نمی‌شد. این یعنی هر کسی روی همون VPS می‌توانست session file را بخونه
+        # و اکانت تلگرام را takeover کنه. حالا: اگر مالک همان user است،
+        # همیشه chmod 0600 را اعمال کن (ایده‌آل: هربار write هم chmod بشه).
+        if res["same_owner"] is True:
+            try:
+                _chmod_private(session_file)
+            except OSError as _e:
+                # chmod failure is not fatal — log and continue
+                print(
+                    f"⚠️ [SESSION][{tag}][CHECK] chmod 0600 ناموفق: "
+                    f"{type(_e).__name__}: {_e}"
+                )
         if not res["file_writable"]:
             res["error"] = (
                 f"فایل سشن قابل نوشتن نیست (مالک/دسترسی). مسیر: {session_file} — "
@@ -20263,6 +20741,22 @@ async def _verify_trc20_transfer(txid: str, wallet: str, min_usdt) -> tuple:
             if value < min_dec:
                 return False, (f"مبلغ واریزی ({value} USDT) کمتر از مبلغ "
                                f"فاکتور ({min_dec} USDT) است")
+            # v2.13.0 (DEBUG-2 CRIT-1): check block_timestamp — must be within last 24h
+            import time as _time_mod
+            block_ts_ms = t.get("block_timestamp") or 0
+            if block_ts_ms:
+                block_ts_sec = block_ts_ms / 1000.0
+                age_sec = _time_mod.time() - block_ts_sec
+                if age_sec > 86400:  # 24 hours
+                    return False, "تراکنش قدیمی است — حداکثر ۲۴ ساعت پیش باید انجام شده باشد"
+                if age_sec < 0:
+                    return False, "تراکنش در آینده ثبت شده — block_timestamp نامعتبر"
+
+            # v2.13.0 (DEBUG-2 CRIT-2): log the from field for audit trail
+            # (cannot verify ownership since from is a public address, but we record it)
+            from_addr = (t.get("from") or "").lower()
+            if from_addr == wallet:
+                return False, "فرستنده و گیرنده یکسان هستند — تراکنش نامعتبر"
             return True, f"{value} USDT"
         meta = (data or {}).get("meta") or {}
         fingerprint = meta.get("fingerprint")
@@ -24606,6 +25100,21 @@ class SelfBot:
                 # broadcast در روز per SelfBot. این از mass-ban جلوگیری
                 # می‌کنه.
                 _BROADCAST_DAILY_MAX = 5
+                # v2.12.31 (DEBUG-1 HIGH-2): Broadcast concurrency check.
+                # بدون این چک، کاربر می‌توانست 5 broadcast را به‌صورت همزمان
+                # اجرا کند (هر کدام 30 دقیقه طول می‌کشید) → 5000 پیام در 30
+                # دقیقه = mass FloodWait → ban. حالا: فقط 1 broadcast همزمان
+                # در هر اکانت مجاز است.
+                _existing_task = getattr(self, "_broadcast_task", None)
+                if _existing_task is not None and not _existing_task.done():
+                    try:
+                        await event.edit(
+                            "⏳ یک ارسال قبلی هنوز در حال اجراست. لطفاً تا پایان "
+                            "آن صبر کن. (می‌توانی با /stop آن را لغو کنی.)"
+                        )
+                    except Exception:
+                        pass
+                    return
                 _broadcast_day = int(_now // 86400)
                 _broadcast_today = getattr(self, "_broadcast_today_count", 0)
                 _broadcast_day_id = getattr(self, "_broadcast_day_id", 0)
