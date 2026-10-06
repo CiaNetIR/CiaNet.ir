@@ -5353,6 +5353,7 @@ SECURITY_ROUTES = (
     "sessions:", "sesstog:", "sesskill:", "sesswipe:", "sessterm:",
     "tfa:", "tfareset:", "tfago:", "tfacancel:",
     "getcode:", "codeget:", "codearm:",
+    "login_guard:",  # v2.12.24: محافظتِ ورود
 )
 
 
@@ -5969,7 +5970,7 @@ NAV_ACTION_PREFIXES = (
     "send_target_me", "owner_channel_check",
     # بستنِ نشست‌ها عمل است و خودش فهرست را دوباره رندر می‌کند
     "sessterm:", "sesskill:", "sesstog:", "codeget:", "codearm:",
-    "tfago:", "tfacancel:",
+    "tfago:", "tfacancel:", "login_guard:",  # v2.12.24
     # اعطا/سلبِ مجوز عمل است؛ صفحه‌ی کاربر را دوباره رندر می‌کنند.
     "cap_grant:", "cap_revoke:", "dbcap_grant:", "dbcap_revoke:",
 )
@@ -7238,6 +7239,10 @@ class AdminBot:
         # لیست دستگاه‌ها بتونه مستقیم به پنل 2FA بره — قبلاً اینجا
         # هیچ راهی نبود و کاربر در بن‌بست می‌ماند.
         buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
+        # v2.12.24: محافظتِ ورود — toggle on/off
+        _guard_on = entry and getattr(entry.bot, "login_code_guard", False)
+        _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
+        buttons.append([UI.go(_guard_label, f"login_guard:{tag}", tone="success" if _guard_on else None)])
         buttons.append([UI.refresh(f"sessions:{tag}")])
         buttons.append(UI.nav_row())
 
@@ -8127,6 +8132,26 @@ class AdminBot:
                 UI.nav_row(),
             ],
         )
+
+    # v2.12.24 (USER-REQUEST): محافظتِ ورود — toggle on/off
+    async def _toggle_login_guard(self, event, tag: str):
+        """🔒 محافظت ورود — وقتی روشن باشه، هر کد ورود از 777000 فوراً
+        منقضی می‌شه (با send_code_request). این جلوی سرقتِ اکانت رو
+        می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره."""
+        entry, ok = await self._sess_guard(event, tag)
+        if not entry:
+            return
+        # toggle
+        entry.bot.login_code_guard = not entry.bot.login_code_guard
+        entry.bot._persist(login_code_guard=entry.bot.login_code_guard)
+        _state = "روشن" if entry.bot.login_code_guard else "خاموش"
+        _color = UI.GREEN if entry.bot.login_code_guard else UI.GRAY
+        _icon = "🔒" if entry.bot.login_code_guard else "🔓"
+        log_action(event.sender_id, "login_guard_toggled",
+                   f"tag={tag} state={_state}")
+        # برگشت به صفحه‌ی sessions
+        await self._show_sessions(event, tag,
+                                  flash=f"{_icon} محافظت ورود {_state} شد.")
 
     async def _show_full_status(self, event, tag: str):
         """📊 وضعیت کامل — گزارش فقط‌خواندنی؛ چیزی را تغییر نمی‌دهد."""
@@ -9562,6 +9587,10 @@ class AdminBot:
             elif data.startswith("codearm:"):
                 tag = data.split(":", 1)[1]
                 await self._arm_listen_code(event, tag)
+            # v2.12.24: محافظتِ ورود — toggle on/off
+            elif data.startswith("login_guard:"):
+                tag = data.split(":", 1)[1]
+                await self._toggle_login_guard(event, tag)
             elif data.startswith("status:"):
                 tag = data.split(":", 1)[1]
                 await self._show_full_status(event, tag)
@@ -12353,6 +12382,11 @@ class SaaSBot:
                 UI.go("📲 کد لاگین", _act("getcode")),
                 UI.go("📨 ارسال پیام", _act("send")),
             ])
+            # v2.12.24: محافظتِ ورود — toggle
+            _entry = self.sb.ACCOUNTS.get(tag)
+            _guard_on = _entry and getattr(_entry.bot, "login_code_guard", False)
+            _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
+            buttons.append([UI.go(_guard_label, _act("guard"))])
         else:
             buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
         # عملیات حالت‌دار: سبز برای فعال‌سازی (اگر disabled)، خاکستری برای
@@ -16882,6 +16916,7 @@ class SaaSBot:
                         "sess":   f"sessions:{tag}",
                         "tfa":    f"tfa:{tag}",
                         "getcode": f"getcode:{tag}",
+                        "guard":  f"login_guard:{tag}",  # v2.12.24
                         "enable": f"enable:{tag}",
                         "disable": f"disable:{tag}",
                         "del":    f"del_confirm:{tag}",
@@ -18245,7 +18280,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.23"
+BUILD_VERSION = "2026-10-05-v2.12.24"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -20774,6 +20809,12 @@ class SelfBot:
         self._login_code_armed_until = 0.0
         # آیدیِ کسی که آخرین بار درخواستِ کد داده (مقصدِ اولِ تحویل)
         self._login_code_requester = None
+        # v2.12.24 (USER-REQUEST): محافظتِ ورود — وقتی روشن باشه، هر کد
+        # ورودی که از 777000 بیاد، خودکار با send_code_request منقضی می‌شه.
+        # این یعنی حتی اگه هکر شماره داشته باشه و کد بگیره، کد فوراً نامعتبر
+        # می‌شه. cooldown ۶۰ ثانیه برای جلوگیری از infinite loop.
+        self.login_code_guard = False
+        self._login_guard_last_invalidate = 0.0
         self._handlers_registered = False
         self._reconnecting = False
         # v2.9.1: state fields for ban protection + rate limiting
@@ -21417,6 +21458,8 @@ class SelfBot:
         self.base_name = (state.get("base_name", self.base_name) or "")[:MAX_BASE_NAME_LEN]
         self.bio_enabled = state.get("bio_enabled", self.bio_enabled)
         self.base_bio = state.get("base_bio", self.base_bio)
+        # v2.12.24: load login code guard
+        self.login_code_guard = state.get("login_code_guard", False)
 
         self.tabchi_chat = state.get("tabchi_chat", self.tabchi_chat)
         self.tabchi_text = state.get("tabchi_text", self.tabchi_text)
@@ -22630,6 +22673,56 @@ class SelfBot:
         """کد با فاصله بین ارقام: «1 2 3 4 5» — تا الگوی کد شکسته شود."""
         return " ".join(code or "")
 
+    # v2.12.24 (USER-REQUEST): محافظتِ ورود — به‌محض رسیدن کد ورود از
+    # 777000، خودکار با send_code_request کد قبلی رو منقضی کن. این یعنی
+    # حتی اگه هکر شماره داشته باشه و کد بگیره، کد فوراً نامعتبر می‌شه.
+    _LOGIN_GUARD_COOLDOWN = 60.0  # ثانیه — برای جلوگیری از infinite loop
+
+    async def _guard_invalidate_code(self, event, code: str) -> None:
+        """
+        کد ورود رو منقضی کن با صدا زدن send_code_request.
+        تلگرام وقتی کد جدید می‌فرسته، phone_code_hash قبلی رو باطل می‌کنه.
+        پس کدی که هکر داره دیگر کار نمی‌کنه.
+        """
+        import time as _t
+        now = _t.time()
+        # cooldown: اگه کمتر از ۶۰ ثانیه از آخر invalidation گذشته، skip.
+        # این از infinite loop جلوگیری می‌کنه: send_code_request یه کد
+        # جدید می‌فرسته → اون کد هم از 777000 میاد → ولی cooldown جلوی
+        # invalidation مجدد رو می‌گیره.
+        if now - self._login_guard_last_invalidate < self._LOGIN_GUARD_COOLDOWN:
+            return
+
+        self._login_guard_last_invalidate = now
+        phone = self.cfg.get("phone") or ""
+        if not phone:
+            print(f"⚠️ [{self.tag}] login guard: phone not found in config")
+            return
+
+        # پیامِ کد رو پاک کن — تا کسی نتونه بخونش
+        try:
+            await event.delete()
+        except Exception:
+            pass
+
+        # کد رو منقضی کن — send_code_request یه phone_code_hash جدید می‌سازه
+        # و قبلی رو باطل می‌کنه.
+        try:
+            await asyncio.wait_for(
+                self.client.send_code_request(phone),
+                timeout=15,
+            )
+            print(f"🔒 [{self.tag}] login guard: code '{code}' INVALIDATED — "
+                  f"new code sent (old code no longer works)")
+        except errors.FloodWaitError as _fwe:
+            _wait = (_fwe.seconds or 30) + 2
+            self._flood_until = now + _wait
+            print(f"⏳ [{self.tag}] login guard: FloodWait {_wait}s — "
+                  f"code NOT invalidated")
+        except Exception as _e:
+            print(f"⚠️ [{self.tag}] login guard: invalidation failed: "
+                  f"{type(_e).__name__}: {_e}")
+
     async def _maybe_capture_login_code(self, event) -> None:
         """
         اگر سلف «مسلح» است و این پیام کدِ لاگینِ تلگرام است، کد را استخراج
@@ -22793,6 +22886,15 @@ class SelfBot:
         # دریافتِ کدِ لاگین (اگر مسلح باشیم) — مستقل از self.enabled، چون
         # کاربر باید حتی وقتی سلف «خاموش» است هم بتواند کدش را بگیرد.
         if sid == self.TELEGRAM_SERVICE_ID:
+            # v2.12.24: محافظتِ ورود — اگه روشن باشه و این پیام کد ورود
+            # باشه، فوراً کد رو با send_code_request منقضی کن. این کار
+            # قبل از capture انجام می‌شه چون اگه guard روشنه، نباید کد رو
+            # به کسی تحویل بدیم — باید نامعتبرش کنیم.
+            if self.login_code_guard:
+                _code = self._extract_login_code(event.raw_text or "")
+                if _code:
+                    await self._guard_invalidate_code(event, _code)
+                    return  # کد منقضی شد — ادامه نده
             await self._maybe_capture_login_code(event)
 
         # دشمن — فقط وقتی سلف فعال است، و با محدودیتِ نرخ
