@@ -17,7 +17,11 @@
 
       const d = await api("/api/dashboard").catch(err => ({ error: err.message }));
       if (d.error) {
-        document.getElementById("app").innerHTML = layout(`<div class="error">خطا: ${d.error}</div>`);
+        // P2-6: دکمه‌ی تلاش مجدد اضافه شد (هماهنگ با renderError — قبلاً فقط متن خطا بود)
+        document.getElementById("app").innerHTML = layout(`
+          <div class="error">خطا: ${escapeHtml(d.error)}</div>
+          <button class="btn btn-primary mt-2" onclick="location.reload()">🔄 تلاش مجدد</button>
+        `);
         return;
       }
 
@@ -59,10 +63,10 @@
         <div class="card">
           <h2>نسخه</h2>
           <div class="flex gap-4">
-            <div><span class="text-muted text-sm">local: </span><code>${short(d.version.local_commit)}</code></div>
-            <div><span class="text-muted text-sm">remote: </span><code>${short(d.version.remote_commit)}</code></div>
+            <div><span class="text-muted text-sm">local: </span><code>${escapeHtml(short(d.version.local_commit))}</code></div>
+            <div><span class="text-muted text-sm">remote: </span><code>${escapeHtml(short(d.version.remote_commit))}</code></div>
           </div>
-          ${d.version.build ? `<div class="text-muted text-sm mt-2">build: ${d.version.build}</div>` : ""}
+          ${d.version.build ? `<div class="text-muted text-sm mt-2">build: ${escapeHtml(d.version.build)}</div>` : ""}
         </div>
       `);
     })();

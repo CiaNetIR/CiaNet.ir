@@ -21,11 +21,11 @@
         const items = (r.items || []).map(t => `
           <div class="card mb-2" onclick="loadTicket(${t.id})" style="cursor: pointer;">
             <div class="flex-between">
-              <span class="text-muted text-sm">#${t.id}</span>
-              <span class="badge badge-${t.status === "open" ? "yellow" : "green"}">${t.status}</span>
+              <span class="text-muted text-sm">#${escapeHtml(t.id)}</span>
+              <span class="badge badge-${t.status === "open" ? "yellow" : "green"}">${escapeHtml(t.status)}</span>
             </div>
-            <div style="font-weight: 500; margin-top: 0.25rem;">${t.unit || "تیکت #" + t.id}</div>
-            <div class="text-muted text-sm">user: ${t.user_id}</div>
+            <div style="font-weight: 500; margin-top: 0.25rem;">${escapeHtml(t.unit || "تیکت #" + t.id)}</div>
+            <div class="text-muted text-sm">user: ${escapeHtml(t.user_id)}</div>
           </div>
         `).join("");
 
@@ -45,17 +45,18 @@
         `);
       }
 
+      window.load = load; // دکمه‌های فیلتر از onclick صدا می‌زنند (BUG-7)
       window.loadTicket = async (id) => {
         try {
           const r = await api(`/api/tickets/${id}`);
           const msgs = (r.messages || []).map(m => `
             <div class="card mb-2" style="background: ${m.sender_role === "user" ? "var(--bg-muted)" : "rgba(96,165,250,0.1)"};">
-              <div class="text-muted text-sm">${m.sender_role === "user" ? "کاربر" : "پشتیبانی"} ${m.sender_id}</div>
-              <div style="margin-top: 0.25rem;">${m.text || ""}</div>
+              <div class="text-muted text-sm">${m.sender_role === "user" ? "کاربر" : "پشتیبانی"} ${escapeHtml(m.sender_id)}</div>
+              <div style="margin-top: 0.25rem;">${escapeHtml(m.text || "")}</div>
             </div>
           `).join("");
           document.getElementById("ticketDetail").innerHTML = `
-            <h2>#${r.ticket.id} — ${r.ticket.unit || "بدون موضوع"}</h2>
+            <h2>#${escapeHtml(r.ticket.id)} — ${escapeHtml(r.ticket.unit || "بدون موضوع")}</h2>
             <div style="max-height: 300px; overflow-y: auto; margin: 1rem 0;">${msgs}</div>
             <textarea class="input mb-2" id="replyText" rows="3" placeholder="پاسخ..."></textarea>
             <button class="btn btn-primary" onclick="sendReply(${id})">ارسال</button>
@@ -74,7 +75,11 @@
         } catch (e) { showToast(e.message, true); }
       };
 
-      load();
+      try {
+        await load();
+      } catch (e) {
+        renderError(e);
+      }
     })();
   </script>
 </body>

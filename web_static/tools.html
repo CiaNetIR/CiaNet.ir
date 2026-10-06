@@ -15,17 +15,26 @@
       const user = await checkAuth();
       if (!user) { location.href = "login.html"; return; }
 
-      const r = await api("/api/tools/api-creds");
-      const items = (r.items || []).map(c => `
+      let r;
+      try {
+        r = await api("/api/tools/api-creds");
+      } catch (e) {
+        renderError(e);
+        return;
+      }
+      const items = (r.items || []).map(c => {
+        const h = String(c.api_hash || "");
+        const maskedHash = h.length > 8 ? `${h.slice(0, 4)}…${h.slice(-4)}` : "…";
+        return `
         <div class="card mb-2">
           <div class="flex-between">
-            <span class="font-mono">api_id: ${c.api_id}</span>
+            <span class="font-mono">api_id: ${escapeHtml(c.api_id)}</span>
             <span class="text-muted text-sm">used by ${fmt(c.used_by.length)}</span>
           </div>
-          <div class="font-mono text-sm text-muted mt-2" style="word-break: break-all;">${c.api_hash.slice(0, 32)}…</div>
-          <div class="text-muted text-sm mt-2">اکانت‌ها: ${c.used_by.slice(0, 5).join(", ")}${c.used_by.length > 5 ? "…" : ""}</div>
+          <div class="font-mono text-sm text-muted mt-2" style="word-break: break-all;">${escapeHtml(maskedHash)}</div>
+          <div class="text-muted text-sm mt-2">اکانت‌ها: ${escapeHtml(c.used_by.slice(0, 5).join(", "))}${c.used_by.length > 5 ? "…" : ""}</div>
         </div>
-      `).join("");
+      `;}).join("");
       document.getElementById("app").innerHTML = layout(`
         <div class="header"><h1>هش‌ها و api_id</h1></div>
         <div class="card mb-4">

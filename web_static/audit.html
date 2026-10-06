@@ -15,14 +15,20 @@
       const user = await checkAuth();
       if (!user) { location.href = "login.html"; return; }
 
-      const r = await api("/api/audit-log?page=1&page_size=100");
+      let r;
+      try {
+        r = await api("/api/audit-log?page=1&page_size=100");
+      } catch (e) {
+        renderError(e);
+        return;
+      }
       const rows = (r.items || []).map(l => `
         <tr>
-          <td class="font-mono text-sm">${l.id}</td>
-          <td class="font-mono text-sm">${l.actor_id || "—"}</td>
-          <td class="font-mono text-sm">${l.action || "—"}</td>
-          <td class="text-sm" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">${l.details || "—"}</td>
-          <td class="text-sm">${l.created_at || "—"}</td>
+          <td class="font-mono text-sm">${escapeHtml(l.id)}</td>
+          <td class="font-mono text-sm">${escapeHtml(l.actor_id || "—")}</td>
+          <td class="font-mono text-sm">${escapeHtml(l.action || "—")}</td>
+          <td class="text-sm" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(l.details || "—")}</td>
+          <td class="text-sm">${escapeHtml(l.created_at || "—")}</td>
         </tr>
       `).join("");
       document.getElementById("app").innerHTML = layout(`

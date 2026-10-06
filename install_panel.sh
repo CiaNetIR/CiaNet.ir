@@ -269,6 +269,9 @@ fi
 # ─── systemd service ───
 SERVICE_FILE="/etc/systemd/system/cianet-panel.service"
 echo -e "${YELLOW}⚙️  ساخت systemd service...${NC}"
+# ⚠️ workers=1 اجباریه: سشن‌های پنل در حافظه‌ی هر پروسه نگه داشته می‌شن
+# (طراحی single-instance — rules §18.2). با workers>1 درخواست‌ها بین
+# پروسه‌ها پخش می‌شن → سشن گم می‌شه → 401 تصادفی برای ادمین.
 
 # After dependency: اگه service اصلی هست، به اون وابسته باش
 AFTER_DEP="network-online.target"
@@ -288,7 +291,7 @@ User=$SERVICE_USER
 Group=${SERVICE_USER}
 WorkingDirectory=$SCRIPT_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$PYTHON_BIN -m uvicorn web_panel:app --host 127.0.0.1 --port 8000 --workers 2
+ExecStart=$PYTHON_BIN -m uvicorn web_panel:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=10
 StartLimitBurst=10

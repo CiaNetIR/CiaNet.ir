@@ -44,26 +44,29 @@
     }
     function renderForm(info) {
       const proxy = info.proxy || {};
+      // BUG-23u: escape ALL server-provided values (text + attributes);
+      // proxy password is never echoed back into the DOM — input starts
+      // empty and only carries a value the user newly typed.
       document.getElementById('settings-form').innerHTML = `
         <div class="info-grid">
-          <div><span>🏷️ تگ:</span> <code>${info.tag}</code></div>
-          <div><span>🆔 آیدی تلگرام:</span> <code>${info.tg_user_id || '—'}</code></div>
-          <div><span>👤 نام تلگرام:</span> <code>${info.live_name || '—'}</code></div>
-          <div><span>📞 تلفن تلگرام:</span> <code>${info.live_phone || '—'}</code></div>
-          <div><span>👤 یوزرنیم تلگرام:</span> <code>${info.live_username || '—'}</code></div>
+          <div><span>🏷️ تگ:</span> <code>${escapeHtml(info.tag)}</code></div>
+          <div><span>🆔 آیدی تلگرام:</span> <code>${escapeHtml(info.tg_user_id || '—')}</code></div>
+          <div><span>👤 نام تلگرام:</span> <code>${escapeHtml(info.live_name || '—')}</code></div>
+          <div><span>📞 تلفن تلگرام:</span> <code>${escapeHtml(info.live_phone || '—')}</code></div>
+          <div><span>👤 یوزرنیم تلگرام:</span> <code>${escapeHtml(info.live_username || '—')}</code></div>
         </div>
         <h3 style="margin-top:20px">تنظیمات قابل ویرایش:</h3>
         <div class="step">
           <label>📞 شماره موبایل</label>
-          <input type="text" id="phone" value="${info.phone || ''}" placeholder="+989123456789">
+          <input type="text" id="phone" value="${escapeHtml(info.phone || '')}" placeholder="+989123456789">
         </div>
         <div class="step">
           <label>🔑 API ID</label>
-          <input type="number" id="api_id" value="${info.api_id || ''}">
+          <input type="number" id="api_id" value="${escapeHtml(info.api_id || '')}">
         </div>
         <div class="step">
           <label>🔒 API Hash</label>
-          <input type="text" id="api_hash" value="${info.api_hash || ''}">
+          <input type="text" id="api_hash" value="${escapeHtml(info.api_hash || '')}">
         </div>
         <h4>🌐 پروکسی</h4>
         <div class="step">
@@ -77,19 +80,19 @@
         </div>
         <div class="step">
           <label>آدرس</label>
-          <input type="text" id="proxy_addr" value="${proxy.addr || ''}" placeholder="127.0.0.1">
+          <input type="text" id="proxy_addr" value="${escapeHtml(proxy.addr || '')}" placeholder="127.0.0.1">
         </div>
         <div class="step">
           <label>پورت</label>
-          <input type="number" id="proxy_port" value="${proxy.port || ''}" placeholder="10808">
+          <input type="number" id="proxy_port" value="${escapeHtml(proxy.port || '')}" placeholder="10808">
         </div>
         <div class="step">
           <label>نام کاربری (اختیاری)</label>
-          <input type="text" id="proxy_username" value="${proxy.username || ''}">
+          <input type="text" id="proxy_username" value="${escapeHtml(proxy.username || '')}">
         </div>
         <div class="step">
           <label>رمز (اختیاری)</label>
-          <input type="password" id="proxy_password" value="${proxy.password || ''}">
+          <input type="password" id="proxy_password" value="" placeholder="برای تغییر، پسورد جدید وارد کن" autocomplete="new-password">
         </div>
         <div class="step">
           <label>
@@ -106,6 +109,11 @@
     }
     document.getElementById('save-btn').addEventListener('click', async () => {
       const proxy_type = document.getElementById('proxy_type').value;
+      // BUG-23u: password is only sent when the user typed a new one;
+      // otherwise the stored value from `original` (JS memory, not visible
+      // DOM) is re-sent because the backend replaces the whole proxy dict.
+      const typedPass = document.getElementById('proxy_password').value;
+      const existingPass = (original.proxy && original.proxy.password) || undefined;
       const updates = {
         phone: document.getElementById('phone').value.trim() || null,
         api_id: parseInt(document.getElementById('api_id').value) || null,
@@ -118,7 +126,7 @@
           addr: document.getElementById('proxy_addr').value.trim(),
           port: parseInt(document.getElementById('proxy_port').value) || 0,
           username: document.getElementById('proxy_username').value.trim() || undefined,
-          password: document.getElementById('proxy_password').value || undefined,
+          password: typedPass !== '' ? typedPass : existingPass,
           rdns: document.getElementById('proxy_rdns').checked,
         };
       } else {

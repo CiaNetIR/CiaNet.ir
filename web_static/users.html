@@ -15,38 +15,57 @@
       const user = await checkAuth();
       if (!user) { location.href = "login.html"; return; }
 
+      document.getElementById("app").innerHTML = layout(`
+        <div class="header"><h1>کاربران</h1><span class="text-muted text-sm">مجموع: <span id="usersTotal">۰</span></span></div>
+        <input id="userSearch" class="input mb-4" placeholder="جستجو با ایدی عددی یا یوزرنیم…" onkeyup="searchUsers(this.value)">
+        <div class="card">
+          <table>
+            <thead><tr>
+              <th>user_id</th><th>username</th><th>نقش</th><th>پلن</th><th>اشتراک</th><th>انقضا</th><th>عملیات</th>
+            </tr></thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      `);
+
+      let reqSeq = 0;
       async function load(q = "") {
+        const mySeq = ++reqSeq;
         const params = new URLSearchParams({ q, page: "1", page_size: "100" });
         const r = await api(`/api/users?${params}`);
+        if (mySeq !== reqSeq) return; // پاسخ قدیمی/خارج از ترتیب — نادیده گرفته می‌شه
         const rows = (r.items || []).map(u => `
           <tr>
-            <td class="font-mono text-sm">${u.user_id}</td>
-            <td>${u.username || "—"}</td>
-            <td><span class="badge badge-yellow">${u.role || "USER"}</span></td>
-            <td>${u.plan || "—"}</td>
+            <td class="font-mono text-sm">${escapeHtml(u.user_id)}</td>
+            <td>${escapeHtml(u.username || "—")}</td>
+            <td><span class="badge badge-yellow">${escapeHtml(u.role || "USER")}</span></td>
+            <td>${escapeHtml(u.plan || "—")}</td>
             <td>${u.sub_status === "active" ? "✅ فعال" : u.sub_status === "expired" ? "❌ منقضی" : "—"}</td>
-            <td class="text-sm">${u.expire_date || "—"}</td>
+            <td class="text-sm">${escapeHtml(u.expire_date || "—")}</td>
             <td>
               <button class="btn" onclick="extendUser(${u.user_id})">تمدید</button>
               <button class="btn btn-danger" onclick="deleteUser(${u.user_id})">حذف</button>
             </td>
           </tr>
         `).join("");
-        document.getElementById("app").innerHTML = layout(`
-          <div class="header"><h1>کاربران</h1><span class="text-muted text-sm">مجموع: ${fmt(r.total || 0)}</span></div>
-          <input class="input mb-4" placeholder="جستجو با ایدی عددی یا یوزرنیم…" onkeyup="searchUsers(this.value)">
-          <div class="card">
-            <table>
-              <thead><tr>
-                <th>user_id</th><th>username</th><th>نقش</th><th>پلن</th><th>اشتراک</th><th>انقضا</th><th>عملیات</th>
-              </tr></thead>
-              <tbody id="usersBody">${rows}</tbody>
-            </table>
-          </div>
-        `);
+        const body = document.getElementById("usersBody");
+        if (body) body.innerHTML = rows;
+        const total = document.getElementById("usersTotal");
+        if (total) total.textContent = fmt(r.total || 0);
       }
 
-      window.searchUsers = (q) => { if (q.length >= 1) load(q); };
+      function currentQuery() {
+        const el = document.getElementById("userSearch");
+        return el ? el.value : "";
+      }
+
+      let searchTimer = null;
+      window.searchUsers = (q) => {
+        clearTimeout(searchTimer);
+        // P2-6: با خالی شدن جستجو هم لیست رفرش می‌شه (مثل accounts.html) —
+        // قبلاً پاک کردن input لیستِ فیلترشده‌ی قدیمی را نگه می‌داشت
+        searchTimer = setTimeout(() => load(q), 300);
+      };
       window.extendUser = async (uid) => {
         const days = prompt("تعداد روز تمدید:", "30");
         if (!days) return;
@@ -55,7 +74,7 @@
             method: "POST", body: JSON.stringify({ days: parseInt(days) })
           });
           showToast("تمدید شد ✓");
-          load();
+          load(currentQuery());
         } catch (e) { showToast(e.message, true); }
       };
       window.deleteUser = async (uid) => {
@@ -63,11 +82,15 @@
         try {
           await api(`/api/users/${uid}`, { method: "DELETE" });
           showToast("حذف شد ✓");
-          load();
+          load(currentQuery());
         } catch (e) { showToast(e.message, true); }
       };
 
-      load();
+      try {
+        await load();
+      } catch (e) {
+        renderError(e);
+      }
     })();
   </script>
 </body>

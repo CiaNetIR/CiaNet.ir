@@ -2,17 +2,48 @@
 // ─────────────────────────────────────────────────────────────────
 
 // ─── API helper ──────────────────────────────────────────────────
+// CSRF double-submit (§13.2): سرور بعد از login یک cookie غیر HttpOnly
+// به نام cianet_csrf_token ست می‌کنه؛ همان مقدار باید در هدر
+// X-CSRF-Token برای همه‌ی درخواست‌های غیر GET ارسال بشه.
+function getCsrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)cianet_csrf_token=([^;]*)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
 async function api(path, opts = {}) {
+  const method = (opts.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (method !== "GET") {
+    const csrf = getCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+  }
   const res = await fetch(path, {
     credentials: "include",
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
     ...opts,
+    headers,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || err.message || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────
+// هر مقدار server-controlled که داخل innerHTML می‌ره باید escape بشه.
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+// حالت خطای بارگذاری اولیه‌ی صفحه‌ها (سبک dashboard) + دکمه‌ی تلاش مجدد
+function renderError(err) {
+  const msg = err && err.message ? err.message : String(err);
+  document.getElementById("app").innerHTML = layout(`
+    <div class="error">خطا: ${escapeHtml(msg)}</div>
+    <button class="btn btn-primary mt-2" onclick="location.reload()">🔄 تلاش مجدد</button>
+  `);
 }
 
 function showToast(msg, isError = false) {
@@ -55,6 +86,7 @@ function sidebar(currentPath) {
     { href: "users.html", label: "کاربران", icon: "👥" },
     { href: "accounts.html", label: "سلف‌بات‌ها", icon: "🤖" },
     { href: "finance.html", label: "امور مالی", icon: "💰" },
+    { href: "analytics.html", label: "آنالیتیکس", icon: "📈" },
     { href: "tickets.html", label: "تیکت‌ها", icon: "🎫" },
     { href: "audit.html", label: "Audit Log", icon: "📜" },
     { href: "version.html", label: "نسخه", icon: "🔄" },
@@ -72,7 +104,7 @@ function sidebar(currentPath) {
         `).join("")}
       </nav>
       <div class="user">
-        <span>${currentUser ? currentUser.username : "guest"}</span>
+        <span>${currentUser ? escapeHtml(currentUser.username) : "guest"}</span>
         <a href="#" onclick="logout(); return false;" class="text-muted">خروج ↩</a>
       </div>
     </aside>
@@ -80,7 +112,12 @@ function sidebar(currentPath) {
 }
 
 function layout(content) {
-  return `<div class="layout">${sidebar(location.pathname.split("/").pop())}<main class="main">${content}</main></div>`;
+  return `<div class="layout">
+    <button type="button" class="sidebar-toggle" id="sidebarToggle" aria-label="منو">☰</button>
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    ${sidebar(location.pathname.split("/").pop())}
+    <main class="main">${content}</main>
+  </div>`;
 }
 
 // boot guard: اگر login نشده و در صفحه‌ی login نیست، redirect کن
@@ -94,3 +131,25 @@ async function authGuard() {
 
 // auto-run auth guard on every page
 authGuard();
+
+// ─── Mobile sidebar toggle (BUG-10) — RTL: منو از سمت راست ────────
+document.addEventListener("click", (e) => {
+  if (!(e.target instanceof Element)) return;
+  const toggle = e.target.closest("#sidebarToggle");
+  if (toggle) {
+    const sb = document.querySelector(".sidebar");
+    const bd = document.querySelector(".sidebar-backdrop");
+    if (!sb) return;
+    const open = sb.classList.toggle("open");
+    if (bd) bd.classList.toggle("show", open);
+    toggle.textContent = open ? "✕" : "☰";
+    return;
+  }
+  if (e.target.classList.contains("sidebar-backdrop")) {
+    const sb = document.querySelector(".sidebar");
+    const tg = document.getElementById("sidebarToggle");
+    if (sb) sb.classList.remove("open");
+    e.target.classList.remove("show");
+    if (tg) tg.textContent = "☰";
+  }
+});

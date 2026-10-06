@@ -133,7 +133,10 @@ read -p "دامنه‌ی پنل (مثلاً panel.yourdomain.ir — اگه ند�
 read -s -p "کد مرچنت زرین‌پال (اختیاری — اگه نداری، خالی بذار): " ZARINPAL_MERCHANT_INPUT
 echo ""
 
-if [ -z "$ADMIN_ID_INPUT" ] || [ -z "$ADMIN_BOT_TOKEN_INPUT" ] || [ -z "$API_ID_INPUT" ] || [ -z "$API_HASH_INPUT" ]; then
+# P2-8 (residual, from P1-8 report-only finding a): the panel password is also mandatory —
+# previously an empty password was accepted and sha256("") was stored in the env
+# (i.e. logging into the panel with an empty password was possible).
+if [ -z "$ADMIN_ID_INPUT" ] || [ -z "$ADMIN_BOT_TOKEN_INPUT" ] || [ -z "$API_ID_INPUT" ] || [ -z "$API_HASH_INPUT" ] || [ -z "$PANEL_ADMIN_PASS_INPUT" ]; then
     print_err "همه‌ی فیلدهای اجباری رو پر کن"
     exit 1
 fi

@@ -73,7 +73,7 @@
       for (const chat of chats) {
         const div = document.createElement('div');
         div.className = 'chat-item' + (chat.id === currentChatId ? ' active' : '');
-        const date = chat.last_message_date ? new Date(chat.last_message_date).toLocaleString('fa-IR') : '';
+        const date = fmtDate(chat.last_message_date);
         const typeIcon = {'private':'👤','group':'👥','channel':'📢'}[chat.type] || '💬';
         div.innerHTML = `
           <div style="display:flex;justify-content:space-between;align-items:center">

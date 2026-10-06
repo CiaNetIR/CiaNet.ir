@@ -15,46 +15,72 @@
       const user = await checkAuth();
       if (!user) { location.href = "login.html"; return; }
 
+      document.getElementById("app").innerHTML = layout(`
+        <div class="header"><h1>سلف‌بات‌ها</h1><span class="text-muted text-sm">مجموع: <span id="accountsTotal">۰</span></span></div>
+        <input id="accountSearch" class="input mb-4" placeholder="جستجو با تگ یا شماره…" onkeyup="searchAccounts(this.value)">
+        <div class="card">
+          <table>
+            <thead><tr>
+              <th>تگ</th><th>شماره</th><th>owner_id</th><th>وضعیت</th><th>پروکسی</th><th>منبع</th><th>عملیات</th>
+            </tr></thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+        </div>
+      `);
+
+      let reqSeq = 0;
       async function load(q = "") {
+        const mySeq = ++reqSeq;
         const params = new URLSearchParams({ q, page: "1", page_size: "100" });
         const r = await api(`/api/accounts?${params}`);
+        if (mySeq !== reqSeq) return; // پاسخ قدیمی/خارج از ترتیب — نادیده گرفته می‌شه
         const rows = (r.items || []).map(a => `
           <tr>
-            <td class="font-mono">${a.tag}</td>
-            <td class="text-sm">${a.phone || "—"}</td>
-            <td class="font-mono text-sm">${a.owner_user_id || "—"}</td>
+            <td class="font-mono">${escapeHtml(a.tag)}</td>
+            <td class="text-sm">${escapeHtml(a.phone || "—")}</td>
+            <td class="font-mono text-sm">${escapeHtml(a.owner_user_id || "—")}</td>
             <td>${a.disabled ?
               '<span class="badge badge-red">غیرفعال</span>' :
               a.running ? '<span class="badge badge-green">در حال اجرا</span>' :
               '<span class="badge badge-yellow">متوقف</span>'}</td>
             <td>${a.proxy_set ? "✓" : "—"}</td>
-            <td class="text-sm">${a.provision_source || "—"}</td>
+            <td class="text-sm">${escapeHtml(a.provision_source || "—")}</td>
             <td>
-              <button class="btn" onclick="toggleAccount('${a.tag}', ${a.disabled})">${a.disabled ? "🟢" : "⏸"}</button>
-              <button class="btn btn-danger" onclick="deleteAccount('${a.tag}')">🗑</button>
+              <button class="btn" data-action="toggle" data-tag="${escapeHtml(a.tag)}" data-disabled="${a.disabled ? "1" : "0"}">${a.disabled ? "🟢" : "⏸"}</button>
+              <button class="btn btn-danger" data-action="delete" data-tag="${escapeHtml(a.tag)}">🗑</button>
             </td>
           </tr>
         `).join("");
-        document.getElementById("app").innerHTML = layout(`
-          <div class="header"><h1>سلف‌بات‌ها</h1><span class="text-muted text-sm">مجموع: ${fmt(r.total || 0)}</span></div>
-          <input class="input mb-4" placeholder="جستجو با تگ یا شماره…" onkeyup="searchAccounts(this.value)">
-          <div class="card">
-            <table>
-              <thead><tr>
-                <th>تگ</th><th>شماره</th><th>owner_id</th><th>وضعیت</th><th>پروکسی</th><th>منبع</th><th>عملیات</th>
-              </tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        `);
+        const body = document.getElementById("accountsBody");
+        if (body) body.innerHTML = rows;
+        const total = document.getElementById("accountsTotal");
+        if (total) total.textContent = fmt(r.total || 0);
       }
 
-      window.searchAccounts = (q) => load(q);
+      // دکمه‌های عملیات با data-attribute (تگ داخل رشته‌ی JS تزریق نمی‌شه)
+      document.getElementById("accountsBody").addEventListener("click", (e) => {
+        const btn = e.target.closest("button[data-action]");
+        if (!btn) return;
+        const tag = btn.dataset.tag;
+        if (btn.dataset.action === "toggle") window.toggleAccount(tag, btn.dataset.disabled === "1");
+        else if (btn.dataset.action === "delete") window.deleteAccount(tag);
+      });
+
+      function currentQuery() {
+        const el = document.getElementById("accountSearch");
+        return el ? el.value : "";
+      }
+
+      let searchTimer = null;
+      window.searchAccounts = (q) => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => load(q), 300);
+      };
       window.toggleAccount = async (tag, disabled) => {
         try {
           await api(`/api/accounts/${tag}/${disabled ? "enable" : "disable"}`, { method: "POST" });
           showToast("تغییر وضعیت شد ✓");
-          load();
+          load(currentQuery());
         } catch (e) { showToast(e.message, true); }
       };
       window.deleteAccount = async (tag) => {
@@ -62,11 +88,15 @@
         try {
           await api(`/api/accounts/${tag}`, { method: "DELETE" });
           showToast("حذف شد ✓");
-          load();
+          load(currentQuery());
         } catch (e) { showToast(e.message, true); }
       };
 
-      load();
+      try {
+        await load();
+      } catch (e) {
+        renderError(e);
+      }
     })();
   </script>
 </body>

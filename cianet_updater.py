@@ -15,6 +15,7 @@ cianet_updater.py — Auto-Update & Account Propagation
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -326,6 +327,14 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
         main loop via `run_coroutine_threadsafe` (the hook's Telethon
         coroutines are bound to that loop). Without `main_loop`, fall back
         to the previous best-effort behaviour but log the failure loudly.
+      - v2.14.2 (BUG-18a/BUG-18b): after the reset and before the restart —
+        best-effort `pip install -r requirements.txt` with the running
+        interpreter (service venv) so new dependencies exist before the
+        restart (a missing dep previously meant an ImportError crash-loop
+        after restart); the ast.parse sanity check is extended from
+        main.py only to [main.py, web_panel.py] — a syntax-broken
+        web_panel.py previously passed the check and crashed the panel.
+        Both are best-effort and never block the update on failure.
     """
     if repo_dir is None:
         repo_dir = INSTALL_DIR
@@ -450,6 +459,11 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
         except Exception as e:
             log.warning("git checkout before pull failed (continuing): %s", e)
 
+        # v2.14.2 (BUG-18b): commitِ فعلی رو قبل از reset یادداشت کن —
+        # اگر بعد از reset یکی از فایل‌های جدید SyntaxError داشت،
+        # web_panel.py رو از همین commit (نسخه‌ی قبل از آپدیت) برمی‌گردونیم.
+        pre_reset_commit = get_local_commit(repo_dir)
+
         # 3. fetch + reset --hard (به‌جای pull) — این همیشه کار می‌کنه
         # حتی اگه local changes یا dubious ownership باشه.
         # PATCH (v2.6.4): git pull می‌تونه به‌خاطر local changes fail کنه.
@@ -506,14 +520,45 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
         # commitِ خراب از GitHub اومده — auto-rollback کن به backup که قبل
         # از reset گرفتیم. بدون این چک، systemd بعد از restart ده‌بار در
         # ۵ دقیقه کِرش می‌خورد و rate-limit می‌شد و کل سرویس down می‌شد.
+        #
+        # v2.14.2 (BUG-18b): چک syntax به هر دو فایل کلیدی گسترش یافت —
+        # main.py و web_panel.py. قبلاً فقط main.py چک می‌شد؛ یک
+        # web_panel.py با SyntaxError از این چک رد می‌شد و بعد از restart
+        # پنل وب روی کد خراب بالا می‌آمد. (cianet_updater.py خودش در حال
+        # replace شدن است — چک کردنش ممکن نیست و لازم هم نیست.)
         new_main_path = os.path.join(repo_dir, "main.py")
         try:
             import ast as _ast
-            with open(new_main_path, "r", encoding="utf-8") as _f:
-                _src = _f.read()
-            _ast.parse(_src, filename=new_main_path)
+            for _sanity_name in ("main.py", "web_panel.py"):
+                _sanity_path = os.path.join(repo_dir, _sanity_name)
+                if not os.path.isfile(_sanity_path):
+                    continue  # فایل در این نصب موجود نیست (نصب قدیمی) — skip
+                with open(_sanity_path, "r", encoding="utf-8") as _f:
+                    _src = _f.read()
+                _ast.parse(_src, filename=_sanity_path)
         except SyntaxError as _se:
-            log.error("❌ new main.py has SyntaxError: %s — rolling back", _se)
+            _bad_file = os.path.basename(getattr(_se, "filename", None) or "main.py")
+            log.error("❌ new %s has SyntaxError: %s — rolling back", _bad_file, _se)
+            # v2.14.2 (BUG-18b): web_panel.py هم (best-effort از git) به
+            # نسخه‌ی قبل از reset برگردونده می‌شه تا پنل روی کد خراب بالا
+            # نیاید. backup فقط از main.py گرفته می‌شه (§14.1 گام ۳ / §14.5)،
+            # پس برای web_panel.py از commitِ قبل از reset استفاده می‌کنیم.
+            if pre_reset_commit:
+                try:
+                    _wp_rb = subprocess.run(
+                        ["git", "checkout", pre_reset_commit, "--", "web_panel.py"],
+                        cwd=repo_dir, capture_output=True, text=True, timeout=15,
+                    )
+                    if _wp_rb.returncode != 0:
+                        log.warning(
+                            "⚠️ بازگردانی web_panel.py به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                            _wp_rb.stderr.strip()[:200]
+                        )
+                except Exception as _wp_e:
+                    log.warning(
+                        "⚠️ بازگردانی web_panel.py به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                        _wp_e
+                    )
             # rollback: backup رو برگردون
             if backup_path and os.path.exists(backup_path):
                 try:
@@ -525,7 +570,7 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                     state["rollback_reason"] = f"syntax_error: {_se.msg}"
                     _write_state(state)
                     return False, (
-                        f"❌ آپدیت ناموفق: main.py جدید SyntaxError داشت "
+                        f"❌ آپدیت ناموفق: {_bad_file} جدید SyntaxError داشت "
                         f"(خط {_se.lineno}: {_se.msg}). به backup برگشتیم:\n"
                         f"{backup_path}\n\nربات روی نسخه‌ی قبلی ادامه می‌دهد."
                     )
@@ -538,7 +583,7 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                     )
             else:
                 return False, (
-                    f"❌ آپدیت ناموفق: main.py جدید SyntaxError داشت و "
+                    f"❌ آپدیت ناموفق: {_bad_file} جدید SyntaxError داشت و "
                     f"backup پیدا نشد. ربات ممکن است down باشد."
                 )
 
@@ -550,6 +595,37 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 _shutil.rmtree(pycache)
             except Exception:
                 pass
+
+        # v2.14.2 (BUG-18a): بعد از reset و قبل از restart،
+        # dependencyهای جدیدِ requirements.txt رو نصب کن (best-effort).
+        # بدون این، اگر یک آپدیت dependency جدید لازم داشته باشه، سرویس
+        # بعد از restart روی ImportError چرخه‌ی crash می‌افتاد. از
+        # sys.executable استفاده می‌کنیم تا دقیقاً همان python داخل venv
+        # سرویس (مثل install.sh → .venv/bin/python) استفاده بشه. شکستِ pip
+        # آپدیت/restart رو بلاک نمی‌کنه — فقط لاگ می‌شه.
+        try:
+            import sys as _sys
+            _req_path = os.path.join(repo_dir, "requirements.txt")
+            if os.path.isfile(_req_path):
+                _pip = subprocess.run(
+                    [_sys.executable, "-m", "pip", "install", "-r", _req_path],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if _pip.returncode == 0:
+                    log.info("✅ نصب requirements.txt بعد از آپدیت انجام شد")
+                else:
+                    log.warning(
+                        "⚠️ نصب requirements.txt بعد از آپدیت ناموفق بود "
+                        "(ادامه می‌دهیم — اگر dependency جدیدی لازم باشد سرویس "
+                        "بعد از restart ممکن است بالا نیاید؛ دستی اجرا کنید: "
+                        "%s -m pip install -r requirements.txt): %s",
+                        _sys.executable, _pip.stderr.strip()[-300:]
+                    )
+        except Exception as _pip_e:
+            log.warning(
+                "⚠️ نصب requirements.txt بعد از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                _pip_e
+            )
 
         new_commit = get_local_commit(repo_dir)
         try:
@@ -805,11 +881,26 @@ async def check_for_update() -> Optional[dict]:
 
 # ─── Entry points برای main.py ───
 
-async def auto_update_loop(interval: int = 300, admin_notify_func=None):
+async def auto_update_loop(interval: int = 300, admin_notify_func=None, main_loop: object = None):
     """
     background loop. هر `interval` ثانیه چک می‌کنه.
     اگه update بود، apply می‌کنه و notify می‌فرسته.
+
+    v2.14.2 (BUG-18c / §14.1 گام ۷): پارامتر `main_loop` اضافه شد و به
+    apply_update پاس می‌شه تا disable-accounts hook واقعاً از طریق
+    asyncio.run_coroutine_threadsafe روی event loop اصلی اجرا بشه — قبلاً
+    apply_update() بدون main_loop صدا زده می‌شد و wiring این پارامتر در
+    apply_update عملاً dead code بود. اگه main_loop پاس نشه، همون loop ای
+    که این coroutine رویش در حال اجراست (loop اصلی سرویس) capture می‌شه.
     """
+    if main_loop is None:
+        try:
+            main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            log.warning(
+                "auto_update_loop: event loop اصلی در دسترس نیست — "
+                "disable hook در مسیر legacy اجرا می‌شود"
+            )
     log.info("auto-update loop started (interval=%ds)", interval)
     while True:
         try:
@@ -824,7 +915,17 @@ async def auto_update_loop(interval: int = 300, admin_notify_func=None):
                         )
                     except Exception:
                         pass
-                success, msg = apply_update()
+                # v2.14.2 (BUG-18c): apply_update در thread executor اجرا
+                # می‌شه (تا git fetch/reset حدوداً ۱۰۰ ثانیه‌ای حلقه رو block
+                # نکنه) و main_loop هم به آن پاس می‌شه تا §14.1 گام ۷ برقرار
+                # باشه — همان الگویی که main.py و web_panel.py استفاده
+                # می‌کنن، ولی با loop وصل‌شده.
+                if main_loop is not None:
+                    success, msg = await main_loop.run_in_executor(
+                        None, functools.partial(apply_update, main_loop=main_loop)
+                    )
+                else:
+                    success, msg = apply_update()
                 log.info("apply_update: %s", msg)
                 # اگه apply موفق بود، خود process restart می‌شه
                 # پس این خط معمولاً اجرا نمی‌شه

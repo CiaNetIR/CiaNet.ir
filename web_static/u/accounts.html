@@ -57,10 +57,13 @@
           'stopped': '⏹ متوقف',
           'unknown': '❓ نامشخص',
         }[a.state] || a.state;
+        // P2-7 (P1-7 residual): tag/note are server (user-influenced) data —
+        // escape all interpolations into HTML text and the data-tag attribute,
+        // same standard as account_settings.html.
         div.innerHTML = `
           <div class="acc-name">${escapeHtml(a.name)}</div>
-          <div class="acc-meta">tag: <code>${a.tag}</code> · ${stateLabel} · ${a.note || ''}</div>
-          <button class="primary" data-tag="${a.tag}">ورود به اکانت →</button>
+          <div class="acc-meta">tag: <code>${escapeHtml(a.tag)}</code> · ${escapeHtml(stateLabel)} · ${escapeHtml(a.note || '')}</div>
+          <button class="primary" data-tag="${escapeHtml(a.tag)}">ورود به اکانت →</button>
         `;
         div.querySelector('button').addEventListener('click', async () => {
           try {

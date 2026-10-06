@@ -37,14 +37,16 @@
       if (!me) return;
       try {
         const info = await apiCall('GET', '/api/user/live-session');
+        // P2-7 sweep: escape ALL server-provided values (tag/tg_user_id/phone
+        // previously rendered raw), same standard as account_settings.html.
         document.getElementById('live-info').innerHTML = `
           <div class="info-grid">
-            <div><span>🏷️ تگ:</span> <code>${info.tag}</code></div>
+            <div><span>🏷️ تگ:</span> <code>${escapeHtml(info.tag)}</code></div>
             <div><span>👤 نام:</span> <code>${escapeHtml(info.name)}</code></div>
-            <div><span>🆔 آیدی تلگرام:</span> <code>${info.tg_user_id || '—'}</code></div>
-            <div><span>📞 تلفن:</span> <code>${info.phone || '—'}</code></div>
+            <div><span>🆔 آیدی تلگرام:</span> <code>${escapeHtml(info.tg_user_id || '—')}</code></div>
+            <div><span>📞 تلفن:</span> <code>${escapeHtml(info.phone || '—')}</code></div>
             <div><span>📊 وضعیت:</span> <code>${info.disabled ? 'متوقف' : 'فعال'}</code></div>
-            <div><span>⏱ شروع live:</span> <code>${new Date(info.live_started_at * 1000).toLocaleString('fa-IR')}</code></div>
+            <div><span>⏱ شروع live:</span> <code>${fmtDate(info.live_started_at * 1000)}</code></div>
           </div>
         `;
       } catch (err) {

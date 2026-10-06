@@ -11,7 +11,7 @@
 [![Website](https://img.shields.io/badge/website-CiaNet.ir-0066cc.svg)](https://CiaNet.ir)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
 [![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
-[![Version](https://img.shields.io/badge/version-2.13.0%20STABLE-blue.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.13.0-stable)
+[![Version](https://img.shields.io/badge/version-2.14.2%20STABLE-blue.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.14.2-stable)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
 
@@ -313,6 +313,17 @@ sudo rm -rf __pycache__ && sudo systemctl restart selfbot
 ---
 
 ## 📝 Changelog
+
+### v2.14.2 — فیکس ۳۰+ باگ (سه‌فاز، ۳۰ ایجنت)
+
+- **قابلیت‌های مرده فعال شدند** — حلقه‌ی ارسال پیام‌های زمان‌بندی‌شده (scheduled messages) spawn شد و پاسخ خودکار (auto-reply) به هندلر پیام‌های ورودی سلف‌بات وصل شد
+- **امنیت وب‌پنل** — CSRF دو سر وصل شد (ارسال هدر X-CSRF-Token از فرانت‌اند + اعمال روی mutationهای پنل کاربر)، rate-limit روی لاگین کاربر (۵ تلاش ناموفق → ۱۵ دقیقه بلاک)، اصلاح استخراج IP از X-Forwarded-For طبق الگوی trusted-proxy، و بررسی مالکیت اکانت در پیام‌های زمان‌بندی‌شده (رفع جعل کراس-کاربر)
+- **XSS پنل ادمین** — escapeHtml روی همه‌ی داده‌های رندرشده از سرور (تیکت‌ها، کاربران، فایننس، audit، اکانت‌ها، ابزارها، تنظیمات)
+- **وابستگی‌های امنیتی گم‌شده** — argon2-cffi (هش argon2id رمز ۲FA) و cryptography (رمزگذاری Fernet بک‌آپ) به requirements.txt اضافه شدند؛ قبلاً به‌صورت بی‌صدا به SHA-256 و ZipCrypto ضعیف fallback می‌شد
+- **باگ‌های مالی** — به‌روزرسانی اتمیک used_count کد تخفیف، شمارش سهمیه‌ی روزانه‌ی broadcast فقط بعد از گذر از cooldown، و پنجره‌ی اعتبار TRC20 به‌صورت fail-closed
+- **ربات** — مدیریت FloodWait در broadcast، رفع نشت کلاینت تلگرام، بک‌آف ری‌استارت، و chmod فایل‌های حساس
+- **فرانت‌اند** — رفع ReferenceError دکمه‌های فیلتر، حفظ فوکوس فیلد جستجو، اصلاح صفحه‌ی analytics (حذف ریدایرکت اشتباه به لاگین)، منوی موبایل پنل ادمین، ماسک api_hash، و بارگذاری فونت وزیرمتن
+- **نصب/آپدیت** — اجرای uvicorn با workers=1 (رفع لوگین/۴۰۱ متناوب)، بک‌آپ از دیتابیس و سشن‌ها قبل از uninstall، تولید رمز تصادفی برای پنل به‌جای رمز پیش‌فرض، اجرای `pip install -r requirements.txt` بعد از آپدیت، و بررسی ast.parse وب‌پنل در آپدیتر
 
 ### v2.13.0 SECURITY — 2026-10-06
 **Major security release — 32 باگ فیکس‌شده (4 HIGH + 8 MEDIUM + 11 LOW + 6 SCHEMA + 3 NEXT)**

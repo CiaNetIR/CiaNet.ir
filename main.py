@@ -1667,7 +1667,11 @@ def dedicated_bot_price() -> int:
 
 def inc_setting(key: str) -> None:
     """شمارنده‌ی عددی در settings (مثلاً آمار گیت عضویت) — یک واحد اضافه می‌کند."""
-    with _conn() as c:
+    # PATCH (P1-1 BUG-29): read-then-write قبلاً خارج از قفل نوشتن انجام می‌شد
+    # و دو فراخوانیِ هم‌زمان می‌توانستند یک شمارش را گم کنند. حالا کلِ
+    # «خواندن + نوشتن» داخل یک تراکنش BEGIN IMMEDIATE است (ستون value از
+    # نوع TEXT است، پس افزایش در Python انجام می‌شود نه در SQL).
+    with _conn_immediate() as c:
         row = c.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         cur = int(row["value"]) if row and row["value"] and str(row["value"]).isdigit() else 0
         c.execute(
@@ -2593,9 +2597,24 @@ def create_scheduled_message(user_id: int, tag: str, chat_id: int, text: str,
         return {"error": "invalid_chat_id"}
     try:
         from datetime import datetime
-        datetime.fromisoformat(scheduled_at.replace("Z", ""))
+        # v2.14.2 (P2-9 FLOW-3B): نرمال‌سازی فرمت قبل از ذخیره — قبلاً رشته‌ی
+        # خام ISO (با «T» یا پسوند Z) ذخیره می‌شد ولی حلقه‌ی ارسال با فرمت
+        # «%Y-%m-%d %H:%M:%S» مقایسه‌ی لغت‌نامه‌ای می‌کند؛ چون 'T' > ' '
+        # است، پیام‌های T-فرمت تا ~۲۴ ساعت دیر due می‌شدند.
+        _dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+        if _dt.tzinfo is not None:
+            _dt = _dt.astimezone().replace(tzinfo=None)  # → ساعت محلی سرور
+        scheduled_at = _dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return {"error": "invalid_scheduled_at"}
+    # PATCH (P1-1 BUG-2d): چک مالکیت — قبلاً هر جفتِ (user_id, tag) پذیرفته
+    # می‌شد و از طریق پنل می‌شد برای اکانتِ کاربرِ دیگر پیام زمان‌بندی‌شده
+    # ساخت (cross-tenant). دفاع عمقی در کنار چکِ web_panel؛ OWNER طبق §20.1
+    # قوانین همیشه مجاز است (is_owner_bypass).
+    cfg = load_config()
+    acc = cfg.get(tag) if isinstance(cfg, dict) else None
+    if not (account_belongs_to(acc, tag, user_id) or is_owner_bypass(user_id)):
+        return {"error": "account_not_owned"}
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO scheduled_messages (user_id, tag, chat_id, text, "
@@ -2635,6 +2654,15 @@ def create_auto_reply(user_id: int, tag: str, keyword: str, reply: str) -> dict:
     reply = reply.strip()[:1000]
     if not keyword or not reply:
         return {"error": "empty_after_trim"}
+    # PATCH (P2-1 BUG-2d residual): چک مالکیت — همان دروازه‌ای که P1-1 به
+    # create_scheduled_message اضافه کرد. قبلاً هر جفتِ (user_id, tag)
+    # پذیرفته می‌شد و از طریق پنل می‌شد برای اکانتِ کاربرِ دیگر auto-reply
+    # ساخت (cross-tenant). دفاع عمقی در کنار چکِ web_panel؛ OWNER طبق §20.1
+    # قوانین همیشه مجاز است (is_owner_bypass).
+    cfg = load_config()
+    acc = cfg.get(tag) if isinstance(cfg, dict) else None
+    if not (account_belongs_to(acc, tag, user_id) or is_owner_bypass(user_id)):
+        return {"error": "account_not_owned"}
     with _conn() as c:
         cur = c.execute(
             "INSERT INTO auto_replies (user_id, tag, keyword, reply, is_active, "
@@ -4036,22 +4064,45 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
         else:
             return {"error": result.get("error", "discount_failed")}
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).strftime(_DATETIME_FMT)
-    with _conn() as c:
-        row = c.execute("SELECT value FROM settings WHERE key = 'order_seq'").fetchone()
-        seq = (int(row["value"]) if row and str(row["value"]).isdigit() else 0) + 1
-        c.execute(
-            "INSERT INTO settings (key, value) VALUES ('order_seq', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(seq),),
-        )
-        cur = c.execute(
-            "INSERT INTO orders (order_no, user_id, plan, amount_toman, amount_usdt, status, "
-            "created_at, expires_at, discount_code, discount_percent, original_amount_toman) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
-            (f"ORD-{seq:05d}", user_id, plan, amount_toman, amount_usdt, _now(), expires_at,
-             applied_code, discount_percent, original_amount),
-        )
-        oid = cur.lastrowid
+    # PATCH (P1-1 BUG-29): order_seq قبلاً با تراکنشِ deferred خوانده/نوشته
+    # می‌شد؛ دو سفارشِ هم‌زمان شماره‌ی یکسان می‌گرفتند و روی order_no UNIQUE
+    # با استثنای مدیریت‌نشده می‌شکستند. حالا «افزایش seq + ثبت سفارش» در
+    # یک تراکنش BEGIN IMMEDIATE اتمیک است.
+    try:
+        with _conn_immediate() as c:
+            row = c.execute("SELECT value FROM settings WHERE key = 'order_seq'").fetchone()
+            seq = (int(row["value"]) if row and str(row["value"]).isdigit() else 0) + 1
+            c.execute(
+                "INSERT INTO settings (key, value) VALUES ('order_seq', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(seq),),
+            )
+            cur = c.execute(
+                "INSERT INTO orders (order_no, user_id, plan, amount_toman, amount_usdt, status, "
+                "created_at, expires_at, discount_code, discount_percent, original_amount_toman) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+                (f"ORD-{seq:05d}", user_id, plan, amount_toman, amount_usdt, _now(), expires_at,
+                 applied_code, discount_percent, original_amount),
+            )
+            oid = cur.lastrowid
+    except Exception:
+        # PATCH (P2-1 residual): apply_discount_code کد را در تراکنشِ جداگانه‌ای
+        # مصرف می‌کند (used_count += 1)؛ اگر ثبتِ خودِ سفارش شکست بخورد، کد
+        # «سوخته» می‌ماند بی‌آنکه سفارشی ساخته شده باشد. برای اتمیک‌ماندنِ
+        # نتیجه، used_count را برگردان می‌داریم (همان الگوی rollback در
+        # cancel_order و ویزارد تخفیفِ P1-3). سپس خطا مثل قبل به caller
+        # برگردانده می‌شود (مسیر موفق دست‌نخورده است).
+        if applied_code:
+            try:
+                with _conn_immediate() as c:
+                    c.execute(
+                        "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
+                        "WHERE code = ? AND used_count > 0",
+                        (applied_code,),
+                    )
+            except Exception as _rb:
+                print(f"⚠️ [create_order] discount rollback failed: {_rb}")
+        raise
     return get_order(oid)
 
 
@@ -4095,11 +4146,31 @@ def list_expired_orders() -> list:
 
 
 def expire_order(order_id: int) -> None:
-    with _conn() as c:
-        c.execute(
+    # v2.14.2 (P2-3 flag / §11.4): rollback used_count کد تخفیف هنگام
+    # انقضا — v2.14.0 در changelog ادعایش را داشت ولی پیاده نشده بود.
+    # الگوی دقیقاً همان cancel_order (DEBUG-1 MEDIUM-2).
+    with _conn_immediate() as c:
+        row = c.execute(
+            "SELECT discount_code FROM orders WHERE id = ? AND status = 'pending'",
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            return
+        discount_code = row["discount_code"] if "discount_code" in row.keys() else None
+        cur = c.execute(
             "UPDATE orders SET status = 'expired' WHERE id = ? AND status = 'pending'",
             (order_id,),
         )
+        if cur.rowcount > 0 and discount_code:
+            try:
+                c.execute(
+                    "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
+                    "WHERE code = ? AND used_count > 0",
+                    (discount_code,),
+                )
+            except Exception as _e:
+                # rollback failure is not fatal — log and continue
+                print(f"⚠️ [expire_order] discount rollback failed: {_e}")
 
 
 def extend_order(order_id: int, user_id: int, hours: int = 24) -> dict:
@@ -5069,6 +5140,10 @@ def _rollback_from_emergency(emergency_zip: str, restored: list,
                         f"({name})."
                     )
             os.replace(tmp, dest)
+            # v2.14.2 (P2-10 / §20.3): فایلِ موقت با umask پیش‌فرض (0644)
+            # ساخته شده و os.replace همان inode/mode را به مقصد می‌آورد —
+            # پس مقصدِ جایگزین‌شده (config/DB/سشن) باید دوباره 0600 شود.
+            _chmod_private(dest)
             # PATCH 3: سشن Telethon هم فایل SQLite است — باید مثل .db به‌عنوان
             # واحدِ منطقی (DB + sidecar ها) مدیریت شود.
             if name.endswith(".db") or name.endswith(".session"):
@@ -5108,6 +5183,9 @@ def _rollback_from_emergency(emergency_zip: str, restored: list,
             with open(tmp, "wb") as f:
                 f.write(data)
             os.replace(tmp, dest)
+            # v2.14.2 (P2-10 / §20.3): مثل بالا — بعد از replace، mode به
+            # 0600 برگردانده می‌شود (فایل موقت 0644 بود).
+            _chmod_private(dest)
         # BUG #1: بازگردانی sidecar های سشن که قبل از Restore وجود داشتند و
         # در طولِ جایگزینیِ سشن حذف/تمیز شدند — فقط از پوشه‌ی حفظِ
         # transaction-local (در بکاپ اضطراری نیستند). فقط sidecar هایی که
@@ -5130,6 +5208,9 @@ def _rollback_from_emergency(emergency_zip: str, restored: list,
                 with open(tmp_sc, "wb") as f:
                     f.write(data_sc)
                 os.replace(tmp_sc, sc_dest)
+                # v2.14.2 (P2-10 / §20.3): sidecar های بازگردانده‌شده هم
+                # داده‌های حساس دارند — مثل بقیه‌ی مقاصد 0600 می‌شوند.
+                _chmod_private(sc_dest)
     # Sidecar های کهنه را فقط با checkpointِ تاییدشده پاک کن — اگر checkpoint
     # شکست بخورد، rollback موفق اعلام نمی‌شود (PATCH 3: برای سشن‌ها همین
     # قانون شامل -journal هم هست).
@@ -5438,6 +5519,11 @@ def _do_restore_locked(zip_path: str, workdir: str, emergency_zip: str,
             manifest = json.loads(zf.read(BACKUP_MANIFEST).decode("utf-8"))
             files = manifest["files"]
             os.makedirs(workdir, exist_ok=True)
+            # v2.14.2 (P2-10 / §20.3): استخراجِ بکاپ (config/DB/سشن‌ها) داخل
+            # workdir با umask پیش‌فرض 0644 نوشته می‌شود — خودِ پوشه‌ی
+            # workdir باید 0700 باشد تا در طولِ عملیاتِ Restore (که می‌تواند
+            # طولانی باشد) برای دیگر کاربرانِ همان ماشین خوانا نباشد.
+            _chmod_private(workdir, 0o700)
             for entry in files:
                 name = entry["name"]
                 target = os.path.join(workdir, *name.split("/"))
@@ -5539,6 +5625,12 @@ def _do_restore_locked(zip_path: str, workdir: str, emergency_zip: str,
                             f"جایگزینی ناموفق بود — Restore متوقف شد."
                         )
             os.replace(target, dest)
+            # v2.14.2 (P2-10 / §20.3): فایلِ استخراج‌شده در workdir با umask
+            # پیش‌فرض (0644) ساخته شده و os.replace همان inode/mode را به
+            # مقصد می‌آورد — config.json و دیتابیس‌ها (و سشن‌ها، دفاع در
+            # لایه‌ی فایل علاوه بر پوشه‌ی 0700) باید دوباره 0600 شوند؛
+            # مثل الگوی save_config (chmod بعد از replace).
+            _chmod_private(dest)
             restored.append((name, dest, existed))
 
         # اعتبارسنجی سشن‌های بازیابی‌شده بعد از replace (واحد منطقی): sidecar
@@ -7100,7 +7192,18 @@ class AdminBot:
             session_path, api_id, api_hash,
             connection_retries=3, retry_delay=2, flood_sleep_threshold=10,
         )
-        await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        # v2.14.2 (P2-2 flag / BUG-16a sibling): اگر start شکست بخورد یا
+        # timeout شود کلاینت leak نمی‌شود — disconnectِ best-effort +
+        # re-raise (همان الگوی SaaSBot.start).
+        try:
+            await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        except Exception:
+            try:
+                if self.client.is_connected():
+                    await self.client.disconnect()
+            except Exception:
+                pass
+            raise
         # v2.12.12: pre-warm dialog cache (مشابه SaaSBot.start)
         # v2.12.13: timeout aggregate اضافه شد.
         try:
@@ -9765,6 +9868,11 @@ class AdminBot:
             # بود و هر نوشته‌ی درون‌رویی مجدداً کانکشن sqlite را باز می‌کرد).
             await temp_client.disconnect()
             temp_client.session.save()
+            # v2.14.2 (P2-10 / §20.15): سشنِ تازه‌لاگین‌شده حاوی auth key
+            # کاملِ اکانت است — مطابق الگوی مستند §20.15 بلافاصله بعد از
+            # save به 0600 محدود می‌شود (پوشه‌ی sessions خودش 0700 است؛ این
+            # chmod دفاعِ در لایه‌ی خودِ فایل است).
+            _chmod_private(os.path.join(self.sb.SESSIONS_DIR, f"{tag}.session"))
             temp_client.session.close()
         except Exception as e:
             # v2.12.9 (QA-EXPERT WATCH-3): در مسیر خطا، temp_client ممکن بود
@@ -10298,12 +10406,26 @@ async def run_admin_bot_forever(selfbot_module):
     """
     consecutive_failures = 0
     MAX_BACKOFF = 300
+    # PATCH (P1-1 BUG-24): بک‌آف فقط وقتی ریست می‌شود که اتصال مدتی (۳۰۰s)
+    # پایدار مانده باشد. قبلاً هر قطعِ تمیز بک‌آف را صفر می‌کرد؛ اگر سرورِ
+    # تلگرام به‌طور مکرر (و تمیز) قطع می‌کرد، ری‌استارت فوری و بدون فاصله
+    # اتفاق می‌افتاد. قطعِ تمیزِ زودهنگام حالا مثل خطا شمرده می‌شود.
+    STABLE_UPTIME_SEC = 300
     while True:
         try:
             admin = AdminBot(selfbot_module, standalone=True)
             await admin.start()
+            connected_at = time.monotonic()
             await admin.client.run_until_disconnected()
-            consecutive_failures = 0
+            if time.monotonic() - connected_at >= STABLE_UPTIME_SEC:
+                # اتصال پایدار بود → ریست بک‌آف (رفتار سالمِ قبلی)
+                consecutive_failures = 0
+            else:
+                # قطعِ تمیزِ زودهنگام → بک‌آف حفظ/افزایش می‌شود
+                consecutive_failures += 1
+                wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
+                print(f"⚠️ [admin_bot] قطع تمیز پیش از {STABLE_UPTIME_SEC}s — تلاش مجدد در {wait_time}s")
+                await asyncio.sleep(wait_time)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -10617,10 +10739,11 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
     else:
         # original unsalted SHA-256 (legacy)
         expected = hashlib.sha256(password.encode("utf-8")).hexdigest()
-    # constant-time comparison
-    if len(expected) != len(stored_hash):
-        return False
-    return all(a == b for a, b in zip(expected, stored_hash))
+    # v2.14.2 (P2-10 / §20.11): مقایسه‌ی hash باید واقعاً constant-time باشد —
+    # zip-all با early-exit نبود؛ hmac.compare_digest جایگزین شد (طول‌های
+    # نابرابر هم fail-closed است، پس گارد طول جداگانه لازم نیست).
+    import hmac
+    return hmac.compare_digest(expected, stored_hash)
 
 
 def _purge_old_2fa_plaintext() -> None:
@@ -10636,6 +10759,14 @@ def _purge_old_2fa_plaintext() -> None:
     if changed:
         save_config(cfg)
         print("🔒 [2fa] plaintext رمزهای قدیمی پاک شدند")
+
+
+# BUG-17a (قوانین §20.7): ارجاعِ ماژول‌سطح به تسکِ loopِ آپدیتِ خودکار —
+# تا هم GC نتواند وسطِ اجرا تسکِ fire-and-forget را جمع کند و هم با
+# done-check از spawnِ duplicate جلوگیری شود (الگوی مستند در §10.5/§20.7).
+# نکته: boot هم (در main) باید همین متغیرِ ماژول را ست کند تا dedupe
+# بین این دو نقطه برقرار بماند.
+_AUTO_UPDATE_TASK = None
 
 
 class SaaSBot:
@@ -10682,6 +10813,10 @@ class SaaSBot:
         # حذف می‌شوند — تا «خوش‌آمدگوییِ دوباره‌عضویت» فقط برای کسی که
         # واقعاً قبلاً بسته شده بود فرستاده شود، نه برای عضوِ همیشگی.
         self._gate_blocked: set = set()
+        # BUG-26: مهرِ زمانیِ آخرین بسته‌شدنِ هر کاربر (user_id → ts) — فقط
+        # برای هرسِ TTL محدودِ _gate_blocked در _prune_gate_state؛ خودِ
+        # مجموعه همان set می‌ماند تا بقیه‌ی کد (discard) تغییر نکند.
+        self._gate_blocked_ts: dict = {}
         # آخرین زمان کلیکِ «بررسی عضویت» به‌ازای هر کاربر — برای سقفِ
         # ۵ ثانیه‌ای: هر کلیکِ force یک یا دو تماس شبکه با تلگرام است و
         # بدون سقف، یک کاربر می‌تواند با کلیک‌های پشت‌سرهم آن را اسپم کند.
@@ -10695,6 +10830,10 @@ class SaaSBot:
         # به‌جایش یک نسخه‌ی تازه ارسال شود؛ بدون این، هر پیامِ متنیِ کاربرِ
         # بسته‌شده یک کپیِ جدیدِ روی‌هم از پیام گیت می‌سازد.
         self._gate_msg_id: dict = {}
+        # BUG-25 (§10.1): تا این timestamp ارسال‌های broadcast همگانی بعد از
+        # FloodWait تلگرام مکث کرده‌اند — مختصِ هماهنگیِ داخلیِ همین کلاس
+        # (SelfBotها stateِ خودشان را دارند).
+        self._flood_until = 0.0
         self._expiry_task = None
         # قفل دسترسی به پنل مدیریت (یک نمونه‌ی مشترک بین همه‌ی کاربران است و
         # scope آن قبل از هر فراخوانی بازنویسی می‌شود). بدون این قفل، یک رویداد
@@ -10737,7 +10876,17 @@ class SaaSBot:
             session_path, api_id, api_hash,
             connection_retries=3, retry_delay=2, flood_sleep_threshold=10,
         )
-        await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        # BUG-16a: اگر start بعد از ساختِ کلاینت شکست بخورد (مثلاً
+        # timeout یا خطای احراز هویت)، کلاینتِ نیمه‌استارت‌شده باید قطع شود
+        # تا connection نشت نکند؛ خطا عیناً به بالا برمی‌گردد.
+        try:
+            await asyncio.wait_for(self.client.start(bot_token=ADMIN_BOT_TOKEN), timeout=30)
+        except Exception:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            raise
 
         # ثبتِ رفرنس تا SelfBotها بتوانند «کدِ لاگین» را از طریقِ همین ربات
         # به مالک برسانند.
@@ -10865,6 +11014,7 @@ class SaaSBot:
         """
         self._gate_cache.clear()
         self._gate_blocked.clear()
+        self._gate_blocked_ts.clear()
         self._gate_retry_ts.clear()
         self._gate_msg_id.clear()
 
@@ -10900,6 +11050,15 @@ class SaaSBot:
         دو مرحله: اول ورودی‌های منقضی (کش ۶۰ ثانیه TTL دارد، پس هر چیزِ
         قدیمی‌تر از ۵ دقیقه قطعاً بی‌مصرف است)؛ اگر باز هم بالای سقف بود،
         قدیمی‌ترین‌ها حذف می‌شوند.
+
+        BUG-26: _gate_blocked (با مهرِ زمانیِ _gate_blocked_ts) و
+        _gate_msg_id هم فقط با تغییر کانال پاک می‌شدند و برای کاربرانی
+        که هرگز برنمی‌گردند بی‌سقف رشد می‌کردند. حالا با همان الگو هرس
+        می‌شوند: _gate_blocked با TTL ۴۸ ساعته (ورودیِ قدیمی فقط پیامِ
+        «خوشامدِ دوباره‌ی عضویت» را عقب می‌اندازد — گیتِ واقعی هر بار
+        جداگانه چک می‌شود، پس رفتارِ کاربرانِ زنده تغییر نمی‌کند) و
+        _gate_msg_id با سقفِ تعداد (مقدارش فقط برای حذفِ پیامِ گیتِ قبلی
+        است — صرفاً آراستگیِ چت).
         """
         if len(self._gate_cache) > self._GATE_STATE_MAX:
             cutoff = now - 300
@@ -10919,6 +11078,26 @@ class SaaSBot:
                 for uid in sorted(self._gate_retry_ts, key=self._gate_retry_ts.get)[
                         : len(self._gate_retry_ts) - self._GATE_STATE_MAX]:
                     self._gate_retry_ts.pop(uid, None)
+        # BUG-26: _gate_blocked — TTL ۴۸ ساعته با مهرِ زمانی؛ بعد از آن
+        # اگر هنوز بالای سقف بود، قدیمی‌ترین‌ها حذف می‌شوند. (tsهایِ مربوط
+        # به کاربرانی که قبلاً عضو شده‌اند هم در همین گذر تمیز می‌شوند.)
+        if (len(self._gate_blocked) > self._GATE_STATE_MAX
+                or len(self._gate_blocked_ts) > self._GATE_STATE_MAX):
+            cutoff = now - 48 * 3600
+            for uid, ts in list(self._gate_blocked_ts.items()):
+                if ts < cutoff:
+                    self._gate_blocked_ts.pop(uid, None)
+                    self._gate_blocked.discard(uid)
+            if len(self._gate_blocked) > self._GATE_STATE_MAX:
+                for uid in sorted(self._gate_blocked_ts, key=self._gate_blocked_ts.get)[
+                        : len(self._gate_blocked_ts) - self._GATE_STATE_MAX]:
+                    self._gate_blocked.discard(uid)
+                    self._gate_blocked_ts.pop(uid, None)
+        # BUG-26: _gate_msg_id — dict ترتیبِ درج را حفظ می‌کند، پس
+        # قدیمی‌ترین‌ها (اولین‌های درج‌شده) حذف می‌شوند تا سقف رعایت شود.
+        if len(self._gate_msg_id) > self._GATE_STATE_MAX:
+            for uid in list(self._gate_msg_id)[: len(self._gate_msg_id) - self._GATE_STATE_MAX]:
+                self._gate_msg_id.pop(uid, None)
 
     async def _send_channel_gate_message(self, event, denied: bool = False):
         """
@@ -10932,6 +11111,9 @@ class SaaSBot:
         if event.sender_id not in self._gate_blocked:
             inc_setting("gate_blocked_count")
         self._gate_blocked.add(event.sender_id)
+        # BUG-26: به‌روزرسانی مهرِ زمانی برای هرسِ TTL (ورودی‌های تازه
+        # هرگز مشمول حذفِ قدیمی‌ها نمی‌شوند).
+        self._gate_blocked_ts[event.sender_id] = time.time()
         channel = (get_setting("required_channel") or "").strip()
         username = _normalize_channel(channel)
         link = f"https://t.me/{username}" if username else channel
@@ -12650,24 +12832,122 @@ class SaaSBot:
     #  بخش OWNER/ADMIN
     # ─────────────────────────────────────────────────────
 
+    # BUG-30: اندازه‌ی قطعه‌ی کوئری‌های IN — پایین‌تر از سقفِ پارامترهای
+    # sqlite (999) تا روی همه‌ی نسخه‌ها کار کند.
+    _SUB_QUERY_CHUNK = 500
+
+    def _users_sub_status_map(self, users: list) -> dict:
+        """BUG-30: وضعیت اشتراکِ همه‌ی کاربرانِ لیست با «دو» کوئریِ مجموعه‌ای
+        (IN) به‌جای N+1 کوئری — دقیقاً هم‌ارزِ فراخوانیِ _user_sub_status
+        به‌ازای هر کاربر (همان کوئری‌ها با همان ORDER BY و همان منطقِ
+        انشعاب)، فقط یک‌جا و دسته‌ای. خروجی: {user_id: وضعیت}."""
+        uids = []
+        seen = set()
+        for u in users:
+            uid = u["user_id"]
+            if uid not in seen:
+                seen.add(uid)
+                uids.append(uid)
+        # ۱) آخرین اشتراکِ active هر کاربر — معادلِ get_active_subscription
+        #    (ORDER BY expire_date DESC LIMIT 1 به‌ازای هر کاربر؛ اولینِ
+        #    دیده‌شده در مرتب‌سازیِ کلی همان MAXِ هر کاربر است).
+        active_sub = {}
+        if uids:
+            with _conn() as c:
+                for i in range(0, len(uids), self._SUB_QUERY_CHUNK):
+                    chunk = uids[i:i + self._SUB_QUERY_CHUNK]
+                    q = ("SELECT * FROM subscriptions WHERE status = 'active' "
+                         f"AND user_id IN ({','.join('?' * len(chunk))}) "
+                         "ORDER BY expire_date DESC")
+                    for row in c.execute(q, chunk):
+                        d = dict(row)
+                        if d["user_id"] not in active_sub:
+                            active_sub[d["user_id"]] = d
+        # ۲) fallback — فقط برای کاربرانی که اشتراکِ active ندارند یا
+        #    روزِ باقی‌مانده‌شان قابل‌محاسبه نیست (معادلِ کوئریِ دومِ
+        #    _user_sub_status: ORDER BY created_at DESC, id DESC LIMIT 1).
+        need_fallback = []
+        for uid in uids:
+            sub = active_sub.get(uid)
+            if not (sub and _subscription_days_left(sub) is not None):
+                need_fallback.append(uid)
+        latest_sub = {}
+        if need_fallback:
+            with _conn() as c:
+                for i in range(0, len(need_fallback), self._SUB_QUERY_CHUNK):
+                    chunk = need_fallback[i:i + self._SUB_QUERY_CHUNK]
+                    q = ("SELECT * FROM subscriptions "
+                         f"WHERE user_id IN ({','.join('?' * len(chunk))}) "
+                         "ORDER BY created_at DESC, id DESC")
+                    for row in c.execute(q, chunk):
+                        d = dict(row)
+                        if d["user_id"] not in latest_sub:
+                            latest_sub[d["user_id"]] = d
+        # ۳) همان منطقِ انشعابِ _user_sub_status — بیت‌به‌بیت.
+        out = {}
+        for uid in uids:
+            sub = active_sub.get(uid)
+            d = _subscription_days_left(sub)
+            if sub and d is not None and d >= 0:
+                out[uid] = {"active": True, "expired": False, "nosub": False,
+                            "plan": sub["plan"], "days": d, "expire": sub["expire_date"]}
+                continue
+            if sub and d is not None and d < 0:
+                out[uid] = {"active": False, "expired": True, "nosub": False,
+                            "plan": sub["plan"], "days": d, "expire": sub["expire_date"]}
+                continue
+            row = latest_sub.get(uid)
+            if row:
+                d2 = _subscription_days_left(row)
+                out[uid] = {"active": False, "expired": True, "nosub": False,
+                            "plan": row["plan"], "days": d2, "expire": row["expire_date"]}
+            else:
+                out[uid] = {"active": False, "expired": False, "nosub": True,
+                            "plan": None, "days": None, "expire": None}
+        return out
+
+    def _users_selfbot_stats_map(self, users: list) -> dict:
+        """BUG-30: (کلِ اکانت‌ها، اکانت‌های دستی) برای همه‌ی کاربرانِ لیست
+        با «یک» بارِ load_config — قبلاً _filter_users به‌ازای هر کاربر
+        _user_selfbot_stats یا _user_manual_bot_count صدا می‌زد که هرکدام
+        config.json را کامل از دیسک می‌خواند و پارس می‌کرد (N+1). همان
+        منطقِ آن دو تابع (account_belongs_to و provision_source) عیناً
+        استفاده می‌شود، پس نتیجه هم‌ارزِ دقیقِ قبلی است."""
+        cfg = self.sb.load_config()
+        out = {}
+        for u in users:
+            uid = u["user_id"]
+            total = manual = 0
+            for tag, acc in cfg.items():
+                if not account_belongs_to(acc, tag, uid):
+                    continue
+                total += 1
+                if acc.get("provision_source") == PROVISION_MANUAL:
+                    manual += 1
+            out[uid] = (total, manual)
+        return out
+
     def _filter_users(self, users: list, fkey: str) -> list:
         """فیلتر لیست کاربران برای صفحه‌ی «کاربران». «بدون اشتراک» و «منقضی»
         دو فیلتر جدا هستند و «اضافه‌شده‌ی دستی» هم فیلتر مستقل خودش را
         دارد:
           all/active/expired/nosub/manual/hasbot/nobot
         """
-        if fkey == "active":
-            return [u for u in users if self._user_sub_status(u["user_id"])["active"]]
-        if fkey == "expired":
-            return [u for u in users if self._user_sub_status(u["user_id"])["expired"]]
-        if fkey == "nosub":
-            return [u for u in users if self._user_sub_status(u["user_id"])["nosub"]]
-        if fkey == "manual":
-            return [u for u in users if self._user_manual_bot_count(u["user_id"]) > 0]
-        if fkey == "hasbot":
-            return [u for u in users if self._user_selfbot_stats(u["user_id"])[0] > 0]
-        if fkey == "nobot":
-            return [u for u in users if self._user_selfbot_stats(u["user_id"])[0] == 0]
+        # BUG-30: فیلترهای active/expired/nosub قبلاً به‌ازای هر کاربر
+        # کوئریِ DB و فیلترهای manual/hasbot/nobot به‌ازای هر کاربر
+        # خواندنِ کاملِ config.json داشتند (N+1)؛ حالا هر گروه با یک
+        # محاسبه‌ی دسته‌ای انجام می‌شود و خروجیِ فیلتر (انتخاب و ترتیب)
+        # بیت‌به‌بیت با قبل یکسان است.
+        if fkey in ("active", "expired", "nosub"):
+            st = self._users_sub_status_map(users)
+            return [u for u in users if st[u["user_id"]][fkey]]
+        if fkey in ("manual", "hasbot", "nobot"):
+            stats = self._users_selfbot_stats_map(users)
+            if fkey == "manual":
+                return [u for u in users if stats[u["user_id"]][1] > 0]
+            if fkey == "hasbot":
+                return [u for u in users if stats[u["user_id"]][0] > 0]
+            return [u for u in users if stats[u["user_id"]][0] == 0]
         return users
 
     async def _owner_show_users(self, event, fkey: str = "all", page: int = 0):
@@ -13464,7 +13744,11 @@ class SaaSBot:
         panel_status = "نامشخص"
         try:
             import subprocess as _sp
-            r = _sp.run(
+            # BUG-19a: اجرا در thread — subprocess.runِ همگام روی event
+            # loop تا ~۳ ثانیه آن را block می‌کرد (asyncio.to_thread با
+            # همان آرگومان‌ها/timeout و همان مدیریتِ return-code).
+            r = await asyncio.to_thread(
+                _sp.run,
                 ["systemctl", "is-active", "cianet-panel"],
                 capture_output=True, text=True, timeout=3,
             )
@@ -13482,7 +13766,9 @@ class SaaSBot:
         tunnel_status = "نامشخص"
         try:
             import subprocess as _sp
-            r = _sp.run(
+            # BUG-19a: اجرا در thread — مثل بالا (بدون block شدنِ loop).
+            r = await asyncio.to_thread(
+                _sp.run,
                 ["systemctl", "is-active", "cianet-tunnel"],
                 capture_output=True, text=True, timeout=3,
             )
@@ -13703,10 +13989,16 @@ class SaaSBot:
         except Exception:
             pass
 
-        loop = asyncio.get_event_loop()
+        # P2-2 (BUG-18c wiring / §14.1 گام ۷ — طبق الگوی مستندشده در گزارش
+        # P1-9): main_loop را به apply_update پاس بده تا hookِ غیرفعال‌سازی
+        # اکانت‌ها (_disable_all_accounts_for_update) از طریق
+        # run_coroutine_threadsafe روی همینِ loopِ در حالِ اجرا schedule شود.
+        # قبلاً main_loop=None بود و hook فقط در مسیر auto-update اجرا می‌شد.
+        import functools
+        loop = asyncio.get_running_loop()
         try:
             success, msg = await loop.run_in_executor(
-                None, updater.apply_update
+                None, functools.partial(updater.apply_update, main_loop=loop)
             )
         except Exception as e:
             await event.edit(
@@ -13800,9 +14092,17 @@ class SaaSBot:
         # v2.8.13 C6: اگه فعال شد، loop رو همین حالا spawn کن —
         # نیاز به restart نباشه.
         if new_value == "1":
+            # BUG-17a (§20.7): قبلاً asyncio.create_task خامِ fire-and-forget
+            # بود — ریسکِ GC و duplicate. طبق الگوی مستند، تسک در متغیرِ
+            # ماژول‌سطح با done-check نگه داشته می‌شود و _spawn_bg ارجاعِ
+            # قوی و لاگِ خطا را تضمین می‌کند.
+            global _AUTO_UPDATE_TASK
             try:
-                asyncio.create_task(_auto_update_loop_wrapper())
-                print("🌐 [auto_update] loop هم‌اکنون spawn شد")
+                if _AUTO_UPDATE_TASK is None or _AUTO_UPDATE_TASK.done():
+                    _AUTO_UPDATE_TASK = _spawn_bg(
+                        _auto_update_loop_wrapper(), "auto-update"
+                    )
+                    print("🌐 [auto_update] loop هم‌اکنون spawn شد")
             except Exception as _e:
                 print(f"⚠️ [auto_update] spawn loop ناموفق: {_e}")
 
@@ -14046,7 +14346,10 @@ class SaaSBot:
             if not _svc:
                 for _cand in ("cianet", "selfbot"):
                     try:
-                        _r = _sp.run(
+                        # BUG-19a: اجرا در thread — مثل سایر فراخوانی‌های
+                        # systemctl (بدون block شدنِ event loop).
+                        _r = await asyncio.to_thread(
+                            _sp.run,
                             ["systemctl", "is-enabled", _cand],
                             capture_output=True, text=True, timeout=3,
                         )
@@ -14219,9 +14522,12 @@ class SaaSBot:
             update_dedicated_bot_status(bot["id"], "rejected")
             log_action(pay["user_id"], "dedicated_bot_failed", str(e)[:200])
             try:
+                # v2.14.2 (T10 residual / §17.3): جزئیات استثنا به کاربر نه —
+                # پیام عمومی فارسی + لاگ کامل سمت سرور.
+                print(f"❌ [dedicated_spawn] خطا در ساخت ربات اختصاصی: {type(e).__name__}: {e}")
                 await self.client.send_message(
                     pay["user_id"],
-                    f"❌ ساخت ربات اختصاصی با خطا مواجه شد: {str(e)[:120]} — با پشتیبانی تماس بگیر.",
+                    "❌ ساخت ربات اختصاصی با خطا مواجه شد — با پشتیبانی تماس بگیرید.",
                 )
             except Exception:
                 pass
@@ -14243,12 +14549,19 @@ class SaaSBot:
             api_id, api_hash = _first_account_creds(self.sb.load_config())
             from telethon.sessions import StringSession
             temp = TelegramClient(StringSession(), api_id, api_hash)
-            await asyncio.wait_for(temp.start(bot_token=token), timeout=20)
-            me = await temp.get_me()
+            # BUG-16b: قطعِ کلاینتِ موقت در finally — قبلاً اگر
+            # wait_for(start) تایم‌اوت می‌شد یا get_me خطا می‌داد، temp
+            # هرگز disconnect نمی‌شد و به‌ازای هر اعتبارسنجیِ ناموفق یک
+            # connection نشت می‌کرد.
             try:
-                await temp.disconnect()
-            except Exception:
-                pass
+                await asyncio.wait_for(temp.start(bot_token=token), timeout=20)
+                me = await temp.get_me()
+            finally:
+                try:
+                    if temp.is_connected():
+                        await temp.disconnect()
+                except Exception:
+                    pass
             username = getattr(me, "username", None)
             return True, f"@{username}" if username else f"bot id {getattr(me, 'id', '?')}"
         except Exception as e:
@@ -15106,6 +15419,17 @@ class SaaSBot:
             try:
                 await self.client.send_message(uid, text)
                 sent_ok += 1
+            except errors.FloodWaitError as e:
+                # BUG-25 (§10.1/§20.8): قبلاً FloodWait مثل بقیه‌ی خطاها فقط
+                # «ناموفق» شمرده می‌شد و حلقه با همان فاصله‌ی ۵۰ms به‌سرعت
+                # ادامه می‌یافت — یعنی به‌محض flood، همه‌ی ارسال‌های بعدی هم
+                # محکوم به شکست بودند. حالا به‌اندازه‌ی درخواستِ تلگرام
+                # (+۲s grace) مکث می‌کنیم و broadcast برای بقیه‌ی کاربران
+                # ادامه می‌یابد؛ این کاربر ناموفق شمرده می‌شود (retry
+                # نمی‌شود تا شمارنده‌ها سرجای خودشان بمانند).
+                self._flood_until = time.time() + e.seconds + 2
+                await asyncio.sleep(e.seconds + 2)
+                failed += 1
             except Exception:
                 failed += 1
             # جلوگیری از flood-wait (≈20 msg/sec امن است).
@@ -17077,7 +17401,10 @@ class SaaSBot:
                     f"⏳ OWNER باید فعالش کنه."
                 )
             except Exception as e:
-                await event.respond(f"❌ خطا: {e}")
+                # PATCH (P2-3 §17.3): خطای دیتابیس نباید به کاربر برود —
+                # جزئیات فقط در لاگ سرور، پیام generic فارسی به کاربر.
+                print(f"❌ [dedicated_bot_token] DB error: {type(e).__name__}: {e}")
+                await event.respond("❌ خطا در ثبت ربات اختصاصی — دوباره تلاش کن یا با پشتیبانی تماس بگیر.")
             return True
 
         if state == WIZ_CL_BATCH_RESELLER_LIMIT:
@@ -17232,17 +17559,23 @@ class SaaSBot:
             if not code:
                 await event.respond("❌ کد رو بفرست:")
                 return True
-            self.wizards.pop(event.sender_id, None)
             order = get_order(oid)
             if not order or order["user_id"] != event.sender_id:
+                # v2.14.2 (P2-10 / §20.10): مسیرهای مرده (فاکتور پیدا نشد /
+                # قابل ویرایش نیست) همان‌جا pop می‌شوند — retry بی‌معنی است.
+                self.wizards.pop(event.sender_id, None)
                 await event.respond("❌ فاکتور پیدا نشد.")
                 return True
             if order["status"] != ORDER_STATUS_PENDING:
+                self.wizards.pop(event.sender_id, None)
                 await event.respond("❌ این فاکتور قابل ویرایش نیست.")
                 return True
             # اعمال تخفیف
             new_amount = apply_discount_code(code, int(order["amount_toman"]))
             if not new_amount.get("ok"):
+                # v2.14.2 (P2-10 / §20.10): کدِ نامعتبر/منقضی/تمام‌شده ویزارد
+                # را نمی‌سوزاند — کاربر می‌تواند همان‌جا کد درست را بفرست
+                # (قبلاً pop قبل از این اعتبارسنجی بود).
                 err_map = {
                     "not_found": "❌ کد تخفیف پیدا نشد.",
                     "expired": "❌ کد تخفیف منقضی شده.",
@@ -17250,7 +17583,15 @@ class SaaSBot:
                 }
                 await event.respond(err_map.get(new_amount.get("error"), "❌ خطا."))
                 return True
+            self.wizards.pop(event.sender_id, None)
             # ذخیره‌ی تخفیف در فاکتور
+            # PATCH (P2-3 BUG-14-verify): پرچمِ _order_saved تضمین می‌کند که
+            # rollback فقط وقتی اجرا شود که خودِ UPDATE فاکتور شکست خورده
+            # باشد. قبلاً respondِ موفقیت هم داخلِ try بود؛ اگر UPDATE
+            # commit می‌شد ولی respond (مثلاً FloodWait) خطا می‌داد،
+            # used_count به‌اشتباه کم می‌شد و بعداً cancel_order دوباره
+            # کم می‌کرد (rollbackِ دوگانه — §11.4).
+            _order_saved = False
             try:
                 with _conn_immediate() as c:
                     c.execute(
@@ -17261,6 +17602,7 @@ class SaaSBot:
                          round(order["amount_usdt"] * (100 - new_amount["percent"]) / 100, 2),
                          int(order["amount_toman"]), oid),
                     )
+                _order_saved = True
                 await event.respond(
                     f"✅ تخفیف اعمال شد\n\n"
                     f"🎁 کد: `{code}`\n"
@@ -17269,7 +17611,26 @@ class SaaSBot:
                     f"💰 مبلغ جدید: {fa_digits(new_amount['amount'])} Toman"
                 )
             except Exception as _e:
-                await event.respond(f"❌ خطا در اعمال تخفیف: {_e}")
+                # PATCH (P1-3 BUG-14): apply_discount_code کد را در یک تراکنشِ
+                # جداگانه مصرف می‌کند؛ اگر ذخیره‌ی تخفیف در فاکتور شکست بخورد،
+                # کد «سوخته» می‌ماند بی‌آنکه چیزی اعمال شده باشد. برای
+                # اتمیک‌ماندنِ نتیجه، used_count را برگردان می‌داریم (همان
+                # الگوی rollback در cancel_order).
+                if not _order_saved:
+                    try:
+                        with _conn_immediate() as c:
+                            c.execute(
+                                "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
+                                "WHERE code = ? AND used_count > 0",
+                                (code,),
+                            )
+                    except Exception as _rb:
+                        print(f"⚠️ [discount_apply] rollback used_count failed: {_rb}")
+                # PATCH (P2-3 §17.3): جزئیات exception فقط در لاگ سرور؛
+                # به کاربر پیامِ generic فارسی (قبلاً {e} به کاربر می‌رفت).
+                print(f"❌ [discount_apply] error (order_saved={_order_saved}): "
+                      f"{type(_e).__name__}: {_e}")
+                await event.respond("❌ خطا در اعمال تخفیف — لطفاً دوباره تلاش کن.")
             return True
 
         if state == WIZ_DISCOUNT_PERCENT:
@@ -17438,7 +17799,10 @@ class SaaSBot:
             except asyncio.TimeoutError:
                 ok, msg = False, "بررسی TronGrid تایم اوت شد؛ کمی بعد دوباره امتحان کن"
             except Exception as e:
-                ok, msg = False, f"خطا در بررسی تراکنش: {str(e)[:80]}"
+                # PATCH (P2-3 §17.3): جزئیات exception شبکه/درگاه فقط در لاگ
+                # سرور؛ به کاربر پیام generic فارسی.
+                print(f"❌ [trx_hash] verify error: {type(e).__name__}: {e}")
+                ok, msg = False, "خطا در بررسی تراکنش — کمی بعد دوباره امتحان کن"
             if ok:
                 # اتمیک + ضد replay: فاکتور paid و اشتراک در یک تراکنش؛ یک
                 # txid هرگز برای دو فاکتور قبول نمی‌شود.
@@ -17581,10 +17945,15 @@ class SaaSBot:
             return True
 
         if state == WIZ_DEDICATED_EXTEND_DAYS:
-            self.wizards.pop(event.sender_id, None)
+            # v2.14.2 (P2-10 / §20.10): pop فقط بعد از اعتبارسنجی ورودی —
+            # قبلاً pop اولِ branch بود و خطای «عدد بفرست» حالتِ ویزارد را
+            # می‌سوزاند (کاربر برای تلاش مجدد باید کل جریان تمدید را از نو
+            # شروع می‌کرد). مسیر «ربات پیدا نشد» (غیرقابلِ retry) همان‌جا
+            # pop می‌شود.
             bot_id = data["bot_id"]
             b = get_dedicated_bot(bot_id)
             if not b:
+                self.wizards.pop(event.sender_id, None)
                 await event.respond("❌ این ربات اختصاصی پیدا نشد.")
                 return True
             try:
@@ -17593,6 +17962,7 @@ class SaaSBot:
             except (ValueError, AssertionError):
                 await event.respond("❌ یک عدد صحیح مثبت (تعداد روز) بفرست:")
                 return True
+            self.wizards.pop(event.sender_id, None)
             old_expire = _parse_date(b["expire_date"]) if b.get("expire_date") else datetime.now(timezone.utc)
             new_expire = _format_date(max(old_expire, datetime.now(timezone.utc)) + timedelta(days=days))
             # v2.13.1 (TEST-G5-DEDICATED / G5-LOGIC): تمدیدِ یک رباتِ
@@ -19547,13 +19917,24 @@ class SaaSBot:
                         )
                         return
                     cb = f"{panel_url}/api/payment/zarinpal/callback"
-                    result = create_zarinpal_payment(oid, cb)
+                    # PATCH (P1-3 BUG-19b): این تابع urllib.request همزمان
+                    # (blocking) است — از روترِ async نباید مستقیم صدا زده
+                    # شود؛ با to_thread در thread جدا اجرا می‌شود.
+                    result = await asyncio.to_thread(create_zarinpal_payment, oid, cb)
                     if result.get("ok"):
                         await self._respond_safe(event,
                             f"🟡 **زرین‌پال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
                             buttons=[UI.nav_row()])
                     else:
-                        await event.answer(f"❌ {result.get('error', 'خطا')}", alert=True)
+                        _gw_err = result.get("error", "خطا")
+                        # PATCH (P2-3 §17.3): پاسخ خام/exception درگاه نباید به
+                        # کاربر برسد (همان الگوی _safe_gateway_error در
+                        # web_panel) — لاگ سرور + پیام generic فارسی. کدهای
+                        # کنترل‌شده (مثل «merchant ست نشده») دست‌نخورده می‌مانند.
+                        if "request_failed" in _gw_err or "zarinpal_error:" in _gw_err:
+                            print(f"❌ [order_zarinpal] gateway error: {_gw_err}")
+                            _gw_err = "خطا در ارتباط با درگاه پرداخت — با پشتیبانی تماس بگیرید."
+                        await event.answer(f"❌ {_gw_err}", alert=True)
                     return
                 if data.startswith("order_zibal:"):
                     oid = safe_callback_int(data.split(":", 1)[1], 0)
@@ -19575,13 +19956,21 @@ class SaaSBot:
                         )
                         return
                     cb = f"{panel_url}/api/payment/zibal/callback"
-                    result = create_zibal_payment(oid, cb)
+                    # PATCH (P1-3 BUG-19b): همان‌طور که در Zarinpal — فراخوانیِ
+                    # blocking از روترِ async ممنوع است.
+                    result = await asyncio.to_thread(create_zibal_payment, oid, cb)
                     if result.get("ok"):
                         await self._respond_safe(event,
                             f"🟢 **زیبال**\n\n🧾 `{order['order_no']}`\n💰 {fa_digits(order['amount_toman'])} Toman\n\n🔗 [پرداخت]({result['url']})",
                             buttons=[UI.nav_row()])
                     else:
-                        await event.answer(f"❌ {result.get('error', 'خطا')}", alert=True)
+                        _gw_err = result.get("error", "خطا")
+                        # PATCH (P2-3 §17.3): مانند زرین‌پال — جزئیات خام درگاه
+                        # فقط در لاگ سرور؛ کاربر پیام generic می‌گیرد.
+                        if "request_failed" in _gw_err or "zibal_error:" in _gw_err:
+                            print(f"❌ [order_zibal] gateway error: {_gw_err}")
+                            _gw_err = "خطا در ارتباط با درگاه پرداخت — با پشتیبانی تماس بگیرید."
+                        await event.answer(f"❌ {_gw_err}", alert=True)
                     return
                 if data == "owner_create_license_batch" and role in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
                     await self._clear_admin_panel_wizard(event.sender_id)
@@ -19926,6 +20315,13 @@ class SaaSBot:
 
         async def patched_handle_text_wizard(event, wiz):
             if wiz["state"] == "role_add":
+                # PATCH (P1-3 BUG-34): این شاخه بدون چکِ نقش بود و می‌توانست
+                # ADMIN/RESELLER اضافه کند — طبق §5.2 قوانین RBAC، ارتقای
+                # کاربر فقط برای OWNER مجاز است (الگوی چک همان WIZ_ANNOUNCE).
+                if self._role(event.sender_id) != ROLE_OWNER:
+                    self.wizards.pop(event.sender_id, None)
+                    await event.respond("❌ این عملیات فقط برای مالک مجاز است")
+                    return True
                 text = (event.raw_text or "").strip()
                 try:
                     new_id = int(text)
@@ -20269,11 +20665,23 @@ async def run_saas_bot_forever(selfbot_module):
     consecutive_failures = 0
     MAX_BACKOFF = 300
     while True:
+        # v2.14.2 (P2-2/P2-9 flag / BUG-24 sibling): قطعِ تمیزِ پیاپی هم
+        # backoff بگیرد — قبلاً روی هر disconnect تمیز، شمارنده ریست می‌شد
+        # و اگر تلگرام مدام clean drop می‌کرد حلقه‌ی ری‌استارت تایت می‌شد.
+        # فقط بعد از uptime پایدار (≥۳۰۰s) ریست می‌شود (همان الگوی
+        # run_admin_bot_forever).
+        _started_at = time.monotonic()
         try:
             bot = SaaSBot(selfbot_module)
             await bot.start()
             await bot.client.run_until_disconnected()
-            consecutive_failures = 0
+            if time.monotonic() - _started_at >= 300:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
+                print(f"⚠️ [saas_bot] قطعِ زودهنگام (uptime < 300s) — تلاش مجدد در {wait_time}s")
+                await asyncio.sleep(wait_time)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -20460,7 +20868,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.14.1"
+BUILD_VERSION = "2026-10-06-v2.14.2"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -21331,8 +21739,18 @@ async def _auto_update_loop_wrapper() -> None:
             # apply — PATCH (v2.5.0 H1 FIX): در thread executor اجرا کن
             # تا event loop block نشه. قبلاً sync apply_update() مستقیم
             # صدا زده می‌شد که ~۱۰۰s event loop رو block می‌کرد.
-            loop = asyncio.get_event_loop()
-            success, msg = await loop.run_in_executor(None, apply_update)
+            # RESIDUAL-FIX (P2-4, BUG-18c wiring / §14.1 گام ۷ — طبق الگوی
+            # مستندشده در گزارش P1-9): main_loop به apply_update پاس می‌شود
+            # تا hookِ خاموش‌کردنِ اکانت‌ها (_disable_all_accounts_for_update)
+            # با run_coroutine_threadsafe روی همین event loop اصلی اجرا شود
+            # — قبلاً main_loop پاس نمی‌شد و این wiring در apply_update
+            # عملاً dead code بود (hook از thread executor با loopِ جدایِ
+            # legacy خطا می‌خورد).
+            import functools
+            loop = asyncio.get_running_loop()
+            success, msg = await loop.run_in_executor(
+                None, functools.partial(apply_update, main_loop=loop)
+            )
             print(f"🔄 [auto-update] apply_update: {msg}")
             if success:
                 # قبل از restart یه notify دیگه بفرست
@@ -21776,6 +22194,10 @@ def _spawn_dedicated_bot(bot_id: int, owner_id: int, token: str) -> str:
     }
     with open(os.path.join(bot_dir, "config.json"), "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # BUG-22 (P1-4, §20.3): این config حاوی api_id/api_hashِ مشترکِ کلِ سرور
+    # است؛ بدون chmod با umask پیش‌فرض (معمولاً 0644) برای هر کاربرِ دیگری
+    # روی همان ماشین خواندنی می‌ماند. مثل save_config محدودش می‌کنیم.
+    _chmod_private(os.path.join(bot_dir, "config.json"), 0o600)
     env = dict(os.environ)
     env["ADMIN_BOT_TOKEN"] = token
     env["ADMIN_ID"] = str(owner_id)
@@ -22367,7 +22789,10 @@ async def _verify_trc20_transfer(txid: str, wallet: str, min_usdt) -> tuple:
             data = await _price_http_get(url)
         except Exception as e:
             if page == 0:
-                return False, f"ارتباط با TronGrid برقرار نشد ({str(e)[:40]})"
+                # v2.14.2 (P2-3 flag / §17.3): جزئیات استثنا به کاربر نه —
+                # پیام عمومی فارسی + لاگ کامل سمت سرور.
+                print(f"❌ [trc20] TronGrid network error: {type(e).__name__}: {e}")
+                return False, "ارتباط با TronGrid برقرار نشد — بعداً دوباره تلاش کن"
             break
         for t in (data or {}).get("data") or []:
             if (t.get("transaction_id") or "").lower() != txid:
@@ -22392,15 +22817,23 @@ async def _verify_trc20_transfer(txid: str, wallet: str, min_usdt) -> tuple:
                 return False, (f"مبلغ واریزی ({value} USDT) کمتر از مبلغ "
                                f"فاکتور ({min_dec} USDT) است")
             # v2.13.0 (DEBUG-2 CRIT-1): check block_timestamp — must be within last 24h
+            # BUG-15 (P1-4, §11.3): این چک REQUIRED است — قبلاً اگر
+            # block_timestamp غایب/صفر بود چکِ ۲۴ ساعت کلاً skip می‌شد
+            # (fail-open). حالا غیبت/نامعتبریِ timestamp خودش دلیلِ ردِ
+            # تراکنش است (fail-closed).
             import time as _time_mod
-            block_ts_ms = t.get("block_timestamp") or 0
-            if block_ts_ms:
-                block_ts_sec = block_ts_ms / 1000.0
-                age_sec = _time_mod.time() - block_ts_sec
-                if age_sec > 86400:  # 24 hours
-                    return False, "تراکنش قدیمی است — حداکثر ۲۴ ساعت پیش باید انجام شده باشد"
-                if age_sec < 0:
-                    return False, "تراکنش در آینده ثبت شده — block_timestamp نامعتبر"
+            try:
+                block_ts_ms = int(t.get("block_timestamp") or 0)
+            except (TypeError, ValueError):
+                block_ts_ms = 0
+            if not block_ts_ms:
+                return False, "زمان تراکنش (block_timestamp) از TronGrid دریافت نشد — تراکنش قابل تایید نیست"
+            block_ts_sec = block_ts_ms / 1000.0
+            age_sec = _time_mod.time() - block_ts_sec
+            if age_sec > 86400:  # 24 hours
+                return False, "تراکنش قدیمی است — حداکثر ۲۴ ساعت پیش باید انجام شده باشد"
+            if age_sec < 0:
+                return False, "تراکنش در آینده ثبت شده — block_timestamp نامعتبر"
 
             # v2.13.0 (DEBUG-2 CRIT-2): log the from field for audit trail
             # (cannot verify ownership since from is a public address, but we record it)
@@ -25154,8 +25587,58 @@ class SelfBot:
         ):
             try:
                 await event.reply(random.choice(ENEMY_REPLIES))
+            except errors.FloodWaitError as _fwe:
+                # v2.14.2 (P2-10 / §10.1 + §20.8): FloodWait هرگز بی‌صدا
+                # بلعیده نمی‌شود — _flood_until ست می‌شود تا همه‌ی مسیرهای
+                # ارسالِ این اکانت تا پایان دوره‌ی flood گیت شوند (همان
+                # الگوی پاسخ خودکار در همین هندلر).
+                _wait = (_fwe.seconds or 30) + 2
+                self._flood_until = time.time() + _wait
+                print(f"⏳ [enemy_reply:{self.tag}] FloodWait {_wait}s (flood_until coordinated)")
             except Exception:
                 pass
+
+        # BUG-1 (P1-4): پاسخ خودکار (auto-reply) — این قابلیت از طریق پنل وب
+        # به کاربران فروخته می‌شود ولی find_auto_reply هیچ‌جا صدا زده نمی‌شد
+        # و بنابراین هرگز کار نمی‌کرد. فقط برای پیام متنی از کاربر واقعی
+        # (نه پیام سرویسِ 777000 و نه خودِ اکانت). عمداً قبل از «سکوت» قرار
+        # گرفته — مثلِ الگوی «دشمن» بالا: سکوت فقط پیام را برای نمایش حذف
+        # می‌کند و پاسخِ تنظیم‌شده‌ی مالک همچنان قابلِ ارسال است.
+        # (Auto-reply wiring — BUG-1; fires before the silence-delete.)
+        # user_id = owner_user_id اکانت از config تا فقط پاسخ‌های خودِ مالکِ
+        # همین اکانت match شوند (auto_replies.user_id = آیدی پنلیِ مالک).
+        if (
+            sid != self.TELEGRAM_SERVICE_ID
+            and sid != self.my_id
+            and (event.raw_text or "").strip()
+            and not (self._flood_until and time.time() < self._flood_until)
+        ):
+            try:
+                # v2.14.2 (P2-9 FLOW-4 edge): مالکیت اکانت ۳ اثبات دارد
+                # (owner_user_id / tg_user_id / my_id — رجوع کنید به
+                # account_belongs_to). ردیف‌های auto_replies با uid پنلِ
+                # سازنده ذخیره می‌شوند؛ اگر کاربر فقط از مسیر tg_user_id
+                # مالک باشد، قبلاً هرگز match نمی‌شد. حالا هر دو نامزد
+                # امتحان می‌شوند (اول مالکِ صریح، بعد اکانتِ خودِ کاربر).
+                _cfg_ar = self.cfg if isinstance(self.cfg, dict) else {}
+                _ar_reply = None
+                for _ar_uid in (_cfg_ar.get("owner_user_id"), _cfg_ar.get("tg_user_id")):
+                    if not _ar_uid:
+                        continue
+                    _ar_reply = find_auto_reply(self.tag, event.raw_text or "", _ar_uid)
+                    if _ar_reply:
+                        break
+                if _ar_reply:
+                    # مسیر امنِ ارسالِ این کلاس: client.send_message که با
+                    # _install_offline_preserving_sends گیت می‌شود
+                    # (flood/daily-cap/cooldown) — مثل ردیاب و تبچی.
+                    await self.client.send_message(event.chat_id, _ar_reply)
+            except errors.FloodWaitError as _fwe:
+                _wait = (_fwe.seconds or 30) + 2
+                self._flood_until = time.time() + _wait
+                print(f"⏳ [auto_reply:{self.tag}] FloodWait {_wait}s — پاسخ خودکار ارسال نشد (flood_until coordinated)")
+            except Exception as e:
+                print(f"⚠️ [auto_reply:{self.tag}] خطا در پاسخ خودکار: {type(e).__name__}")
 
         # سکوت
         if self._is_silenced(event.chat_id, event.is_private):
@@ -25243,6 +25726,13 @@ class SelfBot:
         )
         try:
             await self.client.send_message("me", msg)
+        except errors.FloodWaitError as _fwe:
+            # v2.14.2 (P2-10 / §10.1 + §20.8): نوتیف ردیاب روی هر ادیتِ
+            # پیامِ ردیابی‌شده فعال است؛ FloodWait بی‌صدا بلعیده نمی‌شود —
+            # _flood_until ست می‌شود تا ارسال‌های بعدی این اکانت گیت شوند.
+            _wait = (_fwe.seconds or 30) + 2
+            self._flood_until = time.time() + _wait
+            print(f"⏳ [tracker:{self.tag}] FloodWait {_wait}s در نوتیف ادیت (flood_until coordinated)")
         except Exception:
             pass
 
@@ -25350,6 +25840,12 @@ class SelfBot:
         )
         try:
             await self.client.send_message("me", summary)
+        except errors.FloodWaitError as _fwe:
+            # v2.14.2 (P2-10 / §10.1 + §20.8): همان الگوی نوتیف ادیت —
+            # FloodWait بی‌صدا بلعیده نمی‌شود؛ _flood_until ست می‌شود.
+            _wait = (_fwe.seconds or 30) + 2
+            self._flood_until = time.time() + _wait
+            print(f"⏳ [tracker:{self.tag}] FloodWait {_wait}s در نوتیف حذف (flood_until coordinated)")
         except Exception:
             pass
 
@@ -26777,12 +27273,15 @@ class SelfBot:
                         f"تکمیل شده. فردا دوباره تلاش کن."
                     )
                     return
-                self._broadcast_today_count = _broadcast_today + 1
-                self._broadcast_day_id = _broadcast_day_id
+                # BUG-13 (P1-4, §20.9): شمارنده‌ی روزانه فقط بعد از همه‌ی چک‌های
+                # رد شدن increment می‌شود — قبلاً قبل از چکِ cooldown زیاد می‌شد
+                # و یک درخواستِ ردشده سهمیه‌ی روزانه (از ۵ broadcast) را می‌سوزاند.
                 if _now - _last_broadcast < _BROADCAST_COOLDOWN:
                     _remain = int(_BROADCAST_COOLDOWN - (_now - _last_broadcast))
                     await event.edit(f"⏳ لطفاً {_remain} ثانیه دیگر صبر کن و دوباره امتحان کن.")
                     return
+                self._broadcast_today_count = _broadcast_today + 1
+                self._broadcast_day_id = _broadcast_day_id
                 # v2.12.18: ست کنِ فوریِ cooldown
                 self._last_broadcast_at = _now
 
@@ -27674,8 +28173,20 @@ async def _run_all_accounts(cfg: dict) -> None:
     auto_update_task = None
     if os.environ.get("CIANET_AUTO_UPDATE", "0").strip() in ("1", "true", "yes"):
         try:
-            auto_update_task = _spawn_bg(_auto_update_loop_wrapper(), "auto-update")
-            print("🔄 [auto-update] loop شروع شد (هر ۶ ساعت چک می‌کنه)")
+            # RESIDUAL-FIX (P2-4, per P1-2's BUG-17a discovery / §20.7): تسکِ
+            # boot قبلاً فقط در متغیرِ محلی نگه داشته می‌شد — toggle کردنِ
+            # آپدیت خودکار از پنل ربات، با چکِ None/done رویِ مرجعِ ماژول‌سطحِ
+            # _AUTO_UPDATE_TASK، آن را None می‌دید و loopِ دوم spawn می‌کرد
+            # (duplicate polling + duplicate OWNER notify). حالا boot هم رویِ
+            # همان مرجعِ ماژول‌سطح می‌نویسد؛ مرجعِ محلی فقط برای cancel در
+            # shutdown حفظ می‌شود (رفتارِ shutdown یکسان با قبل).
+            global _AUTO_UPDATE_TASK
+            if _AUTO_UPDATE_TASK is None or _AUTO_UPDATE_TASK.done():
+                _AUTO_UPDATE_TASK = _spawn_bg(
+                    _auto_update_loop_wrapper(), "auto-update"
+                )
+                print("🔄 [auto-update] loop شروع شد (هر ۶ ساعت چک می‌کند)")
+            auto_update_task = _AUTO_UPDATE_TASK
         except Exception as e:
             print(f"⚠️ [auto-update] loop شروع نشد: {e}")
 
@@ -27913,8 +28424,32 @@ async def main():
     embed_panel_env = os.environ.get("CIANET_EMBED_PANEL", "1").strip().lower()
     if embed_panel_env in ("1", "true", "yes"):
         panel_port = int(os.environ.get("CIANET_PANEL_PORT", "8000"))
-        asyncio.create_task(_embed_web_panel(port=panel_port))
-        print(f"🌐 [embed_panel] web panel در همین پروسه روی port {panel_port} شروع شد")
+        # BUG-17b (P1-4, §20.7): قبلاً با asyncio.create_task خام و بدون هیچ
+        # مرجعی spawn می‌شد — تسک ممکن بود توسط GC وسطِ اجرا نابود شود.
+        # حالا با _spawn_bg (ارجاع قوی در _BG_TASKS) + گاردِ ماژول-سطح
+        # ضد spawn دوباره (main در حالت interactive بازگشتی صدا زده می‌شود).
+        global _EMBED_PANEL_TASK
+        if _EMBED_PANEL_TASK is None or _EMBED_PANEL_TASK.done():
+            _EMBED_PANEL_TASK = _spawn_bg(
+                _embed_web_panel(port=panel_port), "embed_web_panel"
+            )
+            print(f"🌐 [embed_panel] web panel در همین پروسه روی port {panel_port} شروع شد")
+
+    # BUG-1 (P1-4): حلقه‌ی ارسالِ پیام‌های زمان‌بندی‌شده — این قابلیت از طریق
+    # پنل وب به کاربران فروخته می‌شود (جدول scheduled_messages) ولی حلقه‌اش
+    # هیچ‌جا spawn نمی‌شد، پس پیام‌ها هرگز ارسال نمی‌شدند. فقط در نمونه‌ی
+    # اصلی spawn می‌شود: زیرپروسه‌های «ربات اختصاصی» (SELFBOT_DEDICATED_BOT)
+    # دیتابیسِ جدا و خالی از scheduled_messages دارند و حلقه‌ی بی‌اثر
+    # نمی‌خواهند؛ ثبتِ این جدول فقط از طریق پنلِ نمونه‌ی اصلی انجام می‌شود.
+    global _SCHEDULED_MESSAGE_LOOP_TASK
+    if not IS_DEDICATED_BOT and (
+        _SCHEDULED_MESSAGE_LOOP_TASK is None
+        or _SCHEDULED_MESSAGE_LOOP_TASK.done()
+    ):
+        _SCHEDULED_MESSAGE_LOOP_TASK = _spawn_bg(
+            _scheduled_message_loop(), "scheduled_messages_loop"
+        )
+        print("⏰ [sched] حلقه‌ی پیام‌های زمان‌بندی‌شده شروع شد (هر ۶۰ ثانیه)")
 
     if len(sys.argv) > 1:
         arg = sys.argv[1]
@@ -28011,6 +28546,13 @@ async def _embed_web_panel(host: str = "127.0.0.1", port: int = 8000):
 
 
 
+# BUG-1 (P1-4) / BUG-17b (P1-4): مراجع ماژول-سطح برای حلقه‌های singleton —
+# الگوی §20.7: global + چکِ None/done تا فراخوانیِ بازگشتیِ main()
+# (حالت interactive) یا restart دوباره spawn نکند.
+_SCHEDULED_MESSAGE_LOOP_TASK = None
+_EMBED_PANEL_TASK = None
+
+
 # v2.10.0: حلقه‌ی ارسال پیام‌های زمان‌بندی‌شده
 async def _scheduled_message_loop():
     """هر ۶۰ ثانیه چک می‌کنه اگه پیام زمان‌بندی‌شده‌ای due شده، بفرسته."""
@@ -28026,16 +28568,40 @@ async def _scheduled_message_loop():
             for row in rows:
                 msg = dict(row)
                 entry = ACCOUNTS.get(msg["tag"])
-                if entry is None or entry.bot is None:
+                if entry is None or entry.bot is None or entry.bot.client is None:
                     continue  # account not running
                 try:
-                    await entry.bot.send_message(msg["chat_id"], msg["text"])
+                    # BUG-1 (P1-4): ارسال از مسیرِ واقعیِ این کلاس — قبلاً
+                    # entry.bot.send_message صدا زده می‌شد در حالی که SelfBot
+                    # متد send_message ندارد (AttributeError) و پیام هرگز
+                    # ارسال نمی‌شد. الگوی درست entry.bot.client.send_message
+                    # است. این send از مسیرِ wrapperِ نصب‌شده در start()
+                    # می‌رود و flood/daily-cap/cooldown را رعایت می‌کند.
+                    _res = await entry.bot.client.send_message(msg["chat_id"], msg["text"])
+                    if _res is None:
+                        # wrapper به‌خاطر گیتِ anti-ban ارسال را silent skip
+                        # کرد — ردیف sent نمی‌شود تا در چرخه‌ی بعدی (۶۰
+                        # ثانیه بعد) دوباره تلاش شود.
+                        continue
                     with _conn_immediate() as c2:
                         c2.execute(
                             "UPDATE scheduled_messages SET sent = 1 WHERE id = ?",
                             (msg["id"],),
                         )
                     print(f"✅ [sched] پیام {msg['id']} به {msg['chat_id']} ارسال شد")
+                except errors.FloodWaitError as _fwe:
+                    # v2.14.2 (P2-10 flag / §20.8): FloodWait هرگز بی‌صدا
+                    # بلعیده نمی‌شود — گیت flood اکانت ست می‌شود، صبر
+                    # می‌کنیم و ردیف در چرخه‌ی بعدی دوباره تلاش می‌شود
+                    # (sent نمی‌شود). ادامه‌ی همین چرخه بی‌معنی است.
+                    _wait = (_fwe.seconds or 30) + 2
+                    try:
+                        entry.bot._flood_until = time.time() + _wait
+                    except Exception:
+                        pass
+                    print(f"⏳ [sched] FloodWait {_wait}s برای پیام {msg['id']} (flood_until coordinated)")
+                    await asyncio.sleep(_wait)
+                    break
                 except Exception as e:
                     print(f"⚠️ [sched] خطا در ارسال پیام {msg['id']}: {e}")
         except Exception as e:

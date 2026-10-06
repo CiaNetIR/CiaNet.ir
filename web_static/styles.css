@@ -46,6 +46,18 @@ body {
   display: flex; justify-content: space-between; align-items: center;
 }
 .main { flex: 1; margin-right: 240px; padding: 1.5rem 2rem; }
+/* Hamburger toggle — فقط زیر 768px دیده می‌شه (BUG-10) */
+.sidebar-toggle {
+  display: none;
+  position: fixed; top: 0.6rem; right: 0.6rem; z-index: 1200;
+  padding: 0.25rem 0.6rem; font-size: 1.05rem; line-height: 1.5;
+  background: var(--bg-card); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 0.35rem; cursor: pointer;
+}
+.sidebar-backdrop {
+  display: none; position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.55); z-index: 1000;
+}
 .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
 .header h1 { font-size: 1.5rem; font-weight: 600; }
 .grid { display: grid; gap: 1rem; }
@@ -54,8 +66,19 @@ body {
 .grid-4 { grid-template-columns: repeat(4, 1fr); }
 @media (max-width: 768px) {
   .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
-  .main { margin-right: 0; padding: 1rem; }
+  .sidebar {
+    display: block;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    z-index: 1001;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-toggle { display: block; }
+  /* P2-6: نمایش backdrop فقط در حالت موبایل — اگر کاربر منو را باز بگذارد و
+     پنجره به عرض دسکتاپ برسد، overlay تیره نباید کل صفحه‌ی دسکتاپ را بپوشاند */
+  .sidebar-backdrop.show { display: block; }
+  .main { margin-right: 0; padding: 3.4rem 1rem 1rem; }
 }
 .card {
   background: var(--bg-card); border: 1px solid var(--border);

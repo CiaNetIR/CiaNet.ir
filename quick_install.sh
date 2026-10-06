@@ -84,12 +84,44 @@ $VENV_PY -m pip install --upgrade pip --quiet 2>&1 | tail -1
 $VENV_PIP install -r "$INSTALL_DIR/requirements.txt" --quiet 2>&1 | tail -3
 echo -e "${GREEN}   venv آماده${NC}"
 
+# ─── انتخاب پسورد پنل (حذف پسورد پیش‌فرض hardcode شده — P1-8) ───
+# اگه PANEL_ADMIN_PASS از سمت کاربر تنظیم شده باشه از همون استفاده می‌شه.
+# در غیر این صورت پسورد تصادفی ۲۴ کاراکتری ساخته می‌شه و فقط همین یک‌بار
+# در کنسول نصب نمایش داده می‌شه. در env file فقط hash ذخیره می‌شه (مثل قبل).
+resolve_panel_pass() {
+    if [ -n "$PANEL_ADMIN_PASS" ]; then
+        PANEL_PASS="$PANEL_ADMIN_PASS"
+        PANEL_PASS_SOURCE="user"
+        return 0
+    fi
+    PANEL_PASS=""
+    if command -v openssl >/dev/null 2>&1; then
+        # P2-8: «|| true» تا اگر openssl موجود باشه ولی rand شکست بخوره،
+        # set -e + pipefail کل اسکریپت رو سایلنت متوقف نکنه و مسیر
+        # fallback (urandom) واقعاً قابل‌دسترس باشه.
+        PANEL_PASS=$(openssl rand -hex 32 2>/dev/null | cut -c1-24 || true)
+    fi
+    if [ -z "$PANEL_PASS" ]; then
+        PANEL_PASS=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    fi
+    if [ -z "$PANEL_PASS" ] || [ "${#PANEL_PASS}" -lt 24 ]; then
+        echo -e "${RED}❌ ساخت پسورد تصادفی برای پنل ناموفق بود${NC}"
+        exit 1
+    fi
+    PANEL_PASS_SOURCE="random"
+    echo ""
+    echo -e "${YELLOW}🔐 پسورد تصادفی برای پنل وب ساخته شد — فقط همین یک‌بار نمایش داده می‌شه، حتماً یادداشتش کن:${NC}"
+    echo -e "   👤 username: admin"
+    echo -e "   🔑 password: ${BLUE}$PANEL_PASS${NC}"
+    echo ""
+}
+
 # ─── ۵. env file ───
 echo -e "${YELLOW}۵. ساخت env file...${NC}"
 ENV_FILE="/etc/cianet.env"
 # اگه env vars از environment آمده
 if [ -n "$API_ID" ] && [ -n "$API_HASH" ] && [ -n "$ADMIN_BOT_TOKEN" ] && [ -n "$ADMIN_ID" ]; then
-    PANEL_PASS="${PANEL_ADMIN_PASS:-CianetAdmin2026}"
+    resolve_panel_pass
     PANEL_HASH="sha256:$(echo -n "$PANEL_PASS" | sha256sum | cut -d' ' -f1)"
     SECRET=$(head -c64 /dev/urandom | xxd -p | tr -d '\n')
     cat > "$ENV_FILE" <<EOF
@@ -105,6 +137,7 @@ EOF
     echo -e "${GREEN}   env file با متغیرهای شما ساخته شد${NC}"
 elif [ -f "$ENV_FILE" ]; then
     echo -e "${GREEN}   env file از قبل وجود داره${NC}"
+    PANEL_PASS_SOURCE="existing"
 else
     # interactive — اگه stdin بازه
     echo -e "${YELLOW}   متغیرهای محیطی وارد نشده. interactive...${NC}"
@@ -112,7 +145,7 @@ else
     read -p "   API_HASH: " API_HASH
     read -p "   ADMIN_BOT_TOKEN: " ADMIN_BOT_TOKEN
     read -p "   ADMIN_ID: " ADMIN_ID
-    PANEL_PASS="CianetAdmin2026"
+    resolve_panel_pass
     PANEL_HASH="sha256:$(echo -n "$PANEL_PASS" | sha256sum | cut -d' ' -f1)"
     SECRET=$(head -c64 /dev/urandom | xxd -p | tr -d '\n')
     cat > "$ENV_FILE" <<EOF
@@ -125,7 +158,11 @@ PANEL_ADMIN_PASS_HASH=$PANEL_HASH
 PANEL_SESSION_SECRET=$SECRET
 PANEL_CORS_ORIGINS=http://localhost:8000
 EOF
-    echo -e "${GREEN}   env file ساخته شد (پسورد پنل: $PANEL_PASS)${NC}"
+    if [ "$PANEL_PASS_SOURCE" = "random" ]; then
+        echo -e "${GREEN}   env file ساخته شد (hash پسورد پنل در env ذخیره شد)${NC}"
+    else
+        echo -e "${GREEN}   env file ساخته شد (پسورد پنل: $PANEL_PASS)${NC}"
+    fi
 fi
 chmod 600 "$ENV_FILE"
 
@@ -179,6 +216,9 @@ EOF
 
 # ─── ۹. systemd: cianet-panel ───
 echo -e "${YELLOW}۹. ساخت systemd: cianet-panel.service...${NC}"
+# ⚠️ workers=1 اجباریه: سشن‌های پنل در حافظه‌ی هر پروسه نگه داشته می‌شن
+# (طراحی single-instance — rules §18.2). با workers>1 درخواست‌ها بین
+# پروسه‌ها پخش می‌شن → سشن گم می‌شه → 401 تصادفی برای ادمین.
 cat > /etc/systemd/system/cianet-panel.service <<EOF
 [Unit]
 Description=CiaNet Web Panel (FastAPI on port 8000)
@@ -191,7 +231,7 @@ User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$VENV_PY -m uvicorn web_panel:app --host 127.0.0.1 --port 8000 --workers 2
+ExecStart=$VENV_PY -m uvicorn web_panel:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=always
 RestartSec=10
 
@@ -235,8 +275,13 @@ if curl -s http://localhost:8000/api/health 2>/dev/null | grep -q "ok"; then
     SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || echo "SERVER_IP")
     echo -e "  📎 URL: ${BLUE}http://$SERVER_IP:8000/app/login.html${NC}"
     echo -e "  👤 username: ${BLUE}admin${NC}"
-    PANEL_PASS="${PANEL_ADMIN_PASS:-CianetAdmin2026}"
-    echo -e "  🔑 password: ${BLUE}$PANEL_PASS${NC}"
+    if [ "$PANEL_PASS_SOURCE" = "random" ]; then
+        echo -e "  🔑 password: ${YELLOW}پسورد تصادفی که در مرحله‌ی ۵ نمایش داده شد${NC}"
+    elif [ "$PANEL_PASS_SOURCE" = "user" ]; then
+        echo -e "  🔑 password: ${BLUE}$PANEL_ADMIN_PASS${NC}"
+    else
+        echo -e "  🔑 password: ${YELLOW}پسورد پنل از نصب قبلی بدون تغییر باقی مونده${NC}"
+    fi
 else
     echo -e "  ${YELLOW}⚠️  پنل هنوز بالا نیومده — چند ثانیه صبر کن:${NC}"
     echo "  curl http://localhost:8000/api/health"

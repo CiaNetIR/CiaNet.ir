@@ -20,12 +20,12 @@
         const r = await api(`/api/finance/payments?${params}`);
         const rows = (r.items || []).map(p => `
           <tr>
-            <td class="font-mono text-sm">${p.id}</td>
-            <td class="font-mono text-sm">${p.user_id}</td>
+            <td class="font-mono text-sm">${escapeHtml(p.id)}</td>
+            <td class="font-mono text-sm">${escapeHtml(p.user_id)}</td>
             <td>${fmt(p.amount)}</td>
-            <td class="text-sm">${p.plan_id || "—"}</td>
-            <td><span class="badge ${p.status === "approved" ? "badge-green" : p.status === "rejected" ? "badge-red" : "badge-yellow"}">${p.status}</span></td>
-            <td class="text-sm">${p.approved_at || p.created_at || "—"}</td>
+            <td class="text-sm">${escapeHtml(p.plan_id || "—")}</td>
+            <td><span class="badge ${p.status === "approved" ? "badge-green" : p.status === "rejected" ? "badge-red" : "badge-yellow"}">${escapeHtml(p.status)}</span></td>
+            <td class="text-sm">${escapeHtml(p.approved_at || p.created_at || "—")}</td>
             <td>${p.status === "pending" ? `
               <button class="btn" onclick="approvePay(${p.id})">✓</button>
               <button class="btn btn-danger" onclick="rejectPay(${p.id})">✗</button>
@@ -50,6 +50,7 @@
         `);
       }
 
+      window.load = load; // دکمه‌های فیلتر از onclick صدا می‌زنند (BUG-7)
       window.approvePay = async (id) => {
         try {
           await api(`/api/finance/payments/${id}/approve`, { method: "POST" });
@@ -63,7 +64,11 @@
         } catch (e) { showToast(e.message, true); }
       };
 
-      load();
+      try {
+        await load();
+      } catch (e) {
+        renderError(e);
+      }
     })();
   </script>
 </body>

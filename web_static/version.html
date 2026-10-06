@@ -15,14 +15,20 @@
       const user = await checkAuth();
       if (!user) { location.href = "login.html"; return; }
 
-      const info = await api("/api/version");
+      let info;
+      try {
+        info = await api("/api/version");
+      } catch (e) {
+        renderError(e);
+        return;
+      }
       document.getElementById("app").innerHTML = layout(`
         <div class="header"><h1>مدیریت نسخه</h1></div>
         <div class="card mb-4">
           <h2>اطلاعات نسخه</h2>
           <div class="flex gap-4">
-            <div><span class="text-muted text-sm">local: </span><code>${short(info.local_commit)}</code></div>
-            <div><span class="text-muted text-sm">remote: </span><code>${short(info.remote_commit)}</code></div>
+            <div><span class="text-muted text-sm">local: </span><code>${escapeHtml(short(info.local_commit))}</code></div>
+            <div><span class="text-muted text-sm">remote: </span><code>${escapeHtml(short(info.remote_commit))}</code></div>
           </div>
           <div class="mt-4">
             ${info.is_up_to_date ?
@@ -36,8 +42,8 @@
           <h2>↩️ نسخه‌های قابل rollback</h2>
           ${(info.rollback_files || []).map(f => `
             <div class="flex-between mb-2" style="padding: 0.5rem; border: 1px solid var(--border); border-radius: 0.35rem;">
-              <code class="text-sm">${f}</code>
-              <button class="btn btn-danger" onclick="rollback('${f}')">rollback</button>
+              <code class="text-sm">${escapeHtml(f)}</code>
+              <button class="btn btn-danger" data-file="${escapeHtml(f)}" onclick="rollback(this.dataset.file)">rollback</button>
             </div>
           `).join("") || '<div class="text-muted">هیچ نسخه‌ی پشتیبانی موجود نیست</div>'}
         </div>

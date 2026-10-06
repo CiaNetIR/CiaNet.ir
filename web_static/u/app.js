@@ -24,13 +24,35 @@ function formatToman(amount) {
   return sign + faDigits(Math.abs(amount).toLocaleString('en-US'));
 }
 
+// BUG-33: unified Persian (fa-IR / Jalali, Persian digits) date+time format
+// for all user pages. Accepts an ISO string, epoch-ms number or Date.
+// Same Date-based (browser-local) handling as the previous fa-IR call sites.
+function fmtDate(v) {
+  if (v === null || v === undefined || v === '') return '';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString('fa-IR', { dateStyle: 'short', timeStyle: 'short' });
+}
+
 // ─── API (same origin, relative URLs) ───
+
+// BUG-11u: read the non-HttpOnly CSRF cookie set at user login and
+// double-submit it as X-CSRF-Token on every non-GET request.
+function getUserCsrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)cianet_user_csrf_token=([^;]*)/);
+  return m ? m[1] : '';
+}
+
 async function apiCall(method, path, body = null) {
   const opts = {
     method,
     credentials: 'include',
     headers: {},
   };
+  if (method && method.toUpperCase() !== 'GET') {
+    const csrfToken = getUserCsrfToken();
+    if (csrfToken) opts.headers['X-CSRF-Token'] = csrfToken;
+  }
   if (body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
@@ -172,13 +194,13 @@ function renderTxs(txs, containerId) {
     const amount = t.amount;
     const sign = amount >= 0 ? 'positive' : 'negative';
     const amtStr = (amount >= 0 ? '+' : '−') + faDigits(Math.abs(amount).toLocaleString('en-US')) + ' Toman';
-    const dateStr = (t.created_at || '').replace('T', ' ').slice(0, 16);
+    const dateStr = fmtDate(t.created_at);
     const reason = t.reason || '—';
     div.innerHTML = `
       <div class="tx-amount ${sign}">${amtStr}</div>
       <div class="tx-detail">
         <span class="reason">${escapeHtml(reason)}</span>
-        <span class="date">${dateStr} · ${txTypeLabel(t.type)}</span>
+        <span class="date">${dateStr} · ${escapeHtml(txTypeLabel(t.type))}</span>
       </div>
       <div class="tx-balance">موجودی: ${faDigits(t.balance_after.toLocaleString('en-US'))}</div>
     `;

@@ -61,6 +61,7 @@ Run:
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -134,8 +135,8 @@ _sessions: Dict[str, float] = {}  # token -> created_at
 
 # v2.13.0 (DEBUG-2 CSRF): per-session CSRF tokens for double-submit cookie pattern.
 # جلسات جدید (بعد از پچ) هم در _sessions و هم در این dict هستند. legacy
-# session‌ها (قبل از پچ) فقط در _sessions هستند و backward-compat در
-# require_csrf اجازه عبور می‌دهد (چون cianet_csrf_token cookie ندارند).
+# session‌ها (قبل از پچ) فقط در _sessions هستند — v2.14.2 (BUG-11w/§13.3):
+# require_csrf برایشان 403 برمی‌گرداند (چون cianet_csrf_token cookie ندارند).
 _sessions_with_csrf: Dict[str, dict] = {}  # token -> {"created_at": float, "csrf": str}
 
 
@@ -165,7 +166,7 @@ def _valid_session_with_csrf(request: Request) -> tuple:
     validation دارند. هم در _sessions_with_csrf (جلسات جدید با CSRF) و هم
     در _sessions (legacy session‌های بدون CSRF) رو چک می‌کنه تا backward-compat
     حفظ بشه. اگه session جدید بود، csrf token ذخیره‌شده برمی‌گرده. اگه legacy
-    بود، None برمی‌گرده و require_csrf اجازه عبور می‌ده (backward-compat).
+    بود، None برمی‌گرده و require_csrf با 403 رد می‌کنه (§13.3 — v2.14.2).
     """
     token = request.cookies.get("cianet_panel_session")
     if not token:
@@ -243,6 +244,46 @@ def require_user_auth(request: Request) -> int:
     return uid
 
 
+# v2.14.2 (BUG-11w / §13.2): CSRF برای session کاربر — الگوی double-submit
+# مثل require_csrf ادمین، ولی برای cianet_user_session و cookieی
+# cianet_user_csrf_token (نام cookie با فرانت‌اند هماهنگ شده — تغییر نده).
+# - فقط POST/PATCH/DELETEهای /api/user/* (به‌جز login/logout) این dependency
+#   را دارند؛ GETها طبق §13.2 CSRF ندارند.
+# - token هنگام لاگین موفق در _user_sessions[token]["csrf"] ذخیره می‌شود
+#   و به‌عنوان cookie غیر-HttpOnly ست می‌شود تا JS در X-CSRF-Token بفرستد.
+def require_user_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
+    """Returns True اگر user session + CSRF double-submit معتبر باشد.
+
+    Semantics (§13.3):
+      - session معتبر نیست → 401
+      - session هست ولی cookieی cianet_user_csrf_token نیست → 403 (force re-login)
+      - cookie هست ولی header X-CSRF-Token مفقود/نامعتبر → 403
+    """
+    uid = _get_user_id_from_session(request)
+    if uid is None:
+        # هیچ session معتبری نیست → 401 (§13.3)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized — user login required",
+        )
+    token = request.cookies.get("cianet_user_session")
+    expected_csrf = (_user_sessions.get(token) or {}).get("csrf")
+    csrf_cookie = request.cookies.get("cianet_user_csrf_token")
+    if not csrf_cookie or not expected_csrf:
+        # session هست ولی CSRF cookie نیست → 403 (force re-login) (§13.3)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token missing — refresh the page",
+        )
+    # v2.14.2 (P2-10 / §20.11): مقایسه‌ی توکن CSRF هم constant-time باشد.
+    if not x_csrf_token or not hmac.compare_digest(str(x_csrf_token), str(expected_csrf)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token invalid — refresh the page",
+        )
+    return True
+
+
 def require_auth(request: Request):
     if not _valid_session(request):
         raise HTTPException(
@@ -257,9 +298,8 @@ def require_auth(request: Request):
 # - state-changing endpoints (POST/PATCH/DELETE) باید X-CSRF-Token header
 #   ارسال کنند که باید با cookie match کنه.
 # - GET endpoints نیازی به CSRF ندارن (طبق spec).
-# - backward-compat: legacy session‌ها (قبل از پچ) فقط cookie session دارند
-#   و CSRF cookie ندارند — این جلسات بدون چک CSRF عبور می‌کنند تا migration
-#   به‌صورت تدریجی انجام بشه.
+# - v2.14.2 (BUG-11w / §13.3): session cookie هست ولی CSRF cookie نیست →
+#   403 (force re-login). legacy bypass (عبور بدون چک CSRF) حذف شد.
 def require_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
     valid, expected_csrf = _valid_session_with_csrf(request)
     if not valid:
@@ -267,13 +307,19 @@ def require_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized — login required",
         )
-    # Backward-compat: اگه cianet_csrf_token cookie وجود نداره (legacy
-    # session قبل از پچ)، اجازه عبور بده تا migration تدریجی انجام بشه.
+    # v2.14.2 (BUG-11w / §13.3 + §20.16): اگه cianet_csrf_token cookie
+    # وجود نداره (legacy session قبل از پچ)، 403 برگردون (force re-login).
+    # قبلاً fail-open bypass بود که با policy «require_csrf no bypass»
+    # (v2.14.0 changelog) ناسازگار بود.
     csrf_cookie = request.cookies.get("cianet_csrf_token")
     if not csrf_cookie:
-        # Legacy session — no CSRF cookie yet, allow through
-        return True
-    if not x_csrf_token or x_csrf_token != expected_csrf:
+        # Session cookie هست ولی CSRF cookie نیست → 403 (force re-login)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="CSRF token missing — refresh the page",
+        )
+    # v2.14.2 (P2-10 / §20.11): مقایسه‌ی توکن CSRF هم constant-time باشد.
+    if not x_csrf_token or not hmac.compare_digest(str(x_csrf_token), str(expected_csrf)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="CSRF token invalid — refresh the page",
@@ -297,10 +343,11 @@ def _verify_password(plain: str, hashed: str) -> bool:
             import hashlib
             expected = hashed[len("sha256:"):]
             actual = hashlib.sha256(plain.encode("utf-8")).hexdigest()
-            # constant-time comparison
-            if len(expected) != len(actual):
-                return False
-            return all(a == b for a, b in zip(expected, actual))
+            # v2.14.2 (P2-10 / §20.11): مقایسه‌ی hash رمز باید constant-time باشد —
+            # zip-all با early-exit تایمینگ leaks می‌کرد؛ hmac.compare_digest
+            # جایگزین شد (طول‌های نابرابر هم fail-closed است).
+            import hmac
+            return hmac.compare_digest(expected, actual)
         except Exception:
             return False
     # default: bcrypt
@@ -378,8 +425,12 @@ app = FastAPI(
     title="CiaNet Web Panel API",
     description="Backend REST API for the CiaNet selfbot management panel",
     version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
+    # v2.14.2 (T4 deviation / §13.8): کنترلِ مستندِ PANEL_DOCS_ENABLED که
+    # در v2.14.0 ادعا شده بود ولی پیاده نشده بود — حالا با 0 شدنِ env،
+    # docs/redoc/openapi همه غیرفعال می‌شوند.
+    docs_url=("/api/docs" if os.environ.get("PANEL_DOCS_ENABLED", "1").strip() != "0" else None),
+    redoc_url=("/api/redoc" if os.environ.get("PANEL_DOCS_ENABLED", "1").strip() != "0" else None),
+    openapi_url=("/openapi.json" if os.environ.get("PANEL_DOCS_ENABLED", "1").strip() != "0" else None),
 )
 
 app.add_middleware(
@@ -436,10 +487,24 @@ _login_blocks: Dict[str, float] = {}  # ip → block_until
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract client IP, considering X-Forwarded-For (nginx)."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    """Extract client IP — XFF فقط از trusted proxies (§13.9 / §20.12).
+
+    v2.14.2 (BUG-12w): قبلاً leftmost X-Forwarded-For بدون هیچ چکِ trust
+    برگردانده می‌شد که هر کلاینتی می‌توانست جعلش کند (rate-limit bypass /
+    brute-force از پشت reverse proxy). حالا: فقط اگر request.client.host
+    یک trusted proxy از env PANEL_TRUSTED_PROXIES باشد، XFF خوانده می‌شود
+    و rightmost non-trusted hop برگردانده می‌شود؛ در غیر این صورت خودِ
+    request.client.host.
+    """
+    trusted_proxies = os.environ.get("PANEL_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
+    if request.client and request.client.host in trusted_proxies:
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            # Use rightmost non-trusted hop
+            for hop in reversed(fwd.split(",")):
+                hop = hop.strip()
+                if hop not in trusted_proxies:
+                    return hop
     return request.client.host if request.client else "unknown"
 
 
@@ -470,10 +535,49 @@ def _record_login_failure(ip: str):
     _login_failures[ip] = failures
 
 
+# v2.14.2 (BUG-27w): session storeها + login-failure dictها قبلاً هیچ‌وقت
+# پاک نمی‌شدند و برای همیشه رشد می‌کردند (memory DoS). این sweep فقط
+# entryهای منقضی‌شده (بر اساس همان TTLهایی که validation استفاده می‌کند)
+# حذف می‌کند — رفتار sessionهای زنده هیچ تغییری نمی‌کند.
+def _sweep_expired_sessions() -> None:
+    now = time.time()
+    # admin sessionها (legacy store + CSRF-enabled store)
+    for tok in [t for t, ts in _sessions.items() if now - ts > SESSION_TTL_SEC]:
+        _sessions.pop(tok, None)
+    for tok in [t for t, s in _sessions_with_csrf.items()
+                if now - s["created_at"] > SESSION_TTL_SEC]:
+        _sessions_with_csrf.pop(tok, None)
+    # user sessionها
+    for tok in [t for t, s in _user_sessions.items()
+                if now - s["created_at"] > USER_SESSION_TTL_SEC]:
+        _user_sessions.pop(tok, None)
+    # login failureها/blockهای منقضی (خارج از پنجره/مدت دیگر اثر ندارند)
+    for ip in [ip for ip, ts_list in _login_failures.items()
+               if not ts_list or all(now - t >= _LOGIN_FAIL_WINDOW for t in ts_list)]:
+        _login_failures.pop(ip, None)
+    for ip in [ip for ip, until in _login_blocks.items() if now >= until]:
+        _login_blocks.pop(ip, None)
+
+
+_session_sweep_count = 0
+_SESSION_SWEEP_EVERY = 50  # هر ۵۰ تلاش لاگین یک‌بار sweep اجرا شود
+
+
+def _maybe_sweep_sessions() -> None:
+    """Sweep فرصت‌طلبانه — counter-gated تا روی hot path سنگین نباشد (BUG-27w)."""
+    global _session_sweep_count
+    _session_sweep_count += 1
+    if _session_sweep_count >= _SESSION_SWEEP_EVERY:
+        _session_sweep_count = 0
+        _sweep_expired_sessions()
+
+
 @app.post("/api/auth/login")
 async def auth_login(req: LoginRequest, request: Request, response: Response):
     if not PANEL_ADMIN_PASS_HASH:
         raise HTTPException(503, "Login disabled — set PANEL_ADMIN_PASS_HASH env var")
+    # v2.14.2 (BUG-27w): sweep فرصت‌طلبانه‌ی entryهای منقضی هر N لاگین
+    _maybe_sweep_sessions()
     # v2.12.31 (DEBUG-1 MEDIUM-5): rate-limiting
     client_ip = _get_client_ip(request)
     allowed, retry_after = _check_login_rate_limit(client_ip)
@@ -617,6 +721,10 @@ async def users_list(
     _: None = Depends(require_auth),
 ):
     m = _main()
+    # PATCH (v2.14.2 BUG-28w): clamp pagination params — page_size نامحدود
+    # می‌توانست کل جدول را یک‌جا برگرداند (DoS). محدوده‌ی مجاز: [1, 200].
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 200))
     offset = (max(1, page) - 1) * page_size
     where = []
     params = []
@@ -854,6 +962,9 @@ async def accounts_list(
     _: None = Depends(require_auth),
 ):
     m = _main()
+    # PATCH (v2.14.2 BUG-28w): clamp pagination params [1, 200]
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 200))
     cfg = m.load_config()
     items = []
     for tag, acc in cfg.items():
@@ -915,11 +1026,15 @@ async def account_enable(tag: str, request: Request, _: None = Depends(require_c
     m.save_config(cfg)
     # schedule runtime start (async) — اما چون sync، فقط flag رو ست می‌کنیم
     # سرویس خودش در next restart یا تله‌گرام callback اکانت رو start می‌کنه
-    # برای start فوری، می‌تونیم create_task بزنیم اگه event loop داشته باشیم
+    # v2.14.2 (P2-10 / §20.7): قبلاً loop.create_task خامِ fire-and-forget بود —
+    # بدون ارجاعِ قوی، GC می‌توانست استارتِ اکانت را وسط کار جمع کند و خطا
+    # بی‌صدا می‌شد. حالا m._spawn_bg (ارجاع قوی در main._BG_TASKS + لاگ خطا)
+    # مطابق الگوی مستند §10.4/§20.7.
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(m.ensure_started(tag, cfg[tag], caller="web_panel.enable"))
+        m._spawn_bg(
+            m.ensure_started(tag, cfg[tag], caller="web_panel.enable"),
+            "web_panel.enable",
+        )
     except Exception:
         pass
     return {"ok": True}
@@ -934,10 +1049,13 @@ async def account_disable(tag: str, request: Request, _: None = Depends(require_
     cfg[tag]["disabled"] = True
     cfg[tag]["disabled_reason"] = "manual_web_panel"
     m.save_config(cfg)
+    # v2.14.2 (P2-10 / §20.7): مثل enable بالا — _spawn_bg به‌جای
+    # loop.create_task خام fire-and-forget (GC-safe + لاگ خطا).
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(m.ensure_stopped(tag, "web_panel.disable"))
+        m._spawn_bg(
+            m.ensure_stopped(tag, "web_panel.disable"),
+            "web_panel.disable",
+        )
     except Exception:
         pass
     return {"ok": True}
@@ -1050,6 +1168,9 @@ async def finance_payments(
         where.append("status=?")
         params.append(status_filter)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+    # PATCH (v2.14.2 BUG-28w): clamp pagination params [1, 200]
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 200))
     offset = (max(1, page) - 1) * page_size
     try:
         with m._conn() as c:
@@ -1062,8 +1183,11 @@ async def finance_payments(
             ).fetchall()
             return {"items": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size}
     except Exception as e:
-        # اگر جدول purchases وجود نداشت
-        return {"items": [], "total": 0, "page": page, "page_size": page_size, "error": str(e)}
+        # v2.14.2 (BUG-23w / §20.5): اگر جدول purchases وجود نداشت، قبلاً
+        # متنِ استثنا (str(e)) به کلاینت برمی‌گشت — حالا فقط لاگ سرور-side
+        # + پیام عمومی فارسی (خطای schema دیتابیس لو نره).
+        print(f"❌ [finance_payments] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.post("/api/finance/payments/{pay_id}/approve")
@@ -1161,6 +1285,9 @@ async def tickets_list(
         where.append("status=?")
         params.append(status_filter)
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
+    # PATCH (v2.14.2 BUG-28w): clamp pagination params [1, 200]
+    page = max(1, int(page))
+    page_size = max(1, min(int(page_size), 200))
     offset = (max(1, page) - 1) * page_size
     try:
         with m._conn() as c:
@@ -1173,7 +1300,10 @@ async def tickets_list(
             ).fetchall()
             return {"items": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size}
     except Exception as e:
-        return {"items": [], "total": 0, "page": page, "page_size": page_size, "error": str(e)}
+        # v2.14.2 (BUG-23w / §20.5): str(e) به کلاینت برنمی‌گشت — فقط لاگ
+        # سرور-side + پیام عمومی فارسی.
+        print(f"❌ [tickets_list] DB error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 @app.get("/api/tickets/{ticket_id}")
@@ -1343,8 +1473,14 @@ async def version_apply(request: Request, _: None = Depends(require_csrf)):
     # و در thread executor اجرا می‌شه تا event loop block نشه
     try:
         from cianet_updater import apply_update
-        loop = asyncio.get_event_loop()
-        success, msg = await loop.run_in_executor(None, apply_update)
+        import functools
+        # v2.14.2 (P2-9 FLOW-5 / §14.1 step-7): main_loop پاس شود تا هوکِ
+        # restart از run_coroutine_threadsafe به‌صورت graceful اجرا شود —
+        # قبلاً این مسیر main_loop را پاس نمی‌داد (wiring مرده) و اکانت‌ها
+        # با SIGTERM کشته می‌شدند.
+        loop = asyncio.get_running_loop()
+        success, msg = await loop.run_in_executor(
+            None, functools.partial(apply_update, main_loop=loop))
         if success:
             return {"ok": True, "message": msg, "note": "Service will restart automatically"}
         else:
@@ -1384,7 +1520,10 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception as e:
-        return {"ok": True, "warning": f"Manual restart needed: {e}", "backup": backup.name}
+        # v2.14.2 (BUG-23w / §20.5): جزئیات خطای systemctl/مسیر فایل به
+        # کلاینت نشت نکنه — پیام عمومی فارسی؛ جزئیات فقط در لاگ سرور.
+        print(f"❌ [version_rollback] restart failed: {type(e).__name__}: {e}")
+        return {"ok": True, "warning": "راه‌اندازی مجدد دستی لازم است — با پشتیبانی تماس بگیرید.", "backup": backup.name}
     return {"ok": True, "backup": backup.name, "message": "Rollback applied, restarting"}
 
 
@@ -1502,26 +1641,40 @@ async def tools_api_creds_rotate(request: Request, _: None = Depends(require_csr
 # می‌کند — فقط لایسنس‌های فعال‌شده (که user_id دارند) پذیرفته می‌شوند.
 
 @app.post("/api/user/login")
-async def user_license_login(req: LicenseLoginRequest, response: Response):
+async def user_license_login(req: LicenseLoginRequest, request: Request, response: Response):
     """ورود با کد لایسنس — فقط لایسنس‌های فعال‌شده قابل‌استفاده.
 
     اگر لایسنس قبلاً فعال‌شده (در جدول subscriptions با status='active'
     یا 'expired')، user_id صاحب‌اش پیدا می‌شود و session ساخته می‌شود.
     اگر لایسنس هنوز فعال‌نشده (used_count=0) یا منقضی شده/is_active=0،
     ورود رد می‌شود.
+
+    v2.14.2 (BUG-12w / §13.4): rate-limiting مثل admin login — ۵ تلاش
+    ناموفق از هر IP در پنجره → ۱۵ دقیقه block. فقط روی همین endpoint
+    (طبق §4.4 هیچ endpoint دیگری rate-limit ندارد).
     """
     m = _main()
+    # v2.14.2 (BUG-27w): sweep فرصت‌طلبانه‌ی entryهای منقضی هر N لاگین
+    _maybe_sweep_sessions()
+    # v2.14.2 (BUG-12w): rate-limiting — همان machinery ادمین (share شده)
+    client_ip = _get_client_ip(request)
+    allowed, retry_after = _check_login_rate_limit(client_ip)
+    if not allowed:
+        raise HTTPException(429, f"Too many failed attempts. Try again in {retry_after//60} min.")
     code = (req.license_code or "").strip().upper()
     if not code:
         raise HTTPException(400, "کد لایسنس خالی است")
     with m._conn() as c:
         lic = c.execute("SELECT * FROM licenses WHERE code = ?", (code,)).fetchone()
         if lic is None:
+            _record_login_failure(client_ip)
             raise HTTPException(404, "چنین لایسنسی وجود ندارد")
         lic = dict(lic)
         if not lic.get("is_active"):
+            _record_login_failure(client_ip)
             raise HTTPException(403, "این لایسنس غیرفعال است")
         if lic.get("used_count", 0) < 1:
+            _record_login_failure(client_ip)
             raise HTTPException(403, "این لایسنس هنوز فعال نشده — اول در ربات /start بزن و فعالش کن")
         # user_id از طریق subscriptions پیدا می‌شود (آخرین اشتراکِ ساخته‌شده با این license_id)
         sub = c.execute(
@@ -1530,9 +1683,19 @@ async def user_license_login(req: LicenseLoginRequest, response: Response):
             (lic["id"],),
         ).fetchone()
         if sub is None:
+            _record_login_failure(client_ip)
             raise HTTPException(403, "این لایسنس فعال شده ولی کاربرش پیدا نشد — با پشتیبانی تماس بگیر")
         user_id = int(sub["user_id"])
+    # v2.14.2 (BUG-12w): ورود موفق — failureهای این IP پاک شوند (مثل admin login)
+    _login_failures.pop(client_ip, None)
+    _login_blocks.pop(client_ip, None)
     token = _create_user_session(user_id)
+    # v2.14.2 (BUG-11w / §13.2): CSRF token برای session کاربر — الگوی
+    # double-submit مثل admin login: در session dict ذخیره می‌شود و
+    # به‌عنوان cookie غیر-HttpOnly ست می‌شود تا JS بتواند آن را در headerی
+    # X-CSRF-Token برای state-changing endpointها بفرستد.
+    user_csrf_token = secrets.token_urlsafe(32)
+    _user_sessions[token]["csrf"] = user_csrf_token
     response.set_cookie(
         key="cianet_user_session",
         value=token,
@@ -1541,6 +1704,14 @@ async def user_license_login(req: LicenseLoginRequest, response: Response):
         max_age=USER_SESSION_TTL_SEC,
         secure=True,  # در production روی True
     )
+    response.set_cookie(
+        key="cianet_user_csrf_token",
+        value=user_csrf_token,
+        httponly=False,  # JS باید بخواندش تا در X-CSRF-Token بفرستد
+        samesite="lax",
+        max_age=USER_SESSION_TTL_SEC,
+        secure=True,
+    )
     return {"ok": True, "user_id": user_id}
 
 
@@ -1548,6 +1719,8 @@ async def user_license_login(req: LicenseLoginRequest, response: Response):
 async def user_logout(request: Request, response: Response):
     _invalidate_user_session(request)
     response.delete_cookie("cianet_user_session")
+    # v2.14.2 (BUG-11w): CSRF cookie کاربر هم پاک شود
+    response.delete_cookie("cianet_user_csrf_token")
     return {"ok": True}
 
 
@@ -1608,8 +1781,10 @@ async def user_wallet(request: Request):
 async def user_wallet_transactions(request: Request, limit: int = 50):
     """تاریخچه‌ی کامل‌تر — تا ۱۰۰ تراکنش آخر."""
     uid = require_user_auth(request)
-    if limit > 100:
-        limit = 100
+    # PATCH (v2.14.2 BUG-28w): clamp کامل limit — قبلاً فقط سقف بالا بود؛
+    # limit صفر/منفی در SQLite یعنی «بدون محدودیت» (DoS). سقف ۱۰۰ طبق
+    # docstring همین endpoint حفظ شد.
+    limit = max(1, min(int(limit), 100))
     m = _main()
     txs = m.list_wallet_transactions(uid, limit=limit)
     return {
@@ -1628,7 +1803,8 @@ async def user_wallet_transactions(request: Request, limit: int = 50):
 
 
 @app.post("/api/user/pay-from-wallet")
-async def user_pay_from_wallet(req: WalletPayRequest, request: Request):
+async def user_pay_from_wallet(req: WalletPayRequest, request: Request,
+                              _: None = Depends(require_user_csrf)):
     """پرداخت از کیف پول — برای تکمیل سفارش.
 
     این endpoint پول را از کیف پول کاربر کم می‌کند و در audit log ثبت
@@ -1683,7 +1859,8 @@ async def user_list_orders(request: Request):
     }
 
 @app.post("/api/user/orders/{order_id}/pay-wallet")
-async def user_pay_order_with_wallet(order_id: int, request: Request):
+async def user_pay_order_with_wallet(order_id: int, request: Request,
+                                     _: None = Depends(require_user_csrf)):
     """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه."""
     uid = require_user_auth(request)
     m = _main()
@@ -2127,8 +2304,20 @@ async def analytics_export(request: Request, format: str = "csv",
 
 # ─── v2.9.8: Phase 4 — Iranian payment gateway (Zarinpal) ──────────────
 
+def _safe_gateway_error(err: str, endpoint: str) -> str:
+    """v2.14.2 (BUG-23w sweep / §17.3): errorهای درگاه پرداخت ممکن است متنِ
+    استثنا یا پاسخِ خام API را داشته باشند (مثل «zarinpal_request_failed:
+    ...» یا «zarinpal_error: {...}» که از main.py می‌آیند). اینها نباید به
+    کلاینت برسند — جزئیات فقط در لاگ سرور، پیام عمومی فارسی به کلاینت."""
+    if err and any(k in err for k in ("request_failed", "zarinpal_error:", "zibal_error:")):
+        print(f"❌ [{endpoint}] gateway error: {err}")
+        return "خطا در ارتباط با درگاه پرداخت — با پشتیبانی تماس بگیرید."
+    return err
+
+
 @app.post("/api/payment/zarinpal/create/{order_id}")
-async def zarinpal_create_payment(order_id: int, request: Request):
+async def zarinpal_create_payment(order_id: int, request: Request,
+                                 _: None = Depends(require_user_csrf)):
     """ساخت پرداخت Zarinpal — redirect URL برمی‌گردونه."""
     uid = require_user_auth(request)
     m = _main()
@@ -2147,7 +2336,8 @@ async def zarinpal_create_payment(order_id: int, request: Request):
     result = m.create_zarinpal_payment(order_id, callback_url)
     if result.get("ok"):
         return {"ok": True, "url": result["url"]}
-    raise HTTPException(400, result.get("error", "zarinpal_failed"))
+    # v2.14.2 (BUG-23w): جزئیات استثنا/پاسخ خام درگاه به detail نچکه
+    raise HTTPException(400, _safe_gateway_error(result.get("error", "zarinpal_failed"), "zarinpal_create"))
 
 # v2.12.9 (QA-USER): صفحات فارسی HTML به‌جای JSON خام برای کاربرِ غیرتکنیکال.
 # قبل از این patch، کاربر بعد از پرداخت Zarinpal/Zibal یه صفحه‌ی سفید با
@@ -2289,10 +2479,11 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
         except Exception as _e:
             print(f"⚠️ [zarinpal_callback] notify user failed: {_e}", flush=True)
         return _payment_success_html(verify_result.get("ref_id", "-"))
-    return _payment_failed_html(verify_result.get("error", "verify_failed"))
+    # v2.14.2 (BUG-23w): متن استثنای verify به صفحه‌ی HTML کاربر نچکه
+    return _payment_failed_html(_safe_gateway_error(verify_result.get("error", "verify_failed"), "zarinpal_callback"))
 
 @app.post("/api/user/auto-renew")
-async def toggle_auto_renew(request: Request):
+async def toggle_auto_renew(request: Request, _: None = Depends(require_user_csrf)):
     """فعال/غیرفعال‌کردن تمدید خودکار از کیف پول.
     v2.12.10: این endpoint فقط فلگ auto_renew_enabled رو toggle می‌کنه —
     خودِ تمدید در _expiry_loopِ ربات (ساعتی) انجام می‌شه. قبلاً این endpoint
@@ -2339,7 +2530,7 @@ async def list_sched_msgs(request: Request):
     return {"messages": msgs}
 
 @app.post("/api/user/scheduled-messages")
-async def create_sched_msg(request: Request):
+async def create_sched_msg(request: Request, _: None = Depends(require_user_csrf)):
     """ساخت پیام زمان‌بندی‌شده."""
     from pydantic import BaseModel
     class SchedMsgReq(BaseModel):
@@ -2350,12 +2541,24 @@ async def create_sched_msg(request: Request):
     uid = require_user_auth(request)
     m = _main()
     req = await request.json()
+    # v2.14.2 (BUG-2w): مالکیت tag قبل از create چک شود — قبلاً req["tag"]
+    # بدون هیچ چکی به create_scheduled_message پاس می‌شد و هر دارنده‌ی
+    # لایسنس می‌توانست از سلف‌بات دیگران پیام زمان‌بندی‌شده بسازد
+    # (cross-tenant impersonation). الگوی چک مثل live-session (user_start_live_session).
+    cfg = m.load_config()
+    acc = cfg.get(req["tag"])
+    if not acc:
+        raise HTTPException(404, "اکانت پیدا نشد")
+    # v2.14.2 (P2-1 flag / §20.1): OWNER طبق قوانین هرگز بلاک نمی‌شود —
+    # درست مثل چکِ داخل main.create_scheduled_message/create_auto_reply.
+    if not (m.account_belongs_to(acc, req["tag"], uid) or m.is_owner_bypass(uid)):
+        raise HTTPException(403, "این اکانت متعلق به شما نیست")
     result = m.create_scheduled_message(uid, req["tag"], req["chat_id"],
                                           req["text"], req["scheduled_at"])
     return result
 
 @app.delete("/api/user/scheduled-messages/{msg_id}")
-async def delete_sched_msg(msg_id: int, request: Request):
+async def delete_sched_msg(msg_id: int, request: Request, _: None = Depends(require_user_csrf)):
     """حذف پیام زمان‌بندی‌شده."""
     uid = require_user_auth(request)
     m = _main()
@@ -2370,15 +2573,24 @@ async def list_auto_replies_api(request: Request):
     return {"replies": m.list_auto_replies(uid)}
 
 @app.post("/api/user/auto-replies")
-async def create_auto_reply_api(request: Request):
+async def create_auto_reply_api(request: Request, _: None = Depends(require_user_csrf)):
     """ساخت auto-reply."""
     uid = require_user_auth(request)
     m = _main()
     req = await request.json()
+    # v2.14.2 (BUG-2w): مالکیت tag قبل از create چک شود — مثل scheduled-messages.
+    cfg = m.load_config()
+    acc = cfg.get(req["tag"])
+    if not acc:
+        raise HTTPException(404, "اکانت پیدا نشد")
+    # v2.14.2 (P2-1 flag / §20.1): OWNER طبق قوانین هرگز بلاک نمی‌شود —
+    # درست مثل چکِ داخل main.create_scheduled_message/create_auto_reply.
+    if not (m.account_belongs_to(acc, req["tag"], uid) or m.is_owner_bypass(uid)):
+        raise HTTPException(403, "این اکانت متعلق به شما نیست")
     return m.create_auto_reply(uid, req["tag"], req["keyword"], req["reply"])
 
 @app.delete("/api/user/auto-replies/{reply_id}")
-async def delete_auto_reply_api(reply_id: int, request: Request):
+async def delete_auto_reply_api(reply_id: int, request: Request, _: None = Depends(require_user_csrf)):
     """حذف auto-reply."""
     uid = require_user_auth(request)
     m = _main()
@@ -2404,7 +2616,8 @@ async def affiliate_commissions_api(request: Request):
 
 # v2.10.2: Zibal gateway
 @app.post("/api/payment/zibal/create/{order_id}")
-async def zibal_create_payment(order_id: int, request: Request):
+async def zibal_create_payment(order_id: int, request: Request,
+                               _: None = Depends(require_user_csrf)):
     uid = require_user_auth(request)
     m = _main()
     order = m.get_order(order_id)
@@ -2418,7 +2631,8 @@ async def zibal_create_payment(order_id: int, request: Request):
     result = m.create_zibal_payment(order_id, cb)
     if result.get("ok"):
         return {"ok": True, "url": result["url"]}
-    raise HTTPException(400, result.get("error", "zibal_failed"))
+    # v2.14.2 (BUG-23w): جزئیات استثنا/پاسخ خام درگاه به detail نچکه
+    raise HTTPException(400, _safe_gateway_error(result.get("error", "zibal_failed"), "zibal_create"))
 
 @app.get("/api/payment/zibal/callback")
 async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
@@ -2458,7 +2672,8 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
         except Exception as _e:
             print(f"⚠️ [zibal_callback] notify user failed: {_e}", flush=True)
         return _payment_success_html(verify_result.get("ref_id", "-"))
-    return _payment_failed_html(verify_result.get("error", "verify_failed"))
+    # v2.14.2 (BUG-23w): متن استثنای verify به صفحه‌ی HTML کاربر نچکه
+    return _payment_failed_html(_safe_gateway_error(verify_result.get("error", "verify_failed"), "zibal_callback"))
 
 # ─── v2.8.5: Account Settings + Chat API ─────────────────────────────
 # این endpoint‌ها به Telethon client زنده نیاز دارند — فقط وقتی کار می‌کنند
@@ -2521,11 +2736,15 @@ async def user_get_account_settings(request: Request):
         info["live_phone"] = getattr(me, "phone", None)
         info["live_photo"] = bool(getattr(me, "photo", None))
     except Exception as e:
-        info["live_error"] = str(e)[:100]
+        # v2.14.2 (BUG-23w / §20.5): استثنای Telethon (ممکن است شامل شماره‌ی
+        # تلفن/entity باشد) به کلاینت نشت نکند — فقط لاگ سرور + پیام عمومی.
+        print(f"❌ [user_get_account_settings] live info error: {type(e).__name__}: {e}")
+        info["live_error"] = "خطا در دریافت اطلاعات زنده — با پشتیبانی تماس بگیرید."
     return info
 
 @app.patch("/api/user/account/settings")
-async def user_update_account_settings(req: AccountSettingsUpdate, request: Request):
+async def user_update_account_settings(req: AccountSettingsUpdate, request: Request,
+                                       _: None = Depends(require_user_csrf)):
     """به‌روزرسانی تنظیمات اکانت فعال در live session."""
     uid, tag, acc, client = _get_live_client(request)
     m = _main()
@@ -2565,6 +2784,8 @@ async def user_update_account_settings(req: AccountSettingsUpdate, request: Requ
 async def user_list_chats(request: Request, limit: int = 50):
     """لیست چت‌های اخیر اکانت فعال."""
     uid, tag, acc, client = _get_live_client(request)
+    # PATCH (v2.14.2 BUG-28w): clamp limit [1, 200]
+    limit = max(1, min(int(limit), 200))
     chats = []
     try:
         async for dialog in client.iter_dialogs(limit=limit):
@@ -2596,6 +2817,8 @@ async def user_list_chats(request: Request, limit: int = 50):
 async def user_get_messages(chat_id: int, request: Request, limit: int = 50):
     """پیام‌های یک چت."""
     uid, tag, acc, client = _get_live_client(request)
+    # PATCH (v2.14.2 BUG-28w): clamp limit [1, 200]
+    limit = max(1, min(int(limit), 200))
     messages = []
     try:
         entity = await client.get_entity(chat_id)
@@ -2620,7 +2843,8 @@ async def user_get_messages(chat_id: int, request: Request, limit: int = 50):
     return {"chat_id": chat_id, "messages": messages}
 
 @app.post("/api/user/chats/{chat_id}/send")
-async def user_send_message(chat_id: int, req: SendMessageRequest, request: Request):
+async def user_send_message(chat_id: int, req: SendMessageRequest, request: Request,
+                            _: None = Depends(require_user_csrf)):
     """ارسال پیام به یک چت."""
     uid, tag, acc, client = _get_live_client(request)
     if not req.text or not req.text.strip():
@@ -2687,7 +2911,8 @@ async def user_list_accounts(request: Request):
     return {"items": items, "count": len(items)}
 
 @app.post("/api/user/live-session")
-async def user_start_live_session(req: LiveSessionRequest, request: Request):
+async def user_start_live_session(req: LiveSessionRequest, request: Request,
+                                  _: None = Depends(require_user_csrf)):
     """شروع live session — کاربر اکانت خودش رو انتخاب می‌کنه و وارد می‌شه."""
     uid = require_user_auth(request)
     m = _main()
@@ -2732,7 +2957,7 @@ async def user_get_live_session(request: Request):
     }
 
 @app.post("/api/user/live-session/stop")
-async def user_stop_live_session(request: Request):
+async def user_stop_live_session(request: Request, _: None = Depends(require_user_csrf)):
     """خروج از live session (ولی لاگین باقی می‌مونه)."""
     uid = require_user_auth(request)
     token = request.cookies.get("cianet_user_session")

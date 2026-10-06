@@ -64,7 +64,7 @@
       for (const o of orders) {
         const div = document.createElement('div');
         div.className = 'order-card ' + o.status;
-        const date = (o.created_at || '').replace('T', ' ').slice(0, 16);
+        const date = fmtDate(o.created_at);
         let discountHtml = '';
         if (o.discount_code) {
           discountHtml = `<div style="color:var(--accent);font-size:0.85rem;margin-top:4px">🎁 تخفیف: ${escapeHtml(o.discount_code)} (${faDigits(o.discount_percent)}%)</div>`;
@@ -78,7 +78,7 @@
           <div class="order-meta">
             ${faDigits(o.amount_toman)} Toman
             ${o.discount_code ? ' · <s>' + faDigits(o.original_amount_toman) + '</s>' : ''}
-            · ${statusMap[o.status] || o.status}
+            · ${escapeHtml(statusMap[o.status] || o.status)}
             · ${date}
           </div>
           ${discountHtml}

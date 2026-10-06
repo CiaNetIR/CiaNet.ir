@@ -5,11 +5,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CiaNet Admin — آنالیتیکس</title>
   <link rel="stylesheet" href="styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
+          integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g"
+          crossorigin="anonymous"></script>
   <style>
+    /* P2-6: استایل‌های نوار بالا — این کلاس‌ها در markup بودند ولی در هیچ CSSای
+       تعریف نشده بودند (صفحه قبلاً مرده بود و دیده نمی‌شد) — با پالت ادمین هماهنگ شد */
+    .topnav {
+      display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+      padding: 0.75rem 1.5rem; margin-bottom: 1rem;
+      background: var(--bg-card); border-bottom: 1px solid var(--border);
+    }
+    .topnav .brand { color: var(--primary); font-weight: 700; font-size: 1.1rem; }
+    .topnav .nav-items { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+    .topnav .nav-items a { color: var(--fg-muted); text-decoration: none; font-size: 0.9rem; }
+    .topnav .nav-items a:hover { color: var(--fg); }
+    .topnav .nav-items a.active { color: var(--primary); font-weight: 600; }
+    .container { padding: 0 1.5rem 1.5rem; }
+    .link-btn {
+      display: inline-block; padding: 0.4rem 0.85rem; border-radius: 0.35rem;
+      font-size: 0.85rem; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg-muted); color: var(--fg);
+    }
+    .link-btn:hover { background: var(--border); }
     .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
-    .stat-card { padding: 16px; border-radius: 8px; background: rgba(15,23,42,0.4); border-left: 3px solid var(--accent); }
-    .stat-card .label { font-size: 0.85rem; color: var(--text-dim); }
+    .stat-card { padding: 16px; border-radius: 8px; background: rgba(15,23,42,0.4); border-left: 3px solid var(--primary); }
+    .stat-card .label { font-size: 0.85rem; color: var(--fg-muted); }
     .stat-card .value { font-size: 1.5rem; font-weight: 700; margin-top: 6px; }
     .chart-container { background: rgba(15,23,42,0.4); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
     .chart-container canvas { max-height: 300px; }
@@ -44,8 +65,16 @@
   </div>
 
   <script>
-    const adminSession = document.cookie.includes('cianet_panel_session');
-    if (!adminSession) { window.location.href = '/app/login.html'; }
+    // auth: کوکی session از نوع HttpOnly است و از document.cookie خوانده نمی‌شه؛
+    // پس وضعیت لاگین را از API می‌پرسیم و فقط روی 401 ریدایرکت می‌کنیم.
+    async function checkAdminAuth() {
+      try {
+        const r = await fetch('/api/auth/me', { credentials: 'include' });
+        return r.status !== 401;
+      } catch (e) {
+        return true; // خطای شبکه — ادامه می‌دهیم؛ لودرها خطا را نشان می‌دهند
+      }
+    }
 
     async function apiCall(method, path) {
       const r = await fetch(path, { method, credentials: 'include' });
@@ -71,7 +100,21 @@
           <div class="stat-card"><div class="label">نرخ churn</div><div class="value">${faDigits(d.churn_rate_percent)}%</div></div>
         `;
       } catch (err) {
-        document.getElementById('stat-grid').textContent = 'خطا: ' + err.message;
+        // P2-6: خطای فارسی + دکمه‌ی تلاش مجدد (سبک renderError) — با DOM API ساخته
+        // می‌شود تا message سرور بدون escape داخل HTML نیفتد
+        const sg = document.getElementById('stat-grid');
+        if (!sg) return;
+        sg.textContent = '';
+        const box = document.createElement('div');
+        box.className = 'error';
+        box.style.marginBottom = '12px';
+        box.textContent = 'خطا: ' + err.message;
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-primary';
+        btn.style.marginTop = '8px';
+        btn.textContent = '🔄 تلاش مجدد';
+        btn.onclick = () => location.reload();
+        sg.append(box, btn);
       }
     }
 
@@ -92,7 +135,18 @@
           },
           options: { responsive: true, maintainAspectRatio: false }
         });
-      } catch (err) { console.error(err); }
+      } catch (err) {
+        // P2-6: خطای نمودار فقط در console بود و بوم خالی می‌ماند — حالا پیام فارسی نشان می‌دهد
+        console.error(err);
+        const el = document.getElementById('revenueChart');
+        if (el) {
+          el.style.display = 'none';
+          const d = document.createElement('div');
+          d.className = 'error';
+          d.textContent = 'خطا در بارگذاری نمودار — صفحه را رفرش کن';
+          el.parentNode.insertBefore(d, el);
+        }
+      }
     }
 
     async function loadSubChart() {
@@ -109,10 +163,27 @@
           },
           options: { responsive: true, maintainAspectRatio: false }
         });
-      } catch (err) { console.error(err); }
+      } catch (err) {
+        // P2-6: مثل نمودار درآمد — پیام فارسی به‌جای بوم خالی
+        console.error(err);
+        const el = document.getElementById('subChart');
+        if (el) {
+          el.style.display = 'none';
+          const d = document.createElement('div');
+          d.className = 'error';
+          d.textContent = 'خطا در بارگذاری نمودار — صفحه را رفرش کن';
+          el.parentNode.insertBefore(d, el);
+        }
+      }
     }
 
-    Promise.all([loadOverview(), loadRevenueChart(), loadSubChart()]);
+    (async () => {
+      if (await checkAdminAuth()) {
+        Promise.all([loadOverview(), loadRevenueChart(), loadSubChart()]);
+      } else {
+        window.location.href = '/app/login.html';
+      }
+    })();
   </script>
 </body>
 </html>

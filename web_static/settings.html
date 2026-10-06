@@ -15,7 +15,13 @@
       const user = await checkAuth();
       if (!user) { location.href = "login.html"; return; }
 
-      const s = await api("/api/settings");
+      let s;
+      try {
+        s = await api("/api/settings");
+      } catch (e) {
+        renderError(e);
+        return;
+      }
       document.getElementById("app").innerHTML = layout(`
         <div class="header"><h1>تنظیمات سیستم</h1></div>
         <div class="card mb-4">
@@ -30,12 +36,12 @@
         <div class="card">
           <h2>اطلاعات سیستم</h2>
           <table>
-            <tr><td class="text-muted">panel user</td><td class="font-mono">${s.panel_user}</td></tr>
-            <tr><td class="text-muted">owner_id (main)</td><td class="font-mono">${s.owner_id}</td></tr>
-            <tr><td class="text-muted">owner_ids</td><td class="font-mono">${(s.owner_ids || []).join(", ")}</td></tr>
-            <tr><td class="text-muted">channel_username</td><td class="font-mono">${s.channel_username || "—"}</td></tr>
-            <tr><td class="text-muted">wallet USDT</td><td class="font-mono text-sm">${s.wallet_address_usdt || "—"}</td></tr>
-            <tr><td class="text-muted">min_commit_hash</td><td class="font-mono text-sm">${s.min_commit_hash || "—"}</td></tr>
+            <tr><td class="text-muted">panel user</td><td class="font-mono">${escapeHtml(s.panel_user)}</td></tr>
+            <tr><td class="text-muted">owner_id (main)</td><td class="font-mono">${escapeHtml(s.owner_id)}</td></tr>
+            <tr><td class="text-muted">owner_ids</td><td class="font-mono">${escapeHtml((s.owner_ids || []).join(", "))}</td></tr>
+            <tr><td class="text-muted">channel_username</td><td class="font-mono">${escapeHtml(s.channel_username || "—")}</td></tr>
+            <tr><td class="text-muted">wallet USDT</td><td class="font-mono text-sm">${escapeHtml(s.wallet_address_usdt || "—")}</td></tr>
+            <tr><td class="text-muted">min_commit_hash</td><td class="font-mono text-sm">${escapeHtml(s.min_commit_hash || "—")}</td></tr>
           </table>
         </div>
       `);
