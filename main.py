@@ -7459,19 +7459,18 @@ class AdminBot:
         # هیچ راهی نبود و کاربر در بن‌بست می‌ماند.
         buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
         # v2.12.24: محافظتِ ورود — toggle on/off
-        # v2.13.1 (USER-REQUEST): فقط مالک اصلی اکانت دکمه را می‌بیند.
-        # حتی OWNER سیستم، ADMIN یا نماینده هم دکمه را نمی‌بینند — چون
-        # فقط صاحب اکانت می‌تواند login_guard را toggle کند.
-        try:
-            _acc_for_btn = (load_config() or {}).get(tag, {}) or {}
-        except Exception:
-            _acc_for_btn = {}
-        _owner_uid_for_btn = _acc_for_btn.get("owner_user_id")
+        # v2.13.3 (USER-REQUEST): فقط مالک اصلی سلف (ADMIN_ID) دکمه را می‌بیند.
+        # هیچ‌کس دیگه‌ای — حتی صاحب خودِ اکانت، ADMIN، RESELLER یا USER —
+        # دکمه را نمی‌بیند چون فقط مالک سلف می‌تواند login_guard را toggle کند.
         _viewer_id_for_btn = event.sender_id
+        _main_owner_for_btn = _security_main_owner_id()
+        try:
+            _extra_owners_for_btn = OWNER_IDS
+        except NameError:
+            _extra_owners_for_btn = set()
         _show_guard_btn = (
-            (_owner_uid_for_btn is not None and _viewer_id_for_btn == _owner_uid_for_btn)
-            or
-            (_owner_uid_for_btn is None and _viewer_id_for_btn == _security_main_owner_id())
+            (_main_owner_for_btn and _viewer_id_for_btn == _main_owner_for_btn)
+            or (_viewer_id_for_btn in _extra_owners_for_btn)
         )
         if _show_guard_btn:
             _guard_on = entry and getattr(entry.bot, "login_code_guard", False)
@@ -8390,48 +8389,32 @@ class AdminBot:
         منقضی می‌شه (با send_code_request). این جلوی سرقتِ اکانت رو
         می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره.
 
-        v2.13.1 (USER-REQUEST): فقط مالک اصلی اکانت (owner_user_id)
-        می‌تواند login_guard را toggle کند. این چک قبل از هر
-        authorization دیگری انجام می‌شه تا حتی ADMIN/RESELLER با
-        capability grant هم نتوانند روی اکانت دیگران login_guard را
-        فعال کنند. اگه owner_user_id تنظیم نشده (legacy account)،
-        فقط مالک اصلی سیستم (ADMIN_ID) می‌تواند toggle کند.
+        v2.13.3 (USER-REQUEST): فقط **مالک اصلی سلف** (ADMIN_ID) می‌تواند
+        login_guard را روی هر اکانتی toggle کند. هیچ‌کس دیگه‌ای — حتی
+        صاحب خودِ اکانت (owner_user_id)، ADMIN، RESELLER یا USER —
+        اجازه‌ی تغییر login_guard را ندارد. این سیاست امنیتی سخت‌گیرانه
+        است که کنترل کامل محافظت ورود را در دست مالک سلف نگه می‌دارد.
         """
-        # v2.13.1 (USER-REQUEST): مالک-اکانت-only policy.
+        # v2.13.3 (USER-REQUEST): فقط مالک اصلی سلف (ADMIN_ID) اجازه دارد.
         # این چک اول از همه اجرا می‌شه — قبل از _sess_guard و قبل از
-        # authorize_sensitive_account_action — تا حتی OWNER سیستم و
-        # ADMIN با capability grant هم نتوانند روی اکانت دیگران
-        # login_guard را toggle کنند. فقط مالک واقعی اکانت (owner_user_id)
-        # اجازه دارد.
-        try:
-            _acc = (load_config() or {}).get(tag, {}) or {}
-        except Exception:
-            _acc = {}
-        _owner_uid = _acc.get("owner_user_id")
+        # authorize_sensitive_account_action — تا هیچ‌کس جز مالک سلف
+        # نتواند login_guard را تغییر دهد.
         _viewer_id = event.sender_id
+        _main_owner = _security_main_owner_id()
 
-        if _owner_uid is not None:
-            # اکانت owner_user_id دارد — فقط خودش می‌تواند toggle کند.
-            if _viewer_id != _owner_uid:
+        if not _main_owner or _viewer_id != _main_owner:
+            # بررسی OWNER_IDS برای multi-owner setups
+            try:
+                _extra_owners = OWNER_IDS
+            except NameError:
+                _extra_owners = set()
+
+            if _viewer_id not in _extra_owners:
                 log_action(_viewer_id, "login_guard_blocked",
-                           f"tag={tag} owner={_owner_uid} (owner-only policy)")
+                           f"tag={tag} (main_owner-only policy)")
                 # v2.13.2: Telegram alert محدودیت 200 کاراکتر دارد.
-                # پیام قبلی 220+ کاراکتر بود → MessageTooLongError.
-                # حالا کوتاه و قابل نمایش.
                 await event.answer(
-                    "🔒 فقط مالک این اکانت می‌تواند محافظت ورود را تغییر دهد.",
-                    alert=True,
-                )
-                return
-        else:
-            # اکانت legacy — owner_user_id ندارد.
-            # فقط مالک اصلی سیستم (ADMIN_ID) می‌تواند toggle کند.
-            _main_owner = _security_main_owner_id()
-            if _main_owner and _viewer_id != _main_owner:
-                log_action(_viewer_id, "login_guard_blocked",
-                           f"tag={tag} (legacy account, system OWNER only)")
-                await event.answer(
-                    "🔒 فقط مالک اصلی سیستم می‌تواند این اکانت را تغییر دهد.",
+                    "🔒 فقط مالک اصلی سلف می‌تواند محافظت ورود را تغییر دهد.",
                     alert=True,
                 )
                 return
@@ -18847,7 +18830,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.13.2"
+BUILD_VERSION = "2026-10-06-v2.13.3"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
