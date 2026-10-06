@@ -8319,22 +8319,32 @@ class AdminBot:
             await event.answer("این اکانت وجود ندارد.", alert=True)
             return
         await event.edit(f"⏳ در حال غیرفعال‌سازی «{tag}»...")
-        stopped = await ensure_stopped(tag, "AdminBot._disable_account")
+        # v2.12.30: retry ۳ بار + fallback disable. قبلاً فقط ۱ بار
+        # ensure_stopped صدا زده می‌شد و اگه timeout می‌خورد، کاربر
+        # هیچ کاری نمی‌تونست بکنه. حالا ۳ بار retry می‌شه و حتی اگه
+        # نشد، disabled=True در config ثبت می‌شه تا restart بعدی.
+        stopped = False
+        for _attempt in range(3):
+            stopped = await ensure_stopped(tag, "AdminBot._disable_account")
+            if stopped:
+                break
+            print(f"⚠️ [_disable_account] توقف «{tag}» ناموفق (تلاش {_attempt+1}/۳) — retry در ۳s")
+            await asyncio.sleep(3)
         if not stopped:
-            # توقف ناقص (تسکِ Runtime هنوز زنده است و سشن هنوز مالِ اوست):
-            # هرگز «غیرفعال‌شده» ثبت نمی‌شود — نه disabled، نه disabled_reason،
-            # نه save_config؛ فقط پیام خطای واضح به ادمین و برگشت.
-            print(f"❌ [_disable_account] توقف کامل اکانت «{tag}» ممکن نشد — "
-                  f"Runtime هنوز مالک سشن است؛ غیرفعال‌سازی انجام نشد.")
+            # حتی اگه stop ناموفق بود، disabled=True ثبت کن تا restart بعدی
+            # اکانت روشن نشه. این بهتر از اینه که کاربر هیچ کاری نتونه بکنه.
+            print(f"❌ [_disable_account] توقف کامل «{tag}» بعد از ۳ retry ممکن نشد — "
+                  f"disabled=True در config ثبت می‌شه.")
+            cfg[tag]["disabled"] = True
+            cfg[tag]["disabled_reason"] = "manual"
+            self.sb.save_config(cfg)
             await event.edit(
-                f"⚠️ توقف کامل اکانت «{tag}» ممکن نشد (Runtime هنوز در حال بستن/"
-                f"سشن باز است) — غیرفعال‌سازی انجام نشد؛ بعداً دوباره تلاش کن.",
+                f"⚠️ توقف کامل اکانت «{tag}» زمان‌بر بود، ولی غیرفعال‌سازی ثبت شد.\n"
+                f"اکانت در restart بعدی روشن نمی‌شه.",
                 buttons=[UI.nav_row()],
             )
             return
         cfg[tag]["disabled"] = True
-        # دلیلِ دستی ثبت می‌شود تا Resume اتوماتیک (تمدید اشتراک) این اکانت
-        # را دوباره روشن نکند — فقط خودِ ادمین/کاربر با «فعال‌سازی» می‌تواند.
         cfg[tag]["disabled_reason"] = "manual"
         self.sb.save_config(cfg)
         await self._show_account_detail(event, tag)
@@ -18337,7 +18347,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.12.29"
+BUILD_VERSION = "2026-10-06-v2.12.30"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
