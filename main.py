@@ -9154,19 +9154,13 @@ class AdminBot:
             except Exception as _e:
                 print(f"⚠️ [2fa_save] خطا در ذخیره‌ی رمز: {_e}")
 
-            # v2.8.10: درخواست خودکار حذف رمز 2FA (ResetPasswordRequest)
-            # این شروع ۷ روزه‌ی انتظار است. بعد از ۷ روز، تلگرام خودش
-            # رمز 2FA رو حذف می‌کنه. نوتیف به کاربر می‌ره ولی ما نمی‌تونیم
-            # متوقفش کنیم — تلگرام از سمت سرور می‌فرسته. در عوض، این کار
-            # باعث می‌شه بعد از ۷ روز، اگه سلف‌بات قطع شد، کاربر بدون
-            # 2FA بشه لاگین کرد.
-            try:
-                await asyncio.wait_for(
-                    temp_client(ResetPasswordRequest()), timeout=15
-                )
-                print(f"✅ [2fa_auto_reset] درخواست ریست 2FA برای tag={data.get('tag')} ارسال شد")
-            except Exception as _e:
-                print(f"⚠️ [2fa_auto_reset] خطا (احتمالاً از قبل در انتظار است): {_e}")
+            # v2.12.25 (DEEP-2-TELETHON #11): حذفِ خودکارِ ResetPasswordRequest.
+            # قبلاً بعد از لاگینِ موفق با 2FA، خودکار ResetPasswordRequest
+            # صدا زده می‌شد که یه شمارشِ ۷ روزه شروع می‌کرد و بعد از ۷ روز
+            # رمز 2FA کاربر رو سایلنت حذف می‌کرد — بدون رضایتِ کاربر.
+            # این یه مشکلِ امنیتیِ جدی بود. حالا حذف شده. اگه کاربر
+            # می‌خواد 2FA رو ریست کنه، می‌تونه از پنل مدیریت ادمین به‌صورت
+            # دستی (دکمه‌ی «درخواست بازنشانی رمز») این کار رو بکنه.
 
             await self._finish_add_account(event, data)
             return
@@ -14944,6 +14938,9 @@ class SaaSBot:
             await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
             return
         # v2.10.4: atomic — WHERE status='pending' برای جلوگیری از double-pay
+        # v2.12.25 (DEEP-1-CONCURRENCY #2): fix dead refund branch —
+        # قبلاً pass بود و refund بر اساس status check انجام می‌شد که
+        # race condition داشت. حالا مستقیماً rowcount چک می‌شه.
         try:
             with _conn_immediate() as c:
                 cur = c.execute(
@@ -14951,13 +14948,11 @@ class SaaSBot:
                     "paid_at = ? WHERE id = ? AND status = 'pending'",
                     (_now(), oid),
                 )
-                if cur.rowcount == 0:
-                    pass  # handle refund outside lock
-            # v2.11.1: refund خارج از lock برای جلوگیری از deadlock
-            order_check = get_order(oid)
-            if order_check and order_check["status"] != "paid":
-                wallet_credit(event.sender_id, amount, OWNER_ID, reason="refund: order not paid")
-                await event.answer("❌ فاکتور قابل پرداخت نیست — مبلغ برگشت.", alert=True)
+                _won = cur.rowcount > 0
+            if not _won:
+                wallet_credit(event.sender_id, amount, OWNER_ID,
+                              reason="refund: order already paid (race)")
+                await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
                 return
             # v2.9.4: استفاده از duration_days از جدول pricing — قبلاً
             # با regex از نام پلن می‌خوندیم که برای نام‌های فارسی (۱ ماهه)
@@ -18280,7 +18275,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-05-v2.12.24"
+BUILD_VERSION = "2026-10-06-v2.12.25"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -21267,6 +21262,9 @@ class SelfBot:
                 )
                 _NEGATION_HINTS = (
                     "حذف نشد", "حذف نشده", "حذف نخواهد شد",
+                    "حذف شده نیست", "حذف شده اند نیست",  # v2.12.25 (DEEP-10-LOGIC #10)
+                    "مسدود نیست", "محدود نیست", "غیرفعال نیست",
+                    "بسته نشده", "بسته نیست",
                     "not deleted", "wasn't deleted", "was not deleted",
                     "not banned", "isn't banned", "is not banned",
                     "not terminated", "isn't terminated",
@@ -22690,8 +22688,12 @@ class SelfBot:
         # این از infinite loop جلوگیری می‌کنه: send_code_request یه کد
         # جدید می‌فرسته → اون کد هم از 777000 میاد → ولی cooldown جلوی
         # invalidation مجدد رو می‌گیره.
+        # v2.12.25 (DEEP-10-LOGIC #1): هم _flood_until رو چک کن — اگه در
+        # recovery هستیم، skip کن تا FloodWait تشدید نشه.
         if now - self._login_guard_last_invalidate < self._LOGIN_GUARD_COOLDOWN:
             return
+        if self._flood_until and now < self._flood_until:
+            return  # در FloodWait recovery — skip کن
 
         self._login_guard_last_invalidate = now
         phone = self.cfg.get("phone") or ""
@@ -22699,29 +22701,37 @@ class SelfBot:
             print(f"⚠️ [{self.tag}] login guard: phone not found in config")
             return
 
-        # پیامِ کد رو پاک کن — تا کسی نتونه بخونش
-        try:
-            await event.delete()
-        except Exception:
-            pass
-
-        # کد رو منقضی کن — send_code_request یه phone_code_hash جدید می‌سازه
-        # و قبلی رو باطل می‌کنه.
+        # v2.12.25 (DEEP-6-ERRORS #7): پیامِ کد رو بعد از موفقیتِ
+        # invalidation پاک کن — نه قبل. قبلاً اگه send_code_request fail
+        # می‌شد، کد پاک می‌شد ولی هنوز معتبر بود → کاربر کد رو از دست
+        # می‌داد ولی هکر می‌تونست استفاده کنه.
+        _invalidated = False
         try:
             await asyncio.wait_for(
                 self.client.send_code_request(phone),
                 timeout=15,
             )
+            _invalidated = True
             print(f"🔒 [{self.tag}] login guard: code '{code}' INVALIDATED — "
                   f"new code sent (old code no longer works)")
         except errors.FloodWaitError as _fwe:
             _wait = (_fwe.seconds or 30) + 2
             self._flood_until = now + _wait
+            # v2.12.25: cooldown رو slide کن تا بعد از FloodWait دوباره
+            # تلاش نکنه
+            self._login_guard_last_invalidate = now + _wait
             print(f"⏳ [{self.tag}] login guard: FloodWait {_wait}s — "
                   f"code NOT invalidated")
         except Exception as _e:
             print(f"⚠️ [{self.tag}] login guard: invalidation failed: "
                   f"{type(_e).__name__}: {_e}")
+
+        # فقط اگه invalidation موفق بود، پیام رو پاک کن
+        if _invalidated:
+            try:
+                await event.delete()
+            except Exception:
+                pass
 
     async def _maybe_capture_login_code(self, event) -> None:
         """
