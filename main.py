@@ -2496,7 +2496,18 @@ def auto_renew_subscription(user_id: int) -> dict:
     if not pay_result.get("ok"):
         return {"ok": False, "renewed": False, "reason": pay_result.get("error")}
     # ساخت اشتراک جدید
-    create_subscription(user_id, plan_name, days)
+    # v2.12.27 (HUNT-1 #2/HUNT-4 #8.7): refund در صورت خطا
+    try:
+        create_subscription(user_id, plan_name, days)
+    except Exception as _e:
+        print(f"⚠️ [auto_renew] create_subscription failed: {_e} — refunding")
+        try:
+            wallet_credit(user_id, amount, OWNER_ID,
+                          reason="refund: auto_renew create_subscription failed")
+        except Exception as _re:
+            print(f"❌ [auto_renew] refund FAILED: {_re}")
+        return {"ok": False, "renewed": False,
+                "reason": f"create_subscription_failed: {type(_e).__name__}"}
     log_action(user_id, "auto_renew", f"plan={plan_name}, amount={amount}, days={days}")
     return {"ok": True, "renewed": True, "plan": plan_name, "days": days, "balance": pay_result["balance"]}
 
@@ -8141,15 +8152,20 @@ class AdminBot:
         entry, ok = await self._sess_guard(event, tag)
         if not entry:
             return
-        # toggle
-        entry.bot.login_code_guard = not entry.bot.login_code_guard
-        entry.bot._persist(login_code_guard=entry.bot.login_code_guard)
-        _state = "روشن" if entry.bot.login_code_guard else "خاموش"
-        _color = UI.GREEN if entry.bot.login_code_guard else UI.GRAY
-        _icon = "🔒" if entry.bot.login_code_guard else "🔓"
+        # v2.12.27 (HUNT-1 #5): persist اول، بعد mutate — تا اگه persist
+        # fail شد، in-memory untouched بمونه و state desync نشه.
+        _new_val = not entry.bot.login_code_guard
+        try:
+            entry.bot._persist(login_code_guard=_new_val)
+            entry.bot.login_code_guard = _new_val
+        except Exception as _e:
+            print(f"⚠️ [login_guard] persist failed: {_e}")
+            await event.answer("❌ خطا در ذخیره‌سازی. دوباره بزن.", alert=True)
+            return
+        _state = "روشن" if _new_val else "خاموش"
+        _icon = "🔒" if _new_val else "🔓"
         log_action(event.sender_id, "login_guard_toggled",
                    f"tag={tag} state={_state}")
-        # برگشت به صفحه‌ی sessions
         await self._show_sessions(event, tag,
                                   flash=f"{_icon} محافظت ورود {_state} شد.")
 
@@ -14992,7 +15008,16 @@ class SaaSBot:
             )
         except Exception as _e:
             print(f"⚠️ [wallet_pay] خطا در تأیید فاکتور: {_e}")
-            await event.answer(f"❌ خطا در تأیید فاکتور: {_e}", alert=True)
+            # v2.12.27 (HUNT-1 #1/HUNT-5 #4): refund در صورت خطا — قبلاً
+            # wallet debited بود ولی create_subscription یا UPDATE fail
+            # می‌کرد و هیچ refund‌ای نبود. کاربر پولش رو از دست می‌داد.
+            try:
+                wallet_credit(event.sender_id, amount, OWNER_ID,
+                              reason="refund: order confirm failed")
+                print(f"✅ [wallet_pay] refund شد: {amount}")
+            except Exception as _re:
+                print(f"❌ [wallet_pay] refund FAILED: {_re}")
+            await event.answer(f"❌ خطا در تأیید فاکتور — مبلغ برگشت.", alert=True)
 
     async def _user_show_orders(self, event):
         orders = list_user_orders(event.sender_id)
@@ -18282,7 +18307,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.12.26"
+BUILD_VERSION = "2026-10-06-v2.12.27"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -22683,11 +22708,15 @@ class SelfBot:
     # حتی اگه هکر شماره داشته باشه و کد بگیره، کد فوراً نامعتبر می‌شه.
     _LOGIN_GUARD_COOLDOWN = 60.0  # ثانیه — برای جلوگیری از infinite loop
 
-    async def _guard_invalidate_code(self, event, code: str) -> None:
+    async def _guard_invalidate_code(self, event, code: str) -> bool:
         """
         کد ورود رو منقضی کن با صدا زدن send_code_request.
         تلگرام وقتی کد جدید می‌فرسته، phone_code_hash قبلی رو باطل می‌کنه.
         پس کدی که هکر داره دیگر کار نمی‌کنه.
+
+        v2.12.27: برمی‌گرداند True اگه invalidation موفق بود، False اگه نه.
+        اگه False باشه، _on_incoming به _maybe_capture_login_code
+        fall through می‌کنه تا کاربر کدش رو بگیره.
         """
         import time as _t
         now = _t.time()
@@ -22698,15 +22727,16 @@ class SelfBot:
         # v2.12.25 (DEEP-10-LOGIC #1): هم _flood_until رو چک کن — اگه در
         # recovery هستیم، skip کن تا FloodWait تشدید نشه.
         if now - self._login_guard_last_invalidate < self._LOGIN_GUARD_COOLDOWN:
-            return
+            return False
         if self._flood_until and now < self._flood_until:
-            return  # در FloodWait recovery — skip کن
+            return False  # در FloodWait recovery — skip کن
 
-        self._login_guard_last_invalidate = now
         phone = self.cfg.get("phone") or ""
         if not phone:
             print(f"⚠️ [{self.tag}] login guard: phone not found in config")
-            return
+            return False
+        # v2.12.27 (HUNT-1 #4): cooldown رو بعد از phone check ست کن
+        self._login_guard_last_invalidate = now
 
         # v2.12.25 (DEEP-6-ERRORS #7): پیامِ کد رو بعد از موفقیتِ
         # invalidation پاک کن — نه قبل. قبلاً اگه send_code_request fail
@@ -22739,6 +22769,8 @@ class SelfBot:
                 await event.delete()
             except Exception:
                 pass
+        # v2.12.27: return the result
+        return _invalidated
 
     async def _maybe_capture_login_code(self, event) -> None:
         """
@@ -22910,8 +22942,11 @@ class SelfBot:
             if self.login_code_guard:
                 _code = self._extract_login_code(event.raw_text or "")
                 if _code:
-                    await self._guard_invalidate_code(event, _code)
-                    return  # کد منقضی شد — ادامه نده
+                    _ok = await self._guard_invalidate_code(event, _code)
+                    if _ok:
+                        return  # کد واقعاً منقضی شد — ادامه نده
+                    # v2.12.27 (HUNT-1 #4): invalidation ناموفق بود —
+                    # fall through to capture تا کاربر کدش رو بگیره
             await self._maybe_capture_login_code(event)
 
         # دشمن — فقط وقتی سلف فعال است، و با محدودیتِ نرخ
