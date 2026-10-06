@@ -1166,19 +1166,13 @@ def _table_check_constraint_text(c, table_name: str) -> str:
 def _migrate_schema(c) -> None:
     """
     مهاجرت خودکار برای دیتابیس‌هایی که با نسخه‌ی قدیمی‌تر این ماژول ساخته
-    شده‌اند. چون init_db از CREATE TABLE IF NOT EXISTS استفاده می‌کند، اگر
-    یک جدول از قبل با schema قدیمی روی دیسک وجود داشته باشد، هیچ‌کدام از
-    تغییرات بعدی (ستون جدید، مقدار جدید در CHECK) به‌طور خودکار اعمال
-    نمی‌شوند — دقیقاً همان چیزی که باعث خطاهای زیر می‌شد:
-        - "CHECK constraint failed: status IN ('active','expired','pending')"
-          (جدول subscriptions قدیمی، بدون 'superseded')
-        - "table payments has no column named receipt_ref"
-          (جدول payments قدیمی، با ستون receipt_file_id به‌جای receipt_ref)
+    شده‌اند.
 
-    این تابع idempotent است (اجرای مکررش روی یک دیتابیسِ از قبل مهاجرت‌شده
-    کاملاً بی‌اثر و بی‌خطر است) و همیشه در ابتدای init_db صدا زده می‌شود، پس
-    این مشکل دیگر تکرار نمی‌شود — حتی اگر بعداً دوباره schema عوض شود، تا
-    وقتی این تابع هم به‌روزرسانی شود.
+    v2.12.29 (DEEP-6 #6): این تابع داخل یک _conn_immediate صدا زده
+    می‌شه (از init_db) که BEGIN IMMEDIATE داره. DDL‌های sqlite در حالت
+    default isolation_level auto-commit می‌شن، ولی چون ما از _conn_immediate
+    استفاده می‌کنیم، همه DDL‌ها و DML‌ها در یک تراکنش هستن. اگه خطا
+    رخ بده، rollback می‌شن و دیتابیس در حالت نیمه‌مهاجرت‌شده نمی‌مونه.
     """
     tables = {
         r["name"] for r in c.execute(
@@ -1320,7 +1314,10 @@ def _migrate_schema(c) -> None:
 
 
 def init_db() -> None:
-    with _conn() as c:
+    # v2.12.29 (DEEP-6 #6): از _conn_immediate استفاده کن تا مهاجرت
+    # atomic باشه. قبلاً _conn بود که auto-commit می‌کرد و نیمه‌مهاجرت
+    # ممکن بود.
+    with _conn_immediate() as c:
         _migrate_schema(c)
         c.executescript("""
         CREATE TABLE IF NOT EXISTS admins (
@@ -3795,6 +3792,10 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
     original_amount = amount_toman
     discount_percent = 0
     applied_code = None
+    # v2.12.29 (DEEP-7 #7): zero-amount validation — اگه amount <= 0
+    # باشه، order گیر می‌کنه و قابل پرداخت نیست.
+    if amount_toman <= 0:
+        return {"error": "invalid_amount"}
     if discount_code:
         result = apply_discount_code(discount_code, amount_toman)
         if result.get("ok"):
@@ -9089,7 +9090,10 @@ class AdminBot:
                     )
                     return
             data["phone"] = text
-            wiz["state"] = None
+            # v2.12.29 (DEEP-5 W-1): state رو None نذار — یه state
+            # موقت بساز تا پیام‌های کاربر در این پنجره silent drop
+            # نشن. بعد از _do_send_code یا WIZ_CODE یا None می‌شه.
+            wiz["state"] = "sending_code"
             # v2.12.8: حذفِ پرسشِ «ورود با پروکسی یا مستقیم» — همیشه
             # مستقیم وصل می‌شویم. کاربر می‌تواند بعداً برای اکانتِ موجود
             # از صفحه‌ی «🌐 اتصال و پروکسی» (دکمه‌ی «🌐 تنظیم پروکسی»)
@@ -12689,7 +12693,12 @@ class SaaSBot:
             # دستی/مستقل از اشتراک باشد).
             if acc.get("provision_source") not in (PROVISION_SUBSCRIPTION, PROVISION_LICENSE):
                 continue
-            await ensure_stopped(tag, "expiry._stop_and_disable_user_selfbots")
+            # v2.12.29 (DEEP-5 D-1): check return of ensure_stopped
+            stopped_ok = await ensure_stopped(tag, "expiry._stop_and_disable_user_selfbots")
+            if not stopped_ok:
+                print(f"⚠️ [expiry] ensure_stopped({tag}) failed — "
+                      f"account NOT disabled, will retry next loop")
+                continue
             if not acc.get("disabled"):
                 acc["disabled"] = True
                 acc["disabled_reason"] = "subscription_expired"
@@ -13620,6 +13629,12 @@ class SaaSBot:
         b = get_dedicated_bot(bot_id)
         if not b:
             await event.answer("ربات اختصاصی پیدا نشد.", alert=True)
+            return
+        # v2.12.29 (DEEP-5 DB-1): revoked terminal — no reactivation.
+        if b["status"] == "revoked":
+            await event.answer(
+                "⛔ این ربات اختصاصی منقضی شده. برای فعال‌سازی دوباره "
+                "باید تمدید کنید.", alert=True)
             return
         if b["status"] == "active":
             pid = b.get("pid") or _read_pidfile(b.get("bot_dir") or "")
@@ -16419,6 +16434,17 @@ class SaaSBot:
             await _stop_process_by_pid(pid)
             update_dedicated_bot_status(dbot["id"], "revoked")
             log_action(0, "dedicated_bot_expired", f"bot#{dbot['id']}")
+            # v2.12.29 (DEEP-9 #9): پوشه‌ی ربات رو پاک کن — قبلاً
+            # rmtree نمی‌شد و فایل‌های سشن + دیتابیس روی دیسک می‌موندن
+            # (نشتیِ دیسک + امنیتی: فایل سشن حاوی credentials).
+            bot_dir = dbot.get("bot_dir")
+            if bot_dir and os.path.isdir(bot_dir):
+                try:
+                    import shutil as _shutil
+                    _shutil.rmtree(bot_dir)
+                    print(f"✅ [dedicated] bot_dir پاک شد: {bot_dir}")
+                except Exception as _re:
+                    print(f"⚠️ [dedicated] rmtree({bot_dir}) failed: {_re}")
             try:
                 await self.client.send_message(
                     dbot["owner_id"],
@@ -18311,7 +18337,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.12.28"
+BUILD_VERSION = "2026-10-06-v2.12.29"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -24566,6 +24592,24 @@ class SelfBot:
                 _now = _time_mod.time()
                 _last_broadcast = getattr(self, "_last_broadcast_at", 0.0)
                 _BROADCAST_COOLDOWN = 60.0
+                # v2.12.29 (DEEP-4 #2): daily broadcast cap — حداکثر ۵
+                # broadcast در روز per SelfBot. این از mass-ban جلوگیری
+                # می‌کنه.
+                _BROADCAST_DAILY_MAX = 5
+                _broadcast_day = int(_now // 86400)
+                _broadcast_today = getattr(self, "_broadcast_today_count", 0)
+                _broadcast_day_id = getattr(self, "_broadcast_day_id", 0)
+                if _broadcast_day_id != _broadcast_day:
+                    _broadcast_day_id = _broadcast_day
+                    _broadcast_today = 0
+                if _broadcast_today >= _BROADCAST_DAILY_MAX:
+                    await event.edit(
+                        f"⏳ سقف روزانه‌ی ارسال ({_BROADCAST_DAILY_MAX} بار) "
+                        f"تکمیل شده. فردا دوباره تلاش کن."
+                    )
+                    return
+                self._broadcast_today_count = _broadcast_today + 1
+                self._broadcast_day_id = _broadcast_day_id
                 if _now - _last_broadcast < _BROADCAST_COOLDOWN:
                     _remain = int(_BROADCAST_COOLDOWN - (_now - _last_broadcast))
                     await event.edit(f"⏳ لطفاً {_remain} ثانیه دیگر صبر کن و دوباره امتحان کن.")
