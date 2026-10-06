@@ -7459,9 +7459,24 @@ class AdminBot:
         # هیچ راهی نبود و کاربر در بن‌بست می‌ماند.
         buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
         # v2.12.24: محافظتِ ورود — toggle on/off
-        _guard_on = entry and getattr(entry.bot, "login_code_guard", False)
-        _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
-        buttons.append([UI.go(_guard_label, f"login_guard:{tag}", tone="success" if _guard_on else None)])
+        # v2.13.1 (USER-REQUEST): فقط مالک اصلی اکانت دکمه را می‌بیند.
+        # حتی OWNER سیستم، ADMIN یا نماینده هم دکمه را نمی‌بینند — چون
+        # فقط صاحب اکانت می‌تواند login_guard را toggle کند.
+        try:
+            _acc_for_btn = (load_config() or {}).get(tag, {}) or {}
+        except Exception:
+            _acc_for_btn = {}
+        _owner_uid_for_btn = _acc_for_btn.get("owner_user_id")
+        _viewer_id_for_btn = event.sender_id
+        _show_guard_btn = (
+            (_owner_uid_for_btn is not None and _viewer_id_for_btn == _owner_uid_for_btn)
+            or
+            (_owner_uid_for_btn is None and _viewer_id_for_btn == _security_main_owner_id())
+        )
+        if _show_guard_btn:
+            _guard_on = entry and getattr(entry.bot, "login_code_guard", False)
+            _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
+            buttons.append([UI.go(_guard_label, f"login_guard:{tag}", tone="success" if _guard_on else None)])
         buttons.append([UI.refresh(f"sessions:{tag}")])
         buttons.append(UI.nav_row())
 
@@ -8373,34 +8388,59 @@ class AdminBot:
     async def _toggle_login_guard(self, event, tag: str):
         """🔒 محافظت ورود — وقتی روشن باشه، هر کد ورود از 777000 فوراً
         منقضی می‌شه (با send_code_request). این جلوی سرقتِ اکانت رو
-        می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره."""
-        entry, ok = await self._sess_guard(event, tag)
-        if not entry:
-            return
-        # v2.12.31 (DEBUG-1 HIGH-1): login_guard DoS prevention.
-        # OWNER نباید بتواند login_guard را روی اکانتِ کاربرِ دیگر (USER/
-        # RESELLER) فعال کند. این یک حمله‌ی DoS بود که در آن OWNER می‌توانست
-        # اکانت کاربر را قفل کند تا کاربر نتواند از دستگاه جدیدی لاگین کند.
-        # OWNER فقط می‌تواند login_guard را روی اکانت‌های خودش toggle کند.
-        # این چک فقط برای login_guard اعمال می‌شود (نه برای عملیاتِ حساسِ
-        # دیگر) چون login_guard هیچ راه recovery از داخل ربات ندارد.
+        می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره.
+
+        v2.13.1 (USER-REQUEST): فقط مالک اصلی اکانت (owner_user_id)
+        می‌تواند login_guard را toggle کند. این چک قبل از هر
+        authorization دیگری انجام می‌شه تا حتی ADMIN/RESELLER با
+        capability grant هم نتوانند روی اکانت دیگران login_guard را
+        فعال کنند. اگه owner_user_id تنظیم نشده (legacy account)،
+        فقط مالک اصلی سیستم (ADMIN_ID) می‌تواند toggle کند.
+        """
+        # v2.13.1 (USER-REQUEST): مالک-اکانت-only policy.
+        # این چک اول از همه اجرا می‌شه — قبل از _sess_guard و قبل از
+        # authorize_sensitive_account_action — تا حتی OWNER سیستم و
+        # ADMIN با capability grant هم نتوانند روی اکانت دیگران
+        # login_guard را toggle کنند. فقط مالک واقعی اکانت (owner_user_id)
+        # اجازه دارد.
         try:
             _acc = (load_config() or {}).get(tag, {}) or {}
         except Exception:
             _acc = {}
         _owner_uid = _acc.get("owner_user_id")
         _viewer_id = event.sender_id
-        _is_main_owner = (_viewer_id == _security_main_owner_id())
-        if _is_main_owner and _owner_uid is not None and _owner_uid != _viewer_id:
-            # OWNER در حال تلاش برای toggle کردن login_guard روی اکانت
-            # دیگری است — رد کن.
-            log_action(_viewer_id, "login_guard_blocked",
-                       f"tag={tag} owner={_owner_uid} (DoS prevention)")
-            await event.answer(
-                "🔒 به‌خاطر جلوگیری از قفل‌شدن اکانت کاربر، فقط مالک اکانت "
-                "می‌تواند محافظت ورود را روشن/خاموش کند.",
-                alert=True,
-            )
+
+        if _owner_uid is not None:
+            # اکانت owner_user_id دارد — فقط خودش می‌تواند toggle کند.
+            if _viewer_id != _owner_uid:
+                log_action(_viewer_id, "login_guard_blocked",
+                           f"tag={tag} owner={_owner_uid} (owner-only policy)")
+                await event.answer(
+                    "🔒 فقط مالک اصلی این اکانت می‌تواند محافظت ورود را "
+                    "روشن/خاموش کند.\n\n"
+                    "این قابلیت برای امنیت اکانت شما طراحی شده و فقط "
+                    "صاحب اکانت اجازه‌ی تغییر آن را دارد — حتی OWNER سیستم، "
+                    "ADMIN یا نماینده هم نمی‌توانند آن را تغییر دهند.",
+                    alert=True,
+                )
+                return
+        else:
+            # اکانت legacy — owner_user_id ندارد.
+            # فقط مالک اصلی سیستم (ADMIN_ID) می‌تواند toggle کند.
+            _main_owner = _security_main_owner_id()
+            if _main_owner and _viewer_id != _main_owner:
+                log_action(_viewer_id, "login_guard_blocked",
+                           f"tag={tag} (legacy account, system OWNER only)")
+                await event.answer(
+                    "🔒 این اکانت قدیمی است و مالک مشخصی ندارد. فقط "
+                    "مالک اصلی سیستم می‌تواند محافظت ورود را برای آن "
+                    "مدیریت کند.",
+                    alert=True,
+                )
+                return
+
+        entry, ok = await self._sess_guard(event, tag)
+        if not entry:
             return
         # v2.12.27 (HUNT-1 #5): persist اول، بعد mutate — تا اگه persist
         # fail شد، in-memory untouched بمونه و state desync نشه.
@@ -18810,7 +18850,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.13.0"
+BUILD_VERSION = "2026-10-06-v2.13.1"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
