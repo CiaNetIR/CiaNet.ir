@@ -95,6 +95,13 @@ def _main():
     return _main_mod
 
 
+# PATCH (TEST-G9-ANALYTICS FIX-F): track panel startup time so /api/health
+# can report real uptime. Without this, /api/health always said "ok"
+# regardless of whether the DB was reachable or accounts were running —
+# a silent no-op for monitoring.
+_PANEL_START_TIME = time.time()
+
+
 # ─── Configuration ────────────────────────────────────────────────────
 PANEL_ADMIN_USER = os.environ.get("PANEL_ADMIN_USER", "admin").strip()
 # bcrypt hash. برای تولید: python3 -c "from passlib.hash import bcrypt; print(bcrypt.hash('secret'))"
@@ -114,16 +121,6 @@ SESSION_TTL_SEC = 8 * 3600  # 8 hours
 
 # CORS: dev + production
 ALLOWED_ORIGINS = os.environ.get("PANEL_CORS_ORIGINS", "http://localhost:3000").split(",")
-
-# PATCH (PATCH-4-WEBPANEL WP-HIGH-2): Trusted proxy IPs for X-Forwarded-For.
-# فقط اگه request مستقیماً از یکی از این IPها اومده باشه، X-Forwarded-For
-# رو اعتبار می‌دیم؛ در غیر این صورت از request.client.host استفاده می‌کنیم
-# تا مهاجم نتونه با ارسال XFF دلخواه rate-limit رو دور بزنه.
-# default: localhost (nginx روی همون VPS).
-_PANEL_TRUSTED_PROXIES = set(
-    p.strip() for p in os.environ.get("PANEL_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
-    if p.strip()
-)
 
 DATA_DIR = _main().DATA_DIR if hasattr(_main(), 'DATA_DIR') else (_PROJECT_DIR / "data")
 SAAS_DB = _main().DB_PATH if hasattr(_main(), 'DB_PATH') else (DATA_DIR / "saas.db")
@@ -204,21 +201,10 @@ def _invalidate_session(request: Request) -> None:
 _user_sessions: Dict[str, dict] = {}  # token -> {user_id, created_at}
 USER_SESSION_TTL_SEC = 24 * 3600  # 24 hours
 
-def _create_user_session(user_id: int) -> tuple:
-    """Create a new user session token + matching CSRF token.
-
-    PATCH (PATCH-4-WEBPANEL WP-HIGH-4): returns (token, csrf_token) so the
-    caller can set both cookies. csrf_token is stored server-side keyed by
-    the session token so we can validate the X-CSRF-Token header later.
-    """
+def _create_user_session(user_id: int) -> str:
     token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
-    _user_sessions[token] = {
-        "user_id": user_id,
-        "created_at": time.time(),
-        "csrf": csrf_token,
-    }
-    return token, csrf_token
+    _user_sessions[token] = {"user_id": user_id, "created_at": time.time()}
+    return token
 
 def _valid_user_session(request: Request) -> bool:
     token = request.cookies.get("cianet_user_session")
@@ -257,41 +243,6 @@ def require_user_auth(request: Request) -> int:
     return uid
 
 
-# PATCH (PATCH-4-WEBPANEL WP-HIGH-4): user-side CSRF double-submit cookie.
-# Same pattern as admin `require_csrf` but keyed on cianet_user_session /
-# cianet_user_csrf_token cookies. State-changing user endpoints should add
-# `_csrf: None = Depends(require_user_csrf)` to their signature.
-def require_user_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
-    # Validate user session first so 401 takes precedence over 403 for
-    # unauthenticated requests.
-    uid = _get_user_id_from_session(request)
-    if uid is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized — user login required",
-        )
-    csrf_cookie = request.cookies.get("cianet_user_csrf_token")
-    if not csrf_cookie:
-        # If user session cookie is present but CSRF cookie is missing, force
-        # re-login to obtain a fresh CSRF token (drops legacy/bypass path).
-        if request.cookies.get("cianet_user_session"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="CSRF token missing — refresh the page",
-            )
-        # No user session cookie at all — unreachable (401'd above).
-        return True
-    token = request.cookies.get("cianet_user_session")
-    s = _user_sessions.get(token)
-    expected = s.get("csrf") if s else None
-    if not expected or not x_csrf_token or x_csrf_token != expected:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="CSRF token invalid — refresh the page",
-        )
-    return True
-
-
 def require_auth(request: Request):
     if not _valid_session(request):
         raise HTTPException(
@@ -316,26 +267,11 @@ def require_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized — login required",
         )
-    # PATCH (PATCH-4-WEBPANEL WP-HIGH-1): قبلاً اگه cianet_csrf_token cookie
-    # غایب یا خالی بود، بدون چک CSRF اجازه‌ی عبور داده می‌شد که از طریق
-    # subdomain-shadowing (تعیین کوکیِ خالی روی parent domain) قابل دور زدن
-    # بود. حالا: فقط در صورتی که NEITHER cianet_csrf_token NEITHER
-    # cianet_panel_session cookie وجود داشته باشد (یعنی واقعاً هیچ session‌ای
-    # نیست)، allow می‌دهیم — که در عمل unreachable است چون _valid_session_with_csrf
-    # بالاتر برای این حالت 401 می‌دهد. اگه session cookie هست ولی CSRF cookie
-    # نیست، 403 برمی‌گردونیم تا کاربر مجبور بشه دوباره login کنه و CSRF token
-    # بگیره.
+    # Backward-compat: اگه cianet_csrf_token cookie وجود نداره (legacy
+    # session قبل از پچ)، اجازه عبور بده تا migration تدریجی انجام بشه.
     csrf_cookie = request.cookies.get("cianet_csrf_token")
     if not csrf_cookie:
-        if request.cookies.get("cianet_panel_session"):
-            # Session cookie present but CSRF cookie missing — force re-login
-            # to obtain a fresh CSRF token (drops legacy/bypass path).
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="CSRF token missing — refresh the page",
-            )
-        # No session cookie at all (legacy migration safety net; in practice
-        # unreachable because _valid_session_with_csrf already 401'd above).
+        # Legacy session — no CSRF cookie yet, allow through
         return True
     if not x_csrf_token or x_csrf_token != expected_csrf:
         raise HTTPException(
@@ -438,44 +374,20 @@ class WalletPayRequest(BaseModel):
 
 
 # ─── FastAPI app ─────────────────────────────────────────────────────
-# PATCH (PATCH-4-WEBPANEL WP-MED-10): قبلاً /api/docs و /api/redoc به‌صورت
-# عمومی بدون auth در دسترس بودند که یه attacker می‌تونست کل API surface رو
-# map کنه. حالا: با env var `PANEL_DOCS_ENABLED=0` در production غیرفعال
-# می‌شن (هم docs_url، هم redoc_url، هم openapi_url).
-_PANEL_DOCS_ENABLED = os.environ.get("PANEL_DOCS_ENABLED", "1").strip() not in ("0", "false", "False", "no", "NO")
 app = FastAPI(
     title="CiaNet Web Panel API",
     description="Backend REST API for the CiaNet selfbot management panel",
     version="1.0.0",
-    docs_url="/api/docs" if _PANEL_DOCS_ENABLED else None,
-    redoc_url="/api/redoc" if _PANEL_DOCS_ENABLED else None,
-    openapi_url="/openapi.json" if _PANEL_DOCS_ENABLED else None,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
 )
-
-# PATCH (PATCH-4-WEBPANEL WP-MED-7): CORS validation.
-# قبلاً همیشه allow_credentials=True و allow_headers=["*"] بود — اگه
-# اپراتور PANEL_CORS_ORIGINS=* تنظیم می‌کرد، Starlette اصلِ request رو در
-# Access-Control-Allow-Origin بازتاب می‌داد ولی Credentials: true هم می‌فرستاد
-# که یه footgun معروف است (هر سایت می‌تونه با cookie قربانی به panel ریکوئست
-# بزنه). حالا: اگه "*" در origins باشه، credentials رو False می‌کنیم؛ در غیر
-# این صورت credentials=True با allow_headers محدود.
-_CORS_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS if o.strip()]
-_CORS_HAS_WILDCARD = "*" in _CORS_ORIGINS
-_CORS_ALLOW_CREDENTIALS = not _CORS_HAS_WILDCARD
-if _CORS_HAS_WILDCARD:
-    print(
-        "⚠️ [web_panel] PANEL_CORS_ORIGINS=* detected — disabling "
-        "allow_credentials to prevent credentialed CORS abuse. Set explicit "
-        "origins to enable credentials.",
-        flush=True,
-    )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_CORS_ORIGINS,
-    allow_credentials=_CORS_ALLOW_CREDENTIALS,
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-CSRF-Token"],
+    allow_headers=["*"],
 )
 
 
@@ -489,15 +401,6 @@ async def _startup():
               flush=True)
     print(f"   CORS origins: {ALLOWED_ORIGINS}", flush=True)
     print(f"   Data dir: {DATA_DIR}", flush=True)
-    # PATCH (PATCH-4-WEBPANEL WP-MED-10): notify docs exposure state.
-    if _PANEL_DOCS_ENABLED:
-        print("   📚 /api/docs + /api/redoc + /openapi.json are publicly exposed — "
-              "set PANEL_DOCS_ENABLED=0 in production.", flush=True)
-    else:
-        print("   🔒 API docs (Swagger/ReDoc/openapi.json) are disabled.", flush=True)
-    # PATCH (PATCH-4-WEBPANEL WP-HIGH-2): notify trusted proxies.
-    print(f"   Trusted proxies for X-Forwarded-For: {sorted(_PANEL_TRUSTED_PROXIES)}",
-          flush=True)
 
 
 @app.exception_handler(Exception)
@@ -533,32 +436,11 @@ _login_blocks: Dict[str, float] = {}  # ip → block_until
 
 
 def _get_client_ip(request: Request) -> str:
-    """Extract client IP, only trusting X-Forwarded-For from a trusted proxy.
-
-    PATCH (PATCH-4-WEBPANEL WP-HIGH-2): قبلاً اولین مقدار X-Forwarded-For رو
-    بدون اعتبارسنجی برمی‌گردوندیم — این مقدار قابل‌جعل توسط کلاینت است و
-    مهاجم می‌تونست با ارسال XFFهای متفاوت، rate-limit (5 تلاش/۱۵ دقیقه)
-    رو دور بزنه و پسورد ادمین/کد لایسنس رو brute-force کنه. حالا: فقط اگه
-    request مستقیماً از یک trusted proxy (localhost یا PANEL_TRUSTED_PROXIES)
-    اومده باشه، XFF رو قبول می‌کنیم و از بین entryهای آن، rightmost non-trusted
-    hop (یعنی IP واقعی کلاینت که nginx در آخر اضافه می‌کنه) رو برمی‌گردونیم.
-    در غیر این صورت از request.client.host استفاده می‌کنیم.
-    """
-    direct_ip = request.client.host if request.client else "unknown"
-    if direct_ip not in _PANEL_TRUSTED_PROXIES:
-        # درخواست مستقیم از یک non-proxy — XFF رو نادیده می‌گیریم.
-        return direct_ip
+    """Extract client IP, considering X-Forwarded-For (nginx)."""
     fwd = request.headers.get("x-forwarded-for")
-    if not fwd:
-        return direct_ip
-    parts = [p.strip() for p in fwd.split(",") if p.strip()]
-    # از انتها به ابتدا حرکت کن و اولین IP که trusted proxy نیست رو برگردون
-    # (این IP واقعیِ کلاینت است که توسط nginx در انتهای chain اضافه شده).
-    for ip in reversed(parts):
-        if ip not in _PANEL_TRUSTED_PROXIES:
-            return ip
-    # همه‌ی entryها trusted proxy بودن — به fallback برمی‌گردیم.
-    return parts[-1] if parts else direct_ip
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _check_login_rate_limit(ip: str) -> tuple:
@@ -670,32 +552,36 @@ async def dashboard(request: Request, _: None = Depends(require_auth)):
             open_tickets = c.execute(
                 "SELECT COUNT(*) FROM tickets WHERE status='open'"
             ).fetchone()[0]
-            # PATCH (v2.1.5): table‌های saas.db به این شکل هستند:
-            #   purchases (amount, status, approved_at, created_at)
-            #   tickets (status: open/closed)
-            # قبلاً amount_toman و paid_at استفاده می‌شد که وجود ندارن.
-            # MRR rough estimate: sum از همه‌ی purchases با status='approved'
+            # PATCH (TEST-G9-ANALYTICS FIX-A): جدولِ saas.db واقعاً `payments`
+            # است (نه `purchases` که فقط تو bot_data.db وجود داره). ستون‌ها:
+            #   payments (amount, status, reviewed_at, created_at)
+            # قبلاً `purchases.approved_at` استفاده می‌شد که در saas.db وجود
+            # نداشت → هر بار `/api/dashboard` با OperationalError: no such
+            # table: purchases می‌افتاد و کل داشبورد از کار می‌افتاد.
+            # MRR rough estimate: sum از همه‌ی payments با status='approved'
             mrr_row = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases WHERE status='approved'"
+                "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='approved'"
             ).fetchone()
             mrr = mrr_row[0] if mrr_row else 0
             # revenue 30d
             rev_30d = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases "
-                "WHERE status='approved' AND (approved_at IS NOT NULL AND approved_at >= date('now','-30 days'))"
+                "SELECT COALESCE(SUM(amount),0) FROM payments "
+                "WHERE status='approved' AND (reviewed_at IS NOT NULL AND reviewed_at >= date('now','-30 days'))"
             ).fetchone()[0]
             # 30-day chart (simple daily revenue)
             daily_rev = c.execute(
-                "SELECT date(approved_at) as d, SUM(amount) as v FROM purchases "
-                "WHERE status='approved' AND approved_at IS NOT NULL "
-                "AND approved_at >= date('now','-30 days') "
-                "GROUP BY date(approved_at) ORDER BY d"
+                "SELECT date(reviewed_at) as d, SUM(amount) as v FROM payments "
+                "WHERE status='approved' AND reviewed_at IS NOT NULL "
+                "AND reviewed_at >= date('now','-30 days') "
+                "GROUP BY date(reviewed_at) ORDER BY d"
             ).fetchall()
-    except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak DB exception details
-        # (schema/table names) to client — log server-side only.
+    except sqlite3.OperationalError as e:
+        # PATCH (TEST-G9-ANALYTICS FIX-A): don't leak DB schema to client
         print(f"❌ [dashboard] DB error: {type(e).__name__}: {e}")
-        return {"error": "خطا در بارگذاری داشبورد — با پشتیبانی تماس بگیرید."}
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
+    except Exception as e:
+        print(f"❌ [dashboard] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای سمت سرور — با پشتیبانی تماس بگیرید.")
 
     return {
         "accounts": {
@@ -843,26 +729,6 @@ async def user_update(user_id: int, update: UserUpdate, request: Request, _: Non
             if update.reseller_id is not None:
                 c.execute("UPDATE users SET reseller_id=? WHERE user_id=?", (update.reseller_id, user_id))
             c.commit()
-        # PATCH (PATCH-10-CLEANUP WP-AUDIT-14): audit role/reseller_id
-        # changes — these are privilege-escalation vectors (USER → ADMIN,
-        # re-assigning a user to a different reseller). Log the actor
-        # (system admin), the target user, and the new values for forensic
-        # review. Use `m.ADMIN_ID` as the actor since these endpoints are
-        # admin-only (gated by require_csrf + panel admin auth).
-        try:
-            _role_part = f" role={update.role}" if update.role else ""
-            _reseller_part = (f" reseller_id={update.reseller_id}"
-                              if update.reseller_id is not None else "")
-            with m._conn() as c:
-                c.execute(
-                    "INSERT INTO logs (actor_id, action, details, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (m.ADMIN_ID, "user_update_web",
-                     f"user={user_id}{_role_part}{_reseller_part}",
-                     m._now()),
-                )
-        except Exception:
-            pass
         return {"ok": True}
     except HTTPException:
         raise
@@ -1074,20 +940,6 @@ async def account_disable(tag: str, request: Request, _: None = Depends(require_
             loop.create_task(m.ensure_stopped(tag, "web_panel.disable"))
     except Exception:
         pass
-    # PATCH (PATCH-10-CLEANUP WP-AUDIT-14): audit account_disable —
-    # records the admin actor and the targeted tag so mass-disables
-    # (e.g., a compromised admin) are visible in the audit trail.
-    try:
-        with m._conn() as c:
-            c.execute(
-                "INSERT INTO logs (actor_id, action, details, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (m.ADMIN_ID, "account_disable_web",
-                 f"tag={tag} actor={m.ADMIN_ID}",
-                 m._now()),
-            )
-    except Exception:
-        pass
     return {"ok": True}
 
 
@@ -1111,12 +963,7 @@ async def account_login_guard(tag: str, request: Request, _: None = Depends(requ
     if tag not in cfg:
         raise HTTPException(404, "Account not found")
     body = await request.json()
-    # PATCH (PATCH-4-WEBPANEL WP-MED-6): قبلاً bool(body.get("enabled")) استفاده
-    # می‌شد که برای رشته‌های غیرخالی (مثل "false" یا "0" یا "no") به True
-    # ارزیابی می‌شد و باعث می‌شد OWNER به‌اشتباه login_guard را enable کنه و
-    # خودش lock بشه. حالا: strict check با `is True` تا فقط JSON boolean واقعی
-    # پذیرفته بشه. هر مقدار دیگه (رشته، عدد، None) به‌عنوان False تفسیر می‌شه.
-    enabled = body.get("enabled") is True
+    enabled = bool(body.get("enabled", False))
     cfg[tag]["login_code_guard"] = enabled
     m.save_config(cfg)
     # Log to audit
@@ -1159,20 +1006,6 @@ async def account_delete(tag: str, request: Request, _: None = Depends(require_c
             os.remove(p)
         except OSError:
             pass
-    # PATCH (PATCH-10-CLEANUP WP-AUDIT-14): audit account_delete —
-    # destructive operation; record actor + tag so accidental or
-    # malicious mass-deletes are forensically traceable.
-    try:
-        with m._conn() as c:
-            c.execute(
-                "INSERT INTO logs (actor_id, action, details, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (m.ADMIN_ID, "account_delete_web",
-                 f"tag={tag} actor={m.ADMIN_ID}",
-                 m._now()),
-            )
-    except Exception:
-        pass
     return {"ok": True}
 
 
@@ -1198,22 +1031,6 @@ async def account_proxy_update(tag: str, update: ProxyUpdate, request: Request, 
             proxy_cfg["secret"] = update.proxy_secret
         cfg[tag]["proxy"] = proxy_cfg
     m.save_config(cfg)
-    # PATCH (PATCH-10-CLEANUP WP-AUDIT-14): audit account_proxy — proxy
-    # changes affect the egress IP for the account (potentially bypassing
-    # geo-restrictions or hiding the admin's activity). Record the actor
-    # and the tag; we do NOT log proxy credentials (would re-leak them).
-    try:
-        _proxy_summary = "cleared" if update.proxy_type is None else f"type={update.proxy_type}"
-        with m._conn() as c:
-            c.execute(
-                "INSERT INTO logs (actor_id, action, details, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (m.ADMIN_ID, "account_proxy_web",
-                 f"tag={tag} actor={m.ADMIN_ID} {_proxy_summary}",
-                 m._now()),
-            )
-    except Exception:
-        pass
     return {"ok": True}
 
 
@@ -1245,10 +1062,8 @@ async def finance_payments(
             ).fetchall()
             return {"items": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size}
     except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak exception details.
-        print(f"❌ [finance_payments] DB error: {type(e).__name__}: {e}")
-        return {"items": [], "total": 0, "page": page, "page_size": page_size,
-                "error": "خطا در بارگذاری پرداخت‌ها — با پشتیبانی تماس بگیرید."}
+        # اگر جدول purchases وجود نداشت
+        return {"items": [], "total": 0, "page": page, "page_size": page_size, "error": str(e)}
 
 
 @app.post("/api/finance/payments/{pay_id}/approve")
@@ -1264,21 +1079,6 @@ async def finance_approve(pay_id: int, request: Request, _: None = Depends(requi
             c.commit()
             if r.rowcount == 0:
                 raise HTTPException(404, "Payment not found")
-        # PATCH (PATCH-10-CLEANUP WP-AUDIT-14): audit payment_approve —
-        # money-flow event; record the admin actor and the payment_id so
-        # a rogue admin approving their own payments (or approving without
-        # receipt verification) leaves a forensic trail.
-        try:
-            with m._conn() as c:
-                c.execute(
-                    "INSERT INTO logs (actor_id, action, details, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (m.ADMIN_ID, "payment_approve_web",
-                     f"payment_id={pay_id} actor={m.ADMIN_ID}",
-                     m._now()),
-                )
-        except Exception:
-            pass
         return {"ok": True}
     except HTTPException:
         raise
@@ -1298,20 +1098,6 @@ async def finance_reject(pay_id: int, request: Request, _: None = Depends(requir
             c.commit()
             if r.rowcount == 0:
                 raise HTTPException(404, "Payment not found")
-        # PATCH (PATCH-10-CLEANUP WP-AUDIT-14): audit payment_reject —
-        # record the admin actor and the payment_id so a pattern of
-        # "reject competitor's payments, approve friend's" is visible.
-        try:
-            with m._conn() as c:
-                c.execute(
-                    "INSERT INTO logs (actor_id, action, details, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (m.ADMIN_ID, "payment_reject_web",
-                     f"payment_id={pay_id} actor={m.ADMIN_ID}",
-                     m._now()),
-                )
-        except Exception:
-            pass
         return {"ok": True}
     except HTTPException:
         raise
@@ -1327,30 +1113,36 @@ async def finance_stats(request: Request, _: None = Depends(require_auth)):
     m = _main()
     try:
         with m._conn() as c:
-            # PATCH (v2.1.5): amount (نه amount_toman)، approved_at (نه paid_at)
+            # PATCH (TEST-G9-ANALYTICS FIX-B): جدولِ واقعیِ saas.db `payments`
+            # است (نه `purchases` که فقط تو bot_data.db هست). ستونِ تاریخِ
+            # تایید `reviewed_at` نام دارد (نه `approved_at`). قبلاً هر فراخوانی
+            # با OperationalError: no such table: purchases می‌افتاد.
             mrr = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases WHERE status='approved'"
+                "SELECT COALESCE(SUM(amount),0) FROM payments WHERE status='approved'"
             ).fetchone()[0]
             rev_30d = c.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM purchases "
-                "WHERE status='approved' AND approved_at IS NOT NULL "
-                "AND approved_at >= date('now','-30 days')"
+                "SELECT COALESCE(SUM(amount),0) FROM payments "
+                "WHERE status='approved' AND reviewed_at IS NOT NULL "
+                "AND reviewed_at >= date('now','-30 days')"
             ).fetchone()[0]
             daily = c.execute(
-                "SELECT date(approved_at) as d, SUM(amount) as v FROM purchases "
-                "WHERE status='approved' AND approved_at IS NOT NULL "
-                "AND approved_at >= date('now','-30 days') "
-                "GROUP BY date(approved_at) ORDER BY d"
+                "SELECT date(reviewed_at) as d, SUM(amount) as v FROM payments "
+                "WHERE status='approved' AND reviewed_at IS NOT NULL "
+                "AND reviewed_at >= date('now','-30 days') "
+                "GROUP BY date(reviewed_at) ORDER BY d"
             ).fetchall()
             return {
                 "mrr_total_toman": mrr,
                 "revenue_30d_toman": rev_30d,
                 "daily": [{"date": r["d"], "amount": r["v"]} for r in daily],
             }
-    except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak exception details.
+    except sqlite3.OperationalError as e:
+        # PATCH (TEST-G9-ANALYTICS FIX-B): don't leak DB schema to client
         print(f"❌ [finance_stats] DB error: {type(e).__name__}: {e}")
-        return {"error": "خطا در محاسبه‌ی آمار مالی — با پشتیبانی تماس بگیرید."}
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
+    except Exception as e:
+        print(f"❌ [finance_stats] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای سمت سرور — با پشتیبانی تماس بگیرید.")
 
 
 # ─── Tickets ─────────────────────────────────────────────────────────
@@ -1381,10 +1173,7 @@ async def tickets_list(
             ).fetchall()
             return {"items": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size}
     except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak exception details.
-        print(f"❌ [tickets_list] DB error: {type(e).__name__}: {e}")
-        return {"items": [], "total": 0, "page": page, "page_size": page_size,
-                "error": "خطا در بارگذاری تیکت‌ها — با پشتیبانی تماس بگیرید."}
+        return {"items": [], "total": 0, "page": page, "page_size": page_size, "error": str(e)}
 
 
 @app.get("/api/tickets/{ticket_id}")
@@ -1449,6 +1238,10 @@ async def audit_log(
     _: None = Depends(require_auth),
 ):
     m = _main()
+    # PATCH (TEST-G9-ANALYTICS FIX-C): clamp page_size to prevent DoS
+    # (a client could pass page_size=10_000_000 to dump all rows at once).
+    page_size = max(1, min(int(page_size), 500))
+    page = max(1, int(page))
     where = []
     params = []
     if actor_id:
@@ -1458,7 +1251,7 @@ async def audit_log(
         where.append("action LIKE ?")
         params.append(f"%{action}%")
     where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-    offset = (max(1, page) - 1) * page_size
+    offset = (page - 1) * page_size
     try:
         with m._conn() as c:
             # جدول logs وجود نداشت → table info
@@ -1470,14 +1263,17 @@ async def audit_log(
                     f"SELECT * FROM logs {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
                     params + [page_size, offset],
                 ).fetchall()
-                return {"items": [dict(r) for r in rows], "total": total}
-            except sqlite3.OperationalError:
-                return {"items": [], "total": 0, "error": "logs table not found"}
+                return {"items": [dict(r) for r in rows], "total": total,
+                        "page": page, "page_size": page_size}
+            except sqlite3.OperationalError as e:
+                # PATCH (TEST-G9-ANALYTICS FIX-C): log server-side, generic msg
+                print(f"❌ [audit_log] OperationalError: {e}")
+                return {"items": [], "total": 0, "page": page, "page_size": page_size,
+                        "error": "logs table not found"}
     except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak exception details.
-        print(f"❌ [audit_log] DB error: {type(e).__name__}: {e}")
-        return {"items": [], "total": 0,
-                "error": "خطا در بارگذاری لاگ ممیزی — با پشتیبانی تماس بگیرید."}
+        print(f"❌ [audit_log] error: {type(e).__name__}: {e}")
+        # PATCH (TEST-G9-ANALYTICS FIX-C): don't leak DB details to client
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
 
 
 # ─── Version management ──────────────────────────────────────────────
@@ -1588,12 +1384,7 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak systemctl/subprocess
-        # errors (paths, sudo messages, env) to client.
-        print(f"❌ [version_rollback] restart failed: {type(e).__name__}: {e}")
-        return {"ok": True,
-                "warning": "Rollback اعمال شد ولی راه‌اندازی خودکار ناموفق بود — لطفاً سرویس را دستی restart کنید.",
-                "backup": backup.name}
+        return {"ok": True, "warning": f"Manual restart needed: {e}", "backup": backup.name}
     return {"ok": True, "backup": backup.name, "message": "Rollback applied, restarting"}
 
 
@@ -1710,85 +1501,28 @@ async def tools_api_creds_rotate(request: Request, _: None = Depends(require_csr
 # تا با session ادمین تداخل نداشته باشند. کاربر با کد لایسنس لاگین
 # می‌کند — فقط لایسنس‌های فعال‌شده (که user_id دارند) پذیرفته می‌شوند.
 
-# PATCH (PATCH-4-WEBPANEL WP-MED-5): rate-limiting برای user-side login.
-# قبلاً هیچ rate-limit نبود و ۵ پیغام خطای متمایز باعث license enumeration
-# می‌شد. حالا: ۵ تلاش ناموفق در ۱۵ دقیقه per IP → ۱۵ دقیقه block، و همه‌ی
-# پیغام‌های خطا به یک پیغام عمومی «کد لایسنس نامعتبر است» تبدیل می‌شوند.
-_USER_LOGIN_FAIL_WINDOW = 900   # 15 minutes
-_USER_LOGIN_FAIL_THRESHOLD = 5
-_USER_LOGIN_BLOCK_DURATION = 900  # 15 minutes block
-_user_login_failures: Dict[str, list] = {}  # ip → [timestamps]
-_user_login_blocks: Dict[str, float] = {}   # ip → block_until
-
-
-def _check_user_login_rate_limit(ip: str) -> tuple:
-    """Returns (allowed, retry_after_seconds)."""
-    now = time.time()
-    block_until = _user_login_blocks.get(ip)
-    if block_until and now < block_until:
-        return False, int(block_until - now)
-    if block_until and now >= block_until:
-        _user_login_blocks.pop(ip, None)
-        _user_login_failures.pop(ip, None)
-    failures = _user_login_failures.get(ip, [])
-    failures = [t for t in failures if now - t < _USER_LOGIN_FAIL_WINDOW]
-    _user_login_failures[ip] = failures
-    if len(failures) >= _USER_LOGIN_FAIL_THRESHOLD:
-        _user_login_blocks[ip] = now + _USER_LOGIN_BLOCK_DURATION
-        return False, _USER_LOGIN_BLOCK_DURATION
-    return True, 0
-
-
-def _record_user_login_failure(ip: str):
-    now = time.time()
-    failures = _user_login_failures.get(ip, [])
-    failures.append(now)
-    _user_login_failures[ip] = failures
-
-
-# Single generic error message — prevents license enumeration
-_USER_LOGIN_INVALID_MSG = "کد لایسنس نامعتبر است"
-
-
 @app.post("/api/user/login")
-async def user_license_login(req: LicenseLoginRequest, request: Request,
-                            response: Response):
+async def user_license_login(req: LicenseLoginRequest, response: Response):
     """ورود با کد لایسنس — فقط لایسنس‌های فعال‌شده قابل‌استفاده.
 
     اگر لایسنس قبلاً فعال‌شده (در جدول subscriptions با status='active'
     یا 'expired')، user_id صاحب‌اش پیدا می‌شود و session ساخته می‌شود.
     اگر لایسنس هنوز فعال‌نشده (used_count=0) یا منقضی شده/is_active=0،
     ورود رد می‌شود.
-
-    PATCH (PATCH-4-WEBPANEL WP-MED-5): قبلاً ۵ پیغام خطای متمایز برمی‌گردوند
-    که امکان license enumeration می‌داد. حالا همه‌ی حالت‌های خطا یک پیغام عمومی
-    «کد لایسنس نامعتبر است» برمی‌گردونن و rate-limit (۵ تلاش/۱۵ دقیقه) اعمال
-    می‌شه.
     """
-    # Rate-limit first (before any DB lookup, before any error code path).
-    client_ip = _get_client_ip(request)
-    allowed, retry_after = _check_user_login_rate_limit(client_ip)
-    if not allowed:
-        raise HTTPException(
-            429, f"تلاش‌های ناموفق زیاد — بعد از {retry_after // 60} دقیقه دوباره امتحان کنید."
-        )
     m = _main()
     code = (req.license_code or "").strip().upper()
     if not code:
-        _record_user_login_failure(client_ip)
-        raise HTTPException(400, _USER_LOGIN_INVALID_MSG)
+        raise HTTPException(400, "کد لایسنس خالی است")
     with m._conn() as c:
         lic = c.execute("SELECT * FROM licenses WHERE code = ?", (code,)).fetchone()
         if lic is None:
-            _record_user_login_failure(client_ip)
-            raise HTTPException(404, _USER_LOGIN_INVALID_MSG)
+            raise HTTPException(404, "چنین لایسنسی وجود ندارد")
         lic = dict(lic)
         if not lic.get("is_active"):
-            _record_user_login_failure(client_ip)
-            raise HTTPException(403, _USER_LOGIN_INVALID_MSG)
+            raise HTTPException(403, "این لایسنس غیرفعال است")
         if lic.get("used_count", 0) < 1:
-            _record_user_login_failure(client_ip)
-            raise HTTPException(403, _USER_LOGIN_INVALID_MSG)
+            raise HTTPException(403, "این لایسنس هنوز فعال نشده — اول در ربات /start بزن و فعالش کن")
         # user_id از طریق subscriptions پیدا می‌شود (آخرین اشتراکِ ساخته‌شده با این license_id)
         sub = c.execute(
             "SELECT user_id FROM subscriptions WHERE license_id = ? "
@@ -1796,13 +1530,9 @@ async def user_license_login(req: LicenseLoginRequest, request: Request,
             (lic["id"],),
         ).fetchone()
         if sub is None:
-            _record_user_login_failure(client_ip)
-            raise HTTPException(403, _USER_LOGIN_INVALID_MSG)
+            raise HTTPException(403, "این لایسنس فعال شده ولی کاربرش پیدا نشد — با پشتیبانی تماس بگیر")
         user_id = int(sub["user_id"])
-    # Successful login — clear any prior failure counters for this IP.
-    _user_login_failures.pop(client_ip, None)
-    _user_login_blocks.pop(client_ip, None)
-    token, csrf_token = _create_user_session(user_id)
+    token = _create_user_session(user_id)
     response.set_cookie(
         key="cianet_user_session",
         value=token,
@@ -1811,17 +1541,6 @@ async def user_license_login(req: LicenseLoginRequest, request: Request,
         max_age=USER_SESSION_TTL_SEC,
         secure=True,  # در production روی True
     )
-    # PATCH (PATCH-4-WEBPANEL WP-HIGH-4): user-side CSRF cookie — JS-readable
-    # (httponly=False) so the user frontend can read it and send it as
-    # X-CSRF-Token header on state-changing requests.
-    response.set_cookie(
-        key="cianet_user_csrf_token",
-        value=csrf_token,
-        httponly=False,
-        samesite="lax",
-        max_age=USER_SESSION_TTL_SEC,
-        secure=True,
-    )
     return {"ok": True, "user_id": user_id}
 
 
@@ -1829,8 +1548,6 @@ async def user_license_login(req: LicenseLoginRequest, request: Request,
 async def user_logout(request: Request, response: Response):
     _invalidate_user_session(request)
     response.delete_cookie("cianet_user_session")
-    # PATCH (PATCH-4-WEBPANEL WP-HIGH-4): also drop the user CSRF cookie.
-    response.delete_cookie("cianet_user_csrf_token")
     return {"ok": True}
 
 
@@ -1911,8 +1628,7 @@ async def user_wallet_transactions(request: Request, limit: int = 50):
 
 
 @app.post("/api/user/pay-from-wallet")
-async def user_pay_from_wallet(req: WalletPayRequest, request: Request,
-                              _csrf: None = Depends(require_user_csrf)):
+async def user_pay_from_wallet(req: WalletPayRequest, request: Request):
     """پرداخت از کیف پول — برای تکمیل سفارش.
 
     این endpoint پول را از کیف پول کاربر کم می‌کند و در audit log ثبت
@@ -1967,17 +1683,8 @@ async def user_list_orders(request: Request):
     }
 
 @app.post("/api/user/orders/{order_id}/pay-wallet")
-async def user_pay_order_with_wallet(order_id: int, request: Request,
-                                     _csrf: None = Depends(require_user_csrf)):
-    """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه.
-
-    PATCH (PATCH-4-WEBPANEL WP-HIGH-3): قبلاً wallet_pay_from_balance،
-    UPDATE orders و create_subscription در سه تراکنشِ جدا اجرا می‌شدند که
-    race condition داشت: اگر دو request هم‌زمان می‌زدند یا UPDATE orders
-    (با rowcount=0) fail می‌شد، debit کیف پول بدون refund می‌موند. حالا
-    هر سه عملیات در یک `_conn_immediate` اتمیک اجرا می‌شوند — اگه UPDATE
-    orders با rowcount=0 fail بشه، rollback خودکار debit رو هم برگشت می‌ده.
-    """
+async def user_pay_order_with_wallet(order_id: int, request: Request):
+    """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه."""
     uid = require_user_auth(request)
     m = _main()
     order = m.get_order(order_id)
@@ -1986,115 +1693,40 @@ async def user_pay_order_with_wallet(order_id: int, request: Request,
     if order["status"] != "pending":
         raise HTTPException(400, "این فاکتور قابل پرداخت نیست")
     amount = int(order["amount_toman"])
-    if amount <= 0:
-        raise HTTPException(400, "مبلغ فاکتور نامعتبر است")
-    plan_name = order["plan"]
-    # v2.10.0: استفاده از pricing.duration_days
-    days = 30
+    bal = m.get_wallet_balance(uid)
+    if bal < amount:
+        raise HTTPException(400, f"موجودی کافی نیست — موجودی: {bal} Toman")
+    pay_result = m.wallet_pay_from_balance(uid, amount, ref=f"order:{order['order_no']}")
+    if not pay_result.get("ok"):
+        raise HTTPException(500, f"خطا در پرداخت: {pay_result.get('error')}")
+    # Mark order as paid + create subscription
     try:
-        _pricing = m.get_pricing(plan_name)
-        if _pricing and _pricing.get("duration_days"):
-            days = int(_pricing["duration_days"])
-    except Exception as _pe:
-        print(f"⚠️ [user_pay_order_with_wallet] pricing lookup failed: {_pe}", flush=True)
-    order_no = order["order_no"]
-    tx_ref = f"order:{order_no}"
-
-    # NOTE: All three operations (debit wallet, mark order paid, create
-    # subscription) run inside a single BEGIN IMMEDIATE transaction. If any
-    # step raises, the whole transaction rolls back — no orphan debit, no
-    # paid-order-without-subscription.
-    try:
+        import re as _re
+        plan_name = order["plan"]
+        # v2.10.0: استفاده از pricing.duration_days (قبلاً regex بود)
+        days = 30
+        try:
+            _pricing = m.get_pricing(plan_name)
+            if _pricing and _pricing.get("duration_days"):
+                days = int(_pricing["duration_days"])
+        except Exception:
+            pass
         with m._conn_immediate() as c:
-            # (A) — Debit wallet (inlined from m.wallet_pay_from_balance).
-            row = c.execute(
-                "SELECT wallet_balance FROM users WHERE user_id = ?", (uid,)
-            ).fetchone()
-            if row is None:
-                raise HTTPException(404, "کاربر پیدا نشد")
-            current_bal = int(row["wallet_balance"] or 0)
-            if current_bal < amount:
-                raise HTTPException(
-                    400, f"موجودی کافی نیست — موجودی: {current_bal} Toman"
-                )
-            new_bal = current_bal - amount
-            c.execute(
-                "UPDATE users SET wallet_balance = ? WHERE user_id = ?",
-                (new_bal, uid),
-            )
-            cur_tx = c.execute(
-                "INSERT INTO wallet_transactions "
-                "(user_id, amount, balance_after, type, ref, reason, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (uid, -amount, new_bal, "payment", tx_ref, "خرج از کیف پول",
-                 uid, m._now()),
-            )
-            tx_id = cur_tx.lastrowid
-
-            # (B) — Mark order paid (atomic — WHERE status='pending').
-            cur_order = c.execute(
+            # v2.10.0: atomic — WHERE status='pending' برای جلوگیری از double-pay
+            cur = c.execute(
                 "UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? "
                 "WHERE id = ? AND status = 'pending'",
                 (m._now(), order_id),
             )
-            if cur_order.rowcount == 0:
-                # Patch spec: refund the wallet debit in the same transaction.
-                # Raising here causes the BEGIN IMMEDIATE block to rollback,
-                # which atomically reverts the UPDATE wallet + INSERT
-                # wallet_transactions above — no manual refund needed.
+            if cur.rowcount == 0:
                 raise HTTPException(400, "این فاکتور قبلاً پرداخت شده یا لغو شده")
 
-            # (C) — Create subscription (inlined from m.create_subscription).
-            existing = c.execute(
-                "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' "
-                "ORDER BY expire_date DESC LIMIT 1",
-                (uid,),
-            ).fetchone()
-            from datetime import datetime, timedelta, timezone
-            now_utc = datetime.now(timezone.utc)
-            if existing:
-                try:
-                    existing_expire = m._parse_date(existing["expire_date"])
-                except Exception:
-                    existing_expire = now_utc
-                base = existing_expire if existing_expire > now_utc else now_utc
-            else:
-                base = now_utc
-            start_str = m._format_date(now_utc)
-            expire_str = m._format_date(base + timedelta(days=days))
-            if existing:
-                cur_sup = c.execute(
-                    "UPDATE subscriptions SET status = 'superseded' "
-                    "WHERE id = ? AND status = 'active'",
-                    (existing["id"],),
-                )
-                if cur_sup.rowcount == 0:
-                    # Concurrent supersede — abort (whole tx rolls back).
-                    raise HTTPException(409, "تداخل در تمدید اشتراک — دوباره تلاش کنید")
-            c.execute(
-                "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, "
-                "license_id, selfbot_tag, created_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
-                (uid, plan_name, start_str, expire_str, None, None, m._now()),
-            )
-
-        # Outside the transaction: best-effort audit log (don't fail the
-        # request if log_action itself throws).
-        try:
-            m.log_action(uid, "wallet_payment",
-                         f"amount={amount}, ref={tx_ref}, new_balance={new_bal}")
-            m.log_action(uid, "create_subscription",
-                         f"plan={plan_name}, expire={expire_str}")
-        except Exception as _le:
-            print(f"⚠️ [user_pay_order_with_wallet] audit log failed: {_le}", flush=True)
-
-        return {"ok": True, "balance": new_bal, "tx_id": tx_id, "subscription_days": days}
-    except HTTPException:
-        raise
+        m.create_subscription(uid, plan_name, days)
+        return {"ok": True, "balance": pay_result["balance"], "subscription_days": days}
     except Exception as e:
         # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
         print(f"❌ [endpoint] Invoice confirm error: {type(e).__name__}: {e}")
         raise HTTPException(500, "خطا در تأیید فاکتور — با پشتیبانی تماس بگیرید.")
-
 
 # v2.9.0: Reseller dashboard
 @app.get("/api/user/reseller-dashboard")
@@ -2213,7 +1845,38 @@ async def admin_debit_user_wallet(user_id: int, req: WalletDebitRequest,
 # ─── Health check (public) ───────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "time": time.time()}
+    # PATCH (TEST-G9-ANALYTICS FIX-F): قبلاً فقط {"status":"ok","time":...}
+    # برمی‌گرداند — بی‌توجه به وضعیت واقعیِ DB یا ربات‌های در حال اجرا.
+    # حالا DB ping + نسخه + uptime + تعداد ربات‌های فعال رو گزارش می‌دهد.
+    # public می‌ماند (بدون auth) ولی اطلاعات حساسی نشون داده نمیشه.
+    info = {
+        "status": "ok",
+        "time": time.time(),
+        "uptime_seconds": round(time.time() - _PANEL_START_TIME, 1),
+    }
+    try:
+        m = _main()
+        with m._conn() as c:
+            c.execute("SELECT 1").fetchone()  # DB ping
+        info["db"] = "ok"
+        info["version"] = getattr(m, "BUILD_VERSION", None)
+        try:
+            cfg = m.load_config() or {}
+            info["accounts_total"] = len(cfg)
+            info["accounts_enabled"] = sum(
+                1 for a in cfg.values()
+                if isinstance(a, dict) and not a.get("disabled")
+            )
+            info["accounts_running"] = len(getattr(m, "ACCOUNTS", {}))
+        except Exception:
+            # config load failure shouldn't fail /api/health entirely
+            info["accounts_total"] = None
+            info["accounts_running"] = None
+    except Exception as e:
+        info["status"] = "degraded"
+        info["db"] = "error"
+        print(f"❌ [health] DB ping failed: {type(e).__name__}: {e}")
+    return info
 
 
 # v2.9.4: محاسبه‌ی روزهای باقی‌مانده از اشتراک
@@ -2318,19 +1981,37 @@ async def analytics_audit_log(request: Request, limit: int = 100, offset: int = 
                               action: str = None, _: None = Depends(require_auth)):
     """لاگ فعالیت‌ها با فیلتر و صفحه‌بندی."""
     m = _main()
-    with m._conn() as c:
-        if action:
-            rows = c.execute(
-                "SELECT * FROM logs WHERE action = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-                (action, limit, offset)
-            ).fetchall()
-            total = c.execute("SELECT COUNT(*) FROM logs WHERE action = ?", (action,)).fetchone()[0]
-        else:
-            rows = c.execute(
-                "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset)
-            ).fetchall()
-            total = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+    # PATCH (TEST-G9-ANALYTICS FIX-D): clamp limit/offset to prevent DoS
+    # (negative limit would mean "no limit" in SQLite — return ALL rows).
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    try:
+        with m._conn() as c:
+            # PATCH (TEST-G9-ANALYTICS FIX-D): use `action LIKE ?` (substring
+            # match) for consistency with `/api/audit-log` (which uses LIKE).
+            # Previously `action = ?` meant exact match — a UI typo or partial
+            # action name returned 0 results, surprising the user.
+            if action:
+                rows = c.execute(
+                    "SELECT * FROM logs WHERE action LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (f"%{action}%", limit, offset)
+                ).fetchall()
+                total = c.execute("SELECT COUNT(*) FROM logs WHERE action LIKE ?",
+                                  (f"%{action}%",)).fetchone()[0]
+            else:
+                rows = c.execute(
+                    "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset)
+                ).fetchall()
+                total = c.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+    except sqlite3.OperationalError as e:
+        # PATCH (TEST-G9-ANALYTICS FIX-D): defensive like `/api/audit-log`
+        print(f"❌ [analytics_audit_log] OperationalError: {e}")
+        return {"logs": [], "total": 0, "limit": limit, "offset": offset,
+                "error": "logs table not found"}
+    except Exception as e:
+        print(f"❌ [analytics_audit_log] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
     return {
         "logs": [
             {
@@ -2348,25 +2029,85 @@ async def analytics_audit_log(request: Request, limit: int = 100, offset: int = 
     }
 
 @app.get("/api/analytics/export")
-async def analytics_export(request: Request, _: None = Depends(require_auth)):
-    """خروجی CSV از درآمد."""
+async def analytics_export(request: Request, format: str = "csv",
+                           _: None = Depends(require_auth)):
+    """خروجی CSV یا JSON از درآمد.
+
+    PATCH (TEST-G9-ANALYTICS FIX-E): قبلاً فقط CSV خروجی می‌داد. حالا
+    پارامتر `format=csv|json` رو هم پشتیبانی می‌کنه. JSON شامل overview
+    stats هم هست (MRR, total_users, active_subscriptions, daily_revenue)
+    تا با توضیحات task «Export CSV/JSON of stats» هماهنگ باشه.
+    """
     import csv, io
-    from fastapi.responses import StreamingResponse
+    import json as _json
+    from fastapi.responses import StreamingResponse, JSONResponse
     m = _main()
-    with m._conn() as c:
-        rows = c.execute(
-            "SELECT order_no, user_id, plan, amount_toman, amount_usdt, status, "
-            "discount_code, discount_percent, pay_method, created_at, paid_at "
-            "FROM orders ORDER BY id DESC LIMIT 10000"
-        ).fetchall()
+    fmt = (format or "csv").strip().lower()
+    if fmt not in ("csv", "json"):
+        raise HTTPException(400, "format باید csv یا json باشد.")
+    try:
+        with m._conn() as c:
+            rows = c.execute(
+                "SELECT order_no, user_id, plan, amount_toman, amount_usdt, status, "
+                "discount_code, discount_percent, pay_method, created_at, paid_at "
+                "FROM orders ORDER BY id DESC LIMIT 10000"
+            ).fetchall()
+            # PATCH (TEST-G9-ANALYTICS FIX-E): also gather overview stats for JSON
+            if fmt == "json":
+                mrr_row = c.execute(
+                    "SELECT COALESCE(SUM(amount_toman),0) FROM orders WHERE status='paid' "
+                    "AND paid_at >= date('now','-30 days')"
+                ).fetchone()
+                total_revenue = c.execute(
+                    "SELECT COALESCE(SUM(amount_toman),0) FROM orders WHERE status='paid'"
+                ).fetchone()[0]
+                total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                active_subs = c.execute(
+                    "SELECT COUNT(*) FROM subscriptions WHERE status='active'"
+                ).fetchone()[0]
+                daily_rev = c.execute(
+                    "SELECT date(paid_at) AS day, SUM(amount_toman) AS rev, COUNT(*) AS cnt "
+                    "FROM orders WHERE status='paid' AND paid_at >= date('now','-30 days') "
+                    "GROUP BY date(paid_at) ORDER BY day"
+                ).fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"❌ [analytics_export] OperationalError: {e}")
+        raise HTTPException(500, "خطای پایگاه داده — با پشتیبانی تماس بگیرید.")
+    except Exception as e:
+        print(f"❌ [analytics_export] error: {type(e).__name__}: {e}")
+        raise HTTPException(500, "خطای سمت سرور — با پشتیبانی تماس بگیرید.")
+
+    orders = [dict(r) for r in rows]
+
+    if fmt == "json":
+        payload = {
+            "generated_at": time.time(),
+            "overview": {
+                "mrr_30d_toman": int(mrr_row[0] if mrr_row else 0),
+                "total_revenue_toman": int(total_revenue),
+                "total_users": total_users,
+                "active_subscriptions": active_subs,
+                "daily_revenue": [
+                    {"day": r["day"], "revenue": int(r["rev"] or 0), "orders": int(r["cnt"] or 0)}
+                    for r in daily_rev
+                ],
+            },
+            "orders": orders,
+        }
+        return JSONResponse(
+            payload,
+            headers={"Content-Disposition": "attachment; filename=cianet_stats.json"},
+        )
+
+    # CSV path (default)
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["order_no", "user_id", "plan", "amount_toman", "amount_usdt",
                      "status", "discount_code", "discount_percent", "pay_method",
                      "created_at", "paid_at"])
-    for r in rows:
+    for r in orders:
         safe_row = []
-        for val in r:
+        for val in r.values():
             s = str(val) if val is not None else ""
             if s.startswith(("=", "+", "-", "@")):
                 s = "'" + s
@@ -2387,8 +2128,7 @@ async def analytics_export(request: Request, _: None = Depends(require_auth)):
 # ─── v2.9.8: Phase 4 — Iranian payment gateway (Zarinpal) ──────────────
 
 @app.post("/api/payment/zarinpal/create/{order_id}")
-async def zarinpal_create_payment(order_id: int, request: Request,
-                                  _csrf: None = Depends(require_user_csrf)):
+async def zarinpal_create_payment(order_id: int, request: Request):
     """ساخت پرداخت Zarinpal — redirect URL برمی‌گردونه."""
     uid = require_user_auth(request)
     m = _main()
@@ -2552,7 +2292,7 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
     return _payment_failed_html(verify_result.get("error", "verify_failed"))
 
 @app.post("/api/user/auto-renew")
-async def toggle_auto_renew(request: Request, _csrf: None = Depends(require_user_csrf)):
+async def toggle_auto_renew(request: Request):
     """فعال/غیرفعال‌کردن تمدید خودکار از کیف پول.
     v2.12.10: این endpoint فقط فلگ auto_renew_enabled رو toggle می‌کنه —
     خودِ تمدید در _expiry_loopِ ربات (ساعتی) انجام می‌شه. قبلاً این endpoint
@@ -2599,7 +2339,7 @@ async def list_sched_msgs(request: Request):
     return {"messages": msgs}
 
 @app.post("/api/user/scheduled-messages")
-async def create_sched_msg(request: Request, _csrf: None = Depends(require_user_csrf)):
+async def create_sched_msg(request: Request):
     """ساخت پیام زمان‌بندی‌شده."""
     from pydantic import BaseModel
     class SchedMsgReq(BaseModel):
@@ -2615,8 +2355,7 @@ async def create_sched_msg(request: Request, _csrf: None = Depends(require_user_
     return result
 
 @app.delete("/api/user/scheduled-messages/{msg_id}")
-async def delete_sched_msg(msg_id: int, request: Request,
-                          _csrf: None = Depends(require_user_csrf)):
+async def delete_sched_msg(msg_id: int, request: Request):
     """حذف پیام زمان‌بندی‌شده."""
     uid = require_user_auth(request)
     m = _main()
@@ -2631,7 +2370,7 @@ async def list_auto_replies_api(request: Request):
     return {"replies": m.list_auto_replies(uid)}
 
 @app.post("/api/user/auto-replies")
-async def create_auto_reply_api(request: Request, _csrf: None = Depends(require_user_csrf)):
+async def create_auto_reply_api(request: Request):
     """ساخت auto-reply."""
     uid = require_user_auth(request)
     m = _main()
@@ -2639,8 +2378,7 @@ async def create_auto_reply_api(request: Request, _csrf: None = Depends(require_
     return m.create_auto_reply(uid, req["tag"], req["keyword"], req["reply"])
 
 @app.delete("/api/user/auto-replies/{reply_id}")
-async def delete_auto_reply_api(reply_id: int, request: Request,
-                              _csrf: None = Depends(require_user_csrf)):
+async def delete_auto_reply_api(reply_id: int, request: Request):
     """حذف auto-reply."""
     uid = require_user_auth(request)
     m = _main()
@@ -2666,8 +2404,7 @@ async def affiliate_commissions_api(request: Request):
 
 # v2.10.2: Zibal gateway
 @app.post("/api/payment/zibal/create/{order_id}")
-async def zibal_create_payment(order_id: int, request: Request,
-                              _csrf: None = Depends(require_user_csrf)):
+async def zibal_create_payment(order_id: int, request: Request):
     uid = require_user_auth(request)
     m = _main()
     order = m.get_order(order_id)
@@ -2784,15 +2521,11 @@ async def user_get_account_settings(request: Request):
         info["live_phone"] = getattr(me, "phone", None)
         info["live_photo"] = bool(getattr(me, "photo", None))
     except Exception as e:
-        # PATCH (PATCH-4-WEBPANEL WP-MED-9): don't leak Telethon exception
-        # details (chat IDs, internal state, stack-frame context) to user.
-        print(f"❌ [user_get_account_settings] live fetch failed: {type(e).__name__}: {e}")
-        info["live_error"] = "خطا در دریافت اطلاعات زنده از تلگرام — با پشتیبانی تماس بگیرید."
+        info["live_error"] = str(e)[:100]
     return info
 
 @app.patch("/api/user/account/settings")
-async def user_update_account_settings(req: AccountSettingsUpdate, request: Request,
-                                       _csrf: None = Depends(require_user_csrf)):
+async def user_update_account_settings(req: AccountSettingsUpdate, request: Request):
     """به‌روزرسانی تنظیمات اکانت فعال در live session."""
     uid, tag, acc, client = _get_live_client(request)
     m = _main()
@@ -2887,8 +2620,7 @@ async def user_get_messages(chat_id: int, request: Request, limit: int = 50):
     return {"chat_id": chat_id, "messages": messages}
 
 @app.post("/api/user/chats/{chat_id}/send")
-async def user_send_message(chat_id: int, req: SendMessageRequest, request: Request,
-                            _csrf: None = Depends(require_user_csrf)):
+async def user_send_message(chat_id: int, req: SendMessageRequest, request: Request):
     """ارسال پیام به یک چت."""
     uid, tag, acc, client = _get_live_client(request)
     if not req.text or not req.text.strip():
@@ -2955,8 +2687,7 @@ async def user_list_accounts(request: Request):
     return {"items": items, "count": len(items)}
 
 @app.post("/api/user/live-session")
-async def user_start_live_session(req: LiveSessionRequest, request: Request,
-                                 _csrf: None = Depends(require_user_csrf)):
+async def user_start_live_session(req: LiveSessionRequest, request: Request):
     """شروع live session — کاربر اکانت خودش رو انتخاب می‌کنه و وارد می‌شه."""
     uid = require_user_auth(request)
     m = _main()
@@ -3001,7 +2732,7 @@ async def user_get_live_session(request: Request):
     }
 
 @app.post("/api/user/live-session/stop")
-async def user_stop_live_session(request: Request, _csrf: None = Depends(require_user_csrf)):
+async def user_stop_live_session(request: Request):
     """خروج از live session (ولی لاگین باقی می‌مونه)."""
     uid = require_user_auth(request)
     token = request.cookies.get("cianet_user_session")
