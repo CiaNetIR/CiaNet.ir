@@ -2780,8 +2780,12 @@ async def delete_user_completely(user_id: int) -> bool:
         return False
 
     # ── ۲) تراکنشِ واحدِ DB اصلی — همه با هم COMMIT یا همه ROLLBACK ──
+    # v2.12.28 (HUNT-5 #8): atomic predicate check inside write transaction.
+    # قبلاً PRECHECK بدون lock بود و بین SELECT و DELETE یه اشتراک فعال
+    # ساخته می‌شد ولی حذف از قلم می‌افتاد. حالا داخل _conn_immediate
+    # چک می‌کنیم.
     owned_dedicated = []
-    with _conn() as c:
+    with _conn_immediate() as c:
         existing = c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if not existing:
             return False
@@ -18307,7 +18311,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.12.27"
+BUILD_VERSION = "2026-10-06-v2.12.28"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -19553,7 +19557,11 @@ def load_config() -> dict:
     if _CONFIG_CACHE is not None and _CONFIG_CACHE_MTIME == mtime:
         _config_state = CONFIG_VALID
         # یک کپی برگردون تا caller نتونه کش رو mutate کنه
-        return dict(_CONFIG_CACHE)
+        # v2.12.28 (HUNT-5 #2): deepcopy به‌جای shallow dict() — قبلاً
+        # inner dict ها با cache اشتراک داشتن و mutation آن‌ها cache رو
+        # خراب می‌کرد. حالا deepcopy کپیِ مستقل می‌سازه.
+        import copy as _copy_mod
+        return _copy_mod.deepcopy(_CONFIG_CACHE)
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             cfg = json.load(f)
@@ -19562,7 +19570,9 @@ def load_config() -> dict:
         _config_state = CONFIG_VALID
         _CONFIG_CACHE = cfg
         _CONFIG_CACHE_MTIME = mtime
-        return dict(cfg)
+        # v2.12.28: deepcopy
+        import copy as _copy_mod2
+        return _copy_mod2.deepcopy(cfg)
     except Exception as e:
         _config_state = CONFIG_INVALID
         _CONFIG_CACHE = None
@@ -20788,6 +20798,10 @@ class SelfBot:
         self.online_task = None
         self.watchdog_task = None
         self._memory_log_task = None
+        # v2.12.28 (HUNT-2 #1): broadcast task reference — برای cancel
+        # در هنگام shutdown/reconnect. قبلاً task فقط در _BG_TASKS بود
+        # و هیچ‌کس cancelش نمی‌کرد → restart وسط broadcast = user stuck.
+        self._broadcast_task = None
         # BUG #6/#7: تسک‌های دایس و ری‌استارتِ معلق متعلق به همین نمونه‌اند و
         # در shutdownِ واقعی نمونه cancel می‌شوند.
         self._dice_task = None
@@ -24563,7 +24577,9 @@ class SelfBot:
                 # _safe_handler اجرا می‌شه. با ۱۰۰۰ تا × ۲ ثانیه = ۳۰+ دقیقه،
                 # اگه داخل _safe_handler باشه بعد از ۹۰ ثانیه cancel می‌شد و
                 # کاربر روی «در حال ارسال» گیر می‌کرد.
-                _spawn_bg(
+                # v2.12.28: task رو روی self._broadcast_task ذخیره کن
+                # تا در shutdown/reconnect بتونیم cancelش کنیم.
+                self._broadcast_task = _spawn_bg(
                     self._do_broadcast(event, r, _target_type),
                     f"broadcast:{self.tag}"
                 )
@@ -25041,6 +25057,13 @@ class SelfBot:
             self._restart_task.cancel()
             await asyncio.gather(self._restart_task, return_exceptions=True)
             self._restart_task = None
+        # v2.12.28 (HUNT-2 #1): broadcast task رو cancel کن در shutdown.
+        # CancelledError handler در _do_broadcast پیام «ناقص متوقف شد»
+        # به Saved Messages می‌فرسته.
+        if self._broadcast_task and not self._broadcast_task.done():
+            self._broadcast_task.cancel()
+            await asyncio.gather(self._broadcast_task, return_exceptions=True)
+            self._broadcast_task = None
 
     async def _cleanup_after_failed_start(self):
         """
