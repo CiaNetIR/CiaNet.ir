@@ -4,13 +4,16 @@
 
 ### پنل مدیریت سلف‌بات تلگرام + سیستم SaaS کامل
 
+[🌐 CiaNet.ir](https://CiaNet.ir) — نمونه‌ی پروژه‌ی کاملِ یک سیستم SaaS تلگرام
+
 ربات مدیریت چنداکانتی تلگرام + پنل وب + درگاه پرداخت + کیف پول + سیستم همکاری
 
+[![Website](https://img.shields.io/badge/website-CiaNet.ir-0066cc.svg)](https://CiaNet.ir)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
 [![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
-[![Version](https://img.shields.io/badge/version-2.12.29%20STABLE-blue.svg)](#-changelog)
+[![Version](https://img.shields.io/badge/version-2.12.29%20STABLE-blue.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](#-final-certification)
+[![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
 
 </div>
 
@@ -443,6 +446,20 @@ MIT License — استفاده آزاد
 
 ## 🔗 لینک‌ها
 
-- [گیت‌هاب](https://github.com/DLSDT/CiaNet.ir)
-- [Issues](https://github.com/DLSDT/CiaNet.ir/issues)
-- [Telegram](https://t.me/CiaNetSelf)
+🌐 **وب‌سایت**: [CiaNet.ir](https://CiaNet.ir) — نمونه‌ی پروژه‌ی کاملِ یک سیستم SaaS تلگرام
+
+📦 **گیت‌هاب**: [DLSDT/CiaNet.ir](https://github.com/DLSDT/CiaNet.ir)
+
+🚀 **ریلیز استیبل**: [v2.12.29-stable](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
+
+💬 **تلگرام**: [@CiaNetSelf](https://t.me/CiaNetSelf)
+
+🐛 **Issues**: [گزارش باگ](https://github.com/DLSDT/CiaNet.ir/issues)
+
+---
+
+<div align="center">
+
+**ساخته‌شده با ❤️ برای [CiaNet.ir](https://CiaNet.ir)**
+
+</div>
