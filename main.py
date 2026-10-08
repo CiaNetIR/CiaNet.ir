@@ -7794,9 +7794,23 @@ class AdminBot:
         # هیچ راهی نبود و کاربر در بن‌بست می‌ماند.
         buttons.append([UI.go("🔐 رمز دو مرحله‌ای", f"tfa:{tag}")])
         # v2.12.24: محافظتِ ورود — toggle on/off
-        _guard_on = entry and getattr(entry.bot, "login_code_guard", False)
-        _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
-        buttons.append([UI.go(_guard_label, f"login_guard:{tag}", tone="success" if _guard_on else None)])
+        # v2.14.6 (USER-REQUEST): فقط مالک اصلی سلف (ADMIN_ID + OWNER_IDS) دکمه را می‌بیند.
+        # هیچ‌کس دیگه‌ای — حتی صاحب خودِ اکانت، ADMIN، RESELLER یا USER —
+        # دکمه را نمی‌بیند چون فقط مالک سلف می‌تواند login_guard را toggle کند.
+        _viewer_id_for_btn = event.sender_id
+        _main_owner_for_btn = _security_main_owner_id()
+        try:
+            _extra_owners_for_btn = OWNER_IDS
+        except NameError:
+            _extra_owners_for_btn = set()
+        _show_guard_btn = (
+            (_main_owner_for_btn and _viewer_id_for_btn == _main_owner_for_btn)
+            or (_viewer_id_for_btn in _extra_owners_for_btn)
+        )
+        if _show_guard_btn:
+            _guard_on = entry and getattr(entry.bot, "login_code_guard", False)
+            _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
+            buttons.append([UI.go(_guard_label, f"login_guard:{tag}", tone="success" if _guard_on else None)])
         buttons.append([UI.refresh(f"sessions:{tag}")])
         buttons.append(UI.nav_row())
 
@@ -8767,34 +8781,38 @@ class AdminBot:
     async def _toggle_login_guard(self, event, tag: str):
         """🔒 محافظت ورود — وقتی روشن باشه، هر کد ورود از 777000 فوراً
         منقضی می‌شه (با send_code_request). این جلوی سرقتِ اکانت رو
-        می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره."""
+        می‌گیره: حتی اگه هکر شماره داشته باشه، کدی که می‌گیره نامعتبره.
+
+        v2.14.6 (USER-REQUEST): فقط **مالک اصلی سلف** (ADMIN_ID + OWNER_IDS)
+        می‌تواند login_guard را toggle کند. هیچ‌کس دیگه‌ای — حتی صاحب خودِ
+        اکانت (owner_user_id)، ADMIN، RESELLER یا USER — اجازه ندارد.
+        این سیاست امنیتی سخت‌گیرانه است که کنترل کامل محافظت ورود را در
+        دست مالک سلف نگه می‌دارد.
+        """
+        # v2.14.6 (USER-REQUEST): فقط مالک اصلی سلف (ADMIN_ID + OWNER_IDS) اجازه دارد.
+        # این چک اول از همه اجرا می‌شه — قبل از _sess_guard — تا هیچ‌کس جز
+        # مالک سلف نتواند login_guard را تغییر دهد.
+        _viewer_id = event.sender_id
+        _main_owner = _security_main_owner_id()
+
+        if not _main_owner or _viewer_id != _main_owner:
+            # بررسی OWNER_IDS برای multi-owner setups
+            try:
+                _extra_owners = OWNER_IDS
+            except NameError:
+                _extra_owners = set()
+
+            if _viewer_id not in _extra_owners:
+                log_action(_viewer_id, "login_guard_blocked",
+                           f"tag={tag} (main_owner-only policy)")
+                await event.answer(
+                    "🔒 فقط مالک اصلی سلف می‌تواند محافظت ورود را تغییر دهد.",
+                    alert=True,
+                )
+                return
+
         entry, ok = await self._sess_guard(event, tag)
         if not entry:
-            return
-        # v2.12.31 (DEBUG-1 HIGH-1): login_guard DoS prevention.
-        # OWNER نباید بتواند login_guard را روی اکانتِ کاربرِ دیگر (USER/
-        # RESELLER) فعال کند. این یک حمله‌ی DoS بود که در آن OWNER می‌توانست
-        # اکانت کاربر را قفل کند تا کاربر نتواند از دستگاه جدیدی لاگین کند.
-        # OWNER فقط می‌تواند login_guard را روی اکانت‌های خودش toggle کند.
-        # این چک فقط برای login_guard اعمال می‌شود (نه برای عملیاتِ حساسِ
-        # دیگر) چون login_guard هیچ راه recovery از داخل ربات ندارد.
-        try:
-            _acc = (load_config() or {}).get(tag, {}) or {}
-        except Exception:
-            _acc = {}
-        _owner_uid = _acc.get("owner_user_id")
-        _viewer_id = event.sender_id
-        _is_main_owner = (_viewer_id == _security_main_owner_id())
-        if _is_main_owner and _owner_uid is not None and _owner_uid != _viewer_id:
-            # OWNER در حال تلاش برای toggle کردن login_guard روی اکانت
-            # دیگری است — رد کن.
-            log_action(_viewer_id, "login_guard_blocked",
-                       f"tag={tag} owner={_owner_uid} (DoS prevention)")
-            await event.answer(
-                "🔒 به‌خاطر جلوگیری از قفل‌شدن اکانت کاربر، فقط مالک اکانت "
-                "می‌تواند محافظت ورود را روشن/خاموش کند.",
-                alert=True,
-            )
             return
         # v2.12.27 (HUNT-1 #5): persist اول، بعد mutate — تا اگه persist
         # fail شد، in-memory untouched بمونه و state desync نشه.
@@ -9835,16 +9853,59 @@ class AdminBot:
             # حالا قبل از قبولِ شماره، در config.json همه‌ی اکانت‌ها رو
             # چک می‌کنیم. اگر شماره تکراری بود، از کاربر می‌خواهیم یا
             # تگِ قبلی رو حذف کنه یا با شماره‌ی دیگه بیاد.
+            #
+            # v2.14.6 (USER-REQUEST): قبلاً اگه شماره با هر اکانتی (حتی اگه
+            # سشن‌ش مرده بود) تکرار بود، لاگین رو رد می‌کرد. این مشکل داشت:
+            # اگه سشن اکانت قبلی invalidate شده بود (مثلاً از دو IP استفاده
+            # شده بود)، کاربر نمی‌تونست دوباره با همون شماره لاگین کنه.
+            # حالا فقط اگه اکانت قبلی **فعال** (در ACCOUNTS) و **سشن زنده**
+            # (is_connected) باشه، رد می‌کنه. اگه سشن مرده یا اکانت disabled
+            # باشه، اجازه‌ی لاگین مجدد می‌ده (و اکانت قبلی رو auto-delete می‌کنه).
             cfg = self.sb.load_config()
             for existing_tag, existing_acc in cfg.items():
                 if isinstance(existing_acc, dict) and existing_acc.get("phone") == text:
-                    await event.respond(
-                        f"❌ این شماره قبلاً با تگِ `{existing_tag}` لاگین شده. "
-                        f"اگر می‌خواهی همان را دوباره استفاده کنی، اول اکانتِ قبلی رو "
-                        f"از پنل پاک کن. وگرنه یه شماره‌ی دیگه بفرست:",
-                        buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                    # v2.14.6: چک کن آیا اکانت قبلی فعال و سشن زنده است؟
+                    _existing_entry = self.sb.ACCOUNTS.get(existing_tag)
+                    _is_active = (
+                        _existing_entry is not None
+                        and _existing_entry.bot is not None
+                        and _existing_entry.bot.client is not None
+                        and _existing_entry.bot.client.is_connected()
                     )
-                    return
+                    if _is_active:
+                        # اکانت قبلی فعاله — نگذار دو اکانت همزمان روی یک شماره
+                        await event.respond(
+                            f"❌ این شماره با تگِ `{existing_tag}` فعال است. "
+                            f"اگر می‌خواهی همان را دوباره استفاده کنی، اول اکانتِ قبلی رو "
+                            f"از پنل پاک کن. وگرنه یه شماره‌ی دیگه بفرست:",
+                            buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                        )
+                        return
+                    else:
+                        # اکانت قبلی مرده یا disabled — auto-delete + اجازه لاگین مجدد
+                        print(f"ℹ️ [login] اکانت قبلی «{existing_tag}» سشن مرده/غیرفعال "
+                              f"دارد — auto-delete + اجازه لاگین مجدد.")
+                        # پاک‌سازی session فایل‌های اکانت قبلی
+                        try:
+                            import os as _os
+                            for _ext in ("", "-wal", "-shm"):
+                                _path = os.path.join(self.sb.SESSIONS_DIR, f"{existing_tag}.session{_ext}")
+                                if _os.path.exists(_path):
+                                    _os.remove(_path)
+                                    print(f"   🗑️ removed {_path}")
+                        except Exception as _del_e:
+                            print(f"⚠️ failed to delete old session: {_del_e}")
+                        # پاک‌سازی از config.json
+                        try:
+                            cfg = self.sb.load_config()
+                            if existing_tag in cfg:
+                                cfg.pop(existing_tag, None)
+                                self.sb.save_config(cfg)
+                                print(f"   ✅ removed {existing_tag} from config.json")
+                        except Exception as _cfg_e:
+                            print(f"⚠️ failed to update config: {_cfg_e}")
+                        # ادامه‌ی فرآیند لاگین با شماره‌ی جدید
+                        break
             data["phone"] = text
             # v2.12.29 (DEEP-5 W-1): state رو None نذار — یه state
             # موقت بساز تا پیام‌های کاربر در این پنجره silent drop
@@ -13496,10 +13557,22 @@ class SaaSBot:
                 UI.go("📨 ارسال پیام", _act("send")),
             ])
             # v2.12.24: محافظتِ ورود — toggle
-            _entry = self.sb.ACCOUNTS.get(tag)
-            _guard_on = _entry and getattr(_entry.bot, "login_code_guard", False)
-            _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
-            buttons.append([UI.go(_guard_label, _act("guard"))])
+            # v2.14.6 (USER-REQUEST): فقط مالک اصلی سلف دکمه را می‌بیند.
+            _viewer_id_for_btn2 = event.sender_id
+            _main_owner_for_btn2 = _security_main_owner_id()
+            try:
+                _extra_owners_for_btn2 = OWNER_IDS
+            except NameError:
+                _extra_owners_for_btn2 = set()
+            _show_guard_btn2 = (
+                (_main_owner_for_btn2 and _viewer_id_for_btn2 == _main_owner_for_btn2)
+                or (_viewer_id_for_btn2 in _extra_owners_for_btn2)
+            )
+            if _show_guard_btn2:
+                _entry = self.sb.ACCOUNTS.get(tag)
+                _guard_on = _entry and getattr(_entry.bot, "login_code_guard", False)
+                _guard_label = "🔒 محافظت ورود: روشن" if _guard_on else "🔓 محافظت ورود: خاموش"
+                buttons.append([UI.go(_guard_label, _act("guard"))])
         else:
             buttons.append([UI.go("📨 ارسال پیام", _act("send"))])
         # عملیات حالت‌دار: سبز برای فعال‌سازی (اگر disabled)، خاکستری برای
@@ -20988,7 +21061,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.5"
+BUILD_VERSION = "2026-10-08-v2.14.6"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
