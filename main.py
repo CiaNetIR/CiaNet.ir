@@ -20960,7 +20960,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-06-v2.14.3"
+BUILD_VERSION = "2026-10-08-v2.14.4"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -28139,6 +28139,56 @@ async def run_bot(tag, config, interactive=False):
                     _set_bot_status(tag, "auth_failed")
                     if not pending.done():
                         pending.set_result(False)
+                elif _is_session_expired_error(e):
+                    # v2.14.4 (FIX-DUAL-IP-SESSION): AuthKeyDuplicatedError
+                    # (session used under two different IP addresses
+                    # simultaneously) is NOT transient — Telegram
+                    # permanently invalidates the session file. Retrying every
+                    # 300s wastes CPU/RAM and risks api_id flood-ban. So:
+                    # delete the dead session file, disable the account (so
+                    # _run_all_accounts won't restart it on next boot), notify
+                    # OWNER, and break out of the while loop. Without this
+                    # branch, _is_session_expired_error falls into the else
+                    # branch and just retries forever (the v2.12.10 comment
+                    # claimed "transient — retry on next restart", but for
+                    # dual-IP the session is dead and retry can never succeed).
+                    print(f"🛑 [{tag}] session permanently invalidated (dual-IP): {e}")
+                    print(f"🗑️ [{tag}] deleting dead session file...")
+                    try:
+                        import os as _os
+                        for _ext in ("", "-wal", "-shm"):
+                            _path = _os.path.join(SESSIONS_DIR, f"{tag}.session{_ext}")
+                            if _os.path.exists(_path):
+                                _os.remove(_path)
+                                print(f"   🗑️ removed {_path}")
+                    except Exception as _del_e:
+                        print(f"⚠️ [{tag}] failed to delete session: {_del_e}")
+                    # Disable the account to stop the retry loop and to keep
+                    # _run_all_accounts from re-launching it on next start.
+                    try:
+                        cfg = load_config()
+                        if tag in cfg and isinstance(cfg[tag], dict):
+                            cfg[tag]["disabled"] = True
+                            cfg[tag]["disabled_reason"] = "session_invalidated_relogin_needed"
+                            save_config(cfg)
+                            print(f"✅ [{tag}] اکانت disabled شد — برای فعال‌سازی: python main.py {tag}")
+                    except Exception as _cfg_e:
+                        print(f"⚠️ [{tag}] failed to disable account: {_cfg_e}")
+                    # Notify OWNER (fire-and-forget; best-effort).
+                    try:
+                        import asyncio as _aio
+                        _msg = (
+                            f"🛑 اکانت «{tag}» session invalidated شد (dual-IP usage).\n"
+                            f"Session فایل پاک شد و اکانت disabled شد.\n"
+                            f"برای فعال‌سازی: python main.py {tag}"
+                        )
+                        _aio.get_event_loop().create_task(_owner_notify_async(_msg))
+                    except Exception:
+                        pass
+                    _set_bot_status(tag, "auth_failed")
+                    if not pending.done():
+                        pending.set_result(False)
+                    break  # stop retry loop — session is dead, retry can't help
                 else:
                     _set_bot_status(tag, "error")
                 wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
