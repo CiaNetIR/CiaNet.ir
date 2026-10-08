@@ -2864,6 +2864,29 @@ def list_all_users() -> list:
     return [dict(r) for r in rows]
 
 
+def list_active_bot_users() -> list:
+    """v2.14.5: فقط کاربرانی که ربات را /start کرده‌اند (در bot_data.db هستند).
+
+    این تابع برای broadcast/announce استفاده می‌شه تا فقط به کاربرانی که
+    واقعاً ربات رو start کردن پیام بفرستیم — نه همه‌ی ثبت‌شده‌ها. این کار
+    FloodWait رو کم می‌کنه و پیام به کاربرانی که ربات رو بلاک کردن یا
+    start نکردن ارسال نمی‌شه.
+
+    Returns:
+        list of dicts with user_id, username, first_name, last_seen
+    """
+    try:
+        with _bot_db() as c:
+            rows = c.execute(
+                "SELECT user_id, username, first_name, last_seen "
+                "FROM users ORDER BY last_seen DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"⚠️ [list_active_bot_users] fallback به list_all_users: {e}")
+        return list_all_users()
+
+
 def search_users(query: str) -> list:
     """
     جستجوی کاربر بر اساس آیدی عددی (تطبیق دقیق) یا بخشی از یوزرنیم (بدون @،
@@ -15500,7 +15523,12 @@ class SaaSBot:
             ),
             buttons=[],
         )
-        users = list_all_users()
+        # v2.14.5: استفاده از list_active_bot_users که فقط کاربرانی که
+        # واقعاً ربات را /start کرده‌اند برمی‌گرداند. این کار از ارسال
+        # پیام به کاربرانی که ربات را بلاک کرده‌اند یا هرگز /start نزده‌اند
+        # جلوگیری می‌کند → FloodWait کمتر + گزارش دقیق‌تر.
+        # fallback به list_all_users در صورت خطا.
+        users = list_active_bot_users()
         sent_ok = 0
         failed = 0
         for u in users:
@@ -20960,7 +20988,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.4"
+BUILD_VERSION = "2026-10-08-v2.14.5"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
