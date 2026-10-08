@@ -15574,22 +15574,17 @@ class SaaSBot:
         await self._clear_admin_panel_wizard(event.sender_id)
         self._start_own_wizard(event.sender_id, WIZ_ANNOUNCE, {})
         print(f"🔍 [DEBUG-ANNOUNCE] wizard started, sending UI", flush=True)
-        # v2.14.10: همیشه از respond استفاده کن (edit گاهی گیر می‌کنه)
+        # v2.14.10: ساده‌ترین شکل — فقط متن + یه دکمه
         try:
+            from telethon import Button
             await event.respond(
-                UI.screen(
-                    "📨 ارسال پیام همگانی",
-                    body=[
-                        "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).",
-                        "",
-                        f"{UI.GRAY} ⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.",
-                        f"{UI.GRAY} ⚠️ برای جلوگیری از flood-wait، بین هر پیام ۵۰ms تأخیر است.",
-                    ],
-                    subtitle="برای لغو، دکمه‌ی «انصراف» را بزن.",
-                ),
-                buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                "**📨 ارسال پیام همگانی**\n\n"
+                "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).\n\n"
+                "⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.\n"
+                "⚠️ بین هر پیام ۵۰ms تأخیر است.",
+                buttons=[[Button.inline("انصراف", b"admin_back_to_hub")]],
             )
-            print(f"🔍 [DEBUG-ANNOUNCE] UI sent OK", flush=True)
+            print(f"🔍 [DEBUG-ANNOUNCE] UI sent OK (simple form)", flush=True)
         except Exception as _e2:
             print(f"❌ [DEBUG-ANNOUNCE] respond failed: {type(_e2).__name__}: {_e2}", flush=True)
             try:
@@ -21101,7 +21096,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.10-debug"
+BUILD_VERSION = "2026-10-08-v2.14.11-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
