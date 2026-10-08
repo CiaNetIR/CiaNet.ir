@@ -10546,8 +10546,18 @@ class AdminBot:
             except Exception:
                 pass
         except Exception as e:
-            # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
-            # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
+            # v2.14.7 (USER-REQUEST): ReplyMarkupInvalidError زمانی رخ می‌دهد
+            # که دکمه‌های قدیمی (از صفحه‌ی قبلی) دیگه valid نیستن — مثلاً وقتی
+            # اکانتی حذف شده و کاربر روی دکمه‌ی قدیمی‌اش زده. این خطای واقعی
+            # نیست — فقط spinner رو ببند. بقیه‌ی خطاها هم فقط در لاگ سرور.
+            _err_name = type(e).__name__
+            if _err_name in ("ReplyMarkupInvalidError", "MessageNotModifiedError",
+                             "MessageIdInvalidError", "MessageEmptyError"):
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
+                return True
             print(f"⚠️ [admin_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
             try:
                 await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
@@ -20463,8 +20473,20 @@ class SaaSBot:
                 except Exception:
                     pass
             except Exception as e:
-                # جزئیات فنی فقط در لاگ سرور — به کاربر پیام عمومی و کوتاه داده
-                # می‌شود تا state داخلی/ساختار دیتابیس درز نکند.
+                # v2.14.7 (USER-REQUEST): ReplyMarkupInvalidError زمانی رخ
+                # می‌دهد که دکمه‌های قدیمی (از صفحه‌ی قبلی) دیگه valid نیستن —
+                # مثلاً وقتی اکانتی حذف شده و کاربر روی دکمه‌ی قدیمی‌اش زده.
+                # این خطای واقعی نیست — فقط spinner رو ببند و یه alert کوتاه بده.
+                # بقیه‌ی خطاها هم فقط در لاگ سرور — به کاربر پیام عمومی داده می‌شود.
+                _err_name = type(e).__name__
+                if _err_name in ("ReplyMarkupInvalidError", "MessageNotModifiedError",
+                                 "MessageIdInvalidError", "MessageEmptyError"):
+                    # این خطاها non-fatal هستن — فقط spinner ببند
+                    try:
+                        await event.answer()
+                    except Exception:
+                        pass
+                    return
                 print(f"⚠️ [saas_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
                 try:
                     await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
@@ -21061,7 +21083,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.6"
+BUILD_VERSION = "2026-10-08-v2.14.7"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
