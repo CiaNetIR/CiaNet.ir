@@ -15565,11 +15565,15 @@ class SaaSBot:
     #       user_id های جدولِ users. گزارش success/fail بعد از اتمام.
     async def _owner_start_announce(self, event):
         """📨 OWNER می‌خواهد پیامی به همه‌ی کاربران بفرستد."""
+        print(f"🔍 [DEBUG-ANNOUNCE] _owner_start_announce entered by {event.sender_id}", flush=True)
         if self._role(event.sender_id) != ROLE_OWNER:
+            print(f"🔍 [DEBUG-ANNOUNCE] role check FAILED: {self._role(event.sender_id)}", flush=True)
             await event.answer("⛔ فقط OWNER", alert=True)
             return
+        print(f"🔍 [DEBUG-ANNOUNCE] role check OK, starting wizard", flush=True)
         await self._clear_admin_panel_wizard(event.sender_id)
         self._start_own_wizard(event.sender_id, WIZ_ANNOUNCE, {})
+        print(f"🔍 [DEBUG-ANNOUNCE] wizard started, sending UI", flush=True)
         # v2.14.8: از event.respond استفاده می‌کنیم به‌جای event.edit چون
         # event.edit روی callback گاهی ReplyMarkupInvalidError می‌داد.
         # همچنین دکمه‌ی cancel با cancel_wizard برای اطمینان از کارکرد درست.
@@ -19322,7 +19326,12 @@ class SaaSBot:
                     return
                 # Announcements — previously completely missing.
                 if data == "owner_announce" and role == ROLE_OWNER:
+                    print(f"🔍 [DEBUG-ANNOUNCE] owner_announce clicked by {event.sender_id}, role={role}", flush=True)
                     await self._owner_start_announce(event)
+                    return
+                if data == "owner_announce" and role != ROLE_OWNER:
+                    print(f"🔍 [DEBUG-ANNOUNCE] owner_announce clicked by {event.sender_id} but role={role} (not OWNER)", flush=True)
+                    await event.answer("⛔ فقط OWNER می‌تواند پیام همگانی بفرستد.", alert=True)
                     return
                 if data.startswith("announce_send:") and role == ROLE_OWNER:
                     # TEST-G6-SYSTEM: arg ignored (button uses
@@ -21106,7 +21115,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.8"
+BUILD_VERSION = "2026-10-08-v2.14.9-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
