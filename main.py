@@ -15570,19 +15570,42 @@ class SaaSBot:
             return
         await self._clear_admin_panel_wizard(event.sender_id)
         self._start_own_wizard(event.sender_id, WIZ_ANNOUNCE, {})
-        await event.edit(
-            UI.screen(
-                "📨 ارسال پیام همگانی",
-                body=[
-                    "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).",
-                    "",
-                    f"{UI.GRAY} ⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.",
-                    f"{UI.GRAY} ⚠️ برای جلوگیری از flood-wait، بین هر پیام ۵۰ms تأخیر است.",
-                ],
-                subtitle="برای لغو، دکمه‌ی «بازگشت» را بزن.",
-            ),
-            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
-        )
+        # v2.14.8: از event.respond استفاده می‌کنیم به‌جای event.edit چون
+        # event.edit روی callback گاهی ReplyMarkupInvalidError می‌داد.
+        # همچنین دکمه‌ی cancel با cancel_wizard برای اطمینان از کارکرد درست.
+        try:
+            await event.edit(
+                UI.screen(
+                    "📨 ارسال پیام همگانی",
+                    body=[
+                        "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).",
+                        "",
+                        f"{UI.GRAY} ⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.",
+                        f"{UI.GRAY} ⚠️ برای جلوگیری از flood-wait، بین هر پیام ۵۰ms تأخیر است.",
+                    ],
+                    subtitle="برای لغو، دکمه‌ی «بازگشت» را بزن.",
+                ),
+                buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+            )
+        except Exception as _e:
+            # fallback: اگه edit ناموفق بود، respond کن
+            print(f"ℹ️ [announce] event.edit failed ({type(_e).__name__}), falling back to respond")
+            try:
+                await event.respond(
+                    UI.screen(
+                        "📨 ارسال پیام همگانی",
+                        body=[
+                            "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).",
+                            "",
+                            f"{UI.GRAY} ⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.",
+                            f"{UI.GRAY} ⚠️ برای جلوگیری از flood-wait، بین هر پیام ۵۰ms تأخیر است.",
+                        ],
+                        subtitle="برای لغو، دکمه‌ی «انصراف» را بزن.",
+                    ),
+                    buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                )
+            except Exception as _e2:
+                print(f"⚠️ [announce] respond fallback هم ناموفق: {_e2}")
 
     async def _owner_announce_send(self, event):
         """✅ اجرای broadcast واقعی به همه‌ی کاربران از جدول users."""
@@ -21083,7 +21106,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.7"
+BUILD_VERSION = "2026-10-08-v2.14.8"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
