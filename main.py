@@ -18283,6 +18283,7 @@ class SaaSBot:
         # TEST-G6-SYSTEM: wizard پیام همگانی — OWNER متن را می‌فرستد،
         # بعد روی «ارسال» تأیید می‌کند (callback announce_send:).
         if state == WIZ_ANNOUNCE:
+            print(f"🔍 [DEBUG-ANNOUNCE] WIZ_ANNOUNCE handler entered, text={repr(text[:50])}", flush=True)
             if self._role(event.sender_id) != ROLE_OWNER:
                 self.wizards.pop(event.sender_id, None)
                 await event.respond("⛔ فقط OWNER می‌تواند پیام همگانی بفرستد.")
@@ -18296,6 +18297,7 @@ class SaaSBot:
                 "data": {"text": text},
                 "_ts": time.time(),
             }
+            print(f"🔍 [DEBUG-ANNOUNCE] preview sending", flush=True)
             await event.respond(
                 UI.screen(
                     "📨 پیش‌نمایش پیام همگانی",
@@ -18314,6 +18316,7 @@ class SaaSBot:
                     [UI.neutral(UI.L_CANCEL, "owner_announce")],
                 ],
             )
+            print(f"🔍 [DEBUG-ANNOUNCE] preview sent OK", flush=True)
             return True
 
         # TEST-G6-SYSTEM: اگه کاربر در حالتِ WIZ_ANNOUNCE_CONFIRM است و
@@ -21114,7 +21117,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.13-debug"
+BUILD_VERSION = "2026-10-08-v2.14.14-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
