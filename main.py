@@ -18949,7 +18949,9 @@ class SaaSBot:
 
         @self.client.on(events.NewMessage)
         async def message_h(event):
+            print(f"🔍 [DEBUG-MSG] received from {event.sender_id}: {repr(event.raw_text[:50]) if event.raw_text else 'None'}", flush=True)
             if event.raw_text and event.raw_text.startswith("/"):
+                print(f"🔍 [DEBUG-MSG] skipping (starts with /)", flush=True)
                 return
 
             # v2.13.0 (TEST-WIZARD-FLOWS): پاکسازیِ دوره‌ایِ wizardهای قدیمیِ
@@ -18972,6 +18974,7 @@ class SaaSBot:
                 await self._try_delete_gate_message(event.sender_id, event.chat_id)
 
             wiz = self.wizards.get(event.sender_id)
+            print(f"🔍 [DEBUG-MSG] wizard state: {wiz.get('state') if wiz else 'None'}", flush=True)
             if wiz:
                 try:
                     if event.photo:
@@ -21111,7 +21114,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.12-debug"
+BUILD_VERSION = "2026-10-08-v2.14.13-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
