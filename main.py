@@ -15587,7 +15587,6 @@ class SaaSBot:
     #   ۳) OWNER روی announce_send: می‌زند → broadcast واقعی
     async def _owner_start_announce(self, event):
         """📨 OWNER می‌خواهد پیامی به همه‌ی کاربران بفرستد."""
-        print(f"🔍 [ANNOUNCE] start_announce by {event.sender_id}", flush=True)
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("⛔ فقط OWNER", alert=True)
             return
@@ -15607,7 +15606,6 @@ class SaaSBot:
 
     async def _owner_announce_send(self, event):
         """✅ اجرای broadcast واقعی به همه‌ی کاربران."""
-        print(f"🔍 [ANNOUNCE] send clicked by {event.sender_id}", flush=True)
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("⛔ فقط OWNER", alert=True)
             return
@@ -15624,7 +15622,7 @@ class SaaSBot:
             ),
             buttons=[],
         )
-        users = list_active_bot_users()
+        users = list_all_users()
         sent_ok = 0
         failed = 0
         for u in users:
@@ -18869,7 +18867,6 @@ class SaaSBot:
             # v2.15.0: announce feature — بدون wizard
             uid = event.sender_id
             if uid in self._announce_pending:
-                print(f"🔍 [ANNOUNCE] text received from {uid}: {repr((event.raw_text or '')[:50])}", flush=True)
                 text = (event.raw_text or "").strip()
                 if not text:
                     await event.respond("❌ متن پیام خالی است. دوباره بفرست:")
@@ -21049,7 +21046,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-09-v2.15.1-debug"
+BUILD_VERSION = "2026-10-09-v2.15.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
