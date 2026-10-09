@@ -15609,18 +15609,19 @@ class SaaSBot:
 
     async def _owner_announce_send(self, event):
         """✅ اجرای broadcast واقعی به همه‌ی کاربران از جدول users."""
+        print(f"🔍 [DEBUG-ANNOUNCE] _owner_announce_send entered by {event.sender_id}", flush=True)
         if self._role(event.sender_id) != ROLE_OWNER:
+            print(f"🔍 [DEBUG-ANNOUNCE] role check FAILED", flush=True)
             await event.answer("⛔ فقط OWNER", alert=True)
             return
-        # TEST-G6-SYSTEM: wizard را فقط *بعد* از تأییدِ state درست pop کن.
-        # قبلاً مستقیم pop می‌شد؛ اگه کاربر wizardِ دیگری داشت (مثلاً
-        # وسط discount wizard)، آن را از دست می‌داد. حالا اول state را
-        # می‌خوانیم و فقط اگه WIZ_ANNOUNCE_CONFIRM بود pop می‌کنیم.
         wiz = self.wizards.get(event.sender_id)
         text = (wiz or {}).get("data", {}).get("text")
+        print(f"🔍 [DEBUG-ANNOUNCE] wiz={wiz is not None}, state={wiz.get('state') if wiz else 'None'}, text={repr(text[:30]) if text else 'None'}", flush=True)
         if not wiz or not text or wiz.get("state") != WIZ_ANNOUNCE_CONFIRM:
+            print(f"🔍 [DEBUG-ANNOUNCE] CHECK FAILED: wiz={wiz is not None}, text={bool(text)}, state={wiz.get('state') if wiz else 'N/A'}", flush=True)
             await event.answer("هیچ پیامی در انتظار ارسال نیست.", alert=True)
             return
+        print(f"🔍 [DEBUG-ANNOUNCE] check passed, starting broadcast", flush=True)
         self.wizards.pop(event.sender_id, None)
         await event.edit(
             UI.screen(
@@ -21117,7 +21118,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.14-debug"
+BUILD_VERSION = "2026-10-08-v2.14.15-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
