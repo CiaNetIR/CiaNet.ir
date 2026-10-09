@@ -19340,6 +19340,8 @@ class SaaSBot:
                     # TEST-G6-SYSTEM: arg ignored (button uses
                     # `announce_send:go` — the actual text comes from the
                     # wizard state).
+                    print(f"🔍 [DEBUG-ANNOUNCE] announce_send: dispatched in callback_h, calling _owner_announce_send", flush=True)
+                    print(f"🔍 [DEBUG-ANNOUNCE] wizards dict: {list(self.wizards.keys())}", flush=True)
                     await self._owner_announce_send(event)
                     return
                 if data == "owner_dedicated_list" and role in (ROLE_OWNER, ROLE_ADMIN):
@@ -21118,7 +21120,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.15-debug"
+BUILD_VERSION = "2026-10-08-v2.14.16-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
