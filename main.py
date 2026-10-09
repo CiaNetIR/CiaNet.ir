@@ -6515,7 +6515,7 @@ NAV_ACTION_PREFIXES = (
     # the nav stack so Back works correctly.
     "update_check:", "update_apply:",
     "owner_db_backup_go:", "channel_clear:",
-    "setting_save:", "announce_send:",
+    "setting_save:", "announce_send:", "announce_cancel",
 )
 
 
@@ -10990,6 +10990,9 @@ class SaaSBot:
         # در دیگری پاک‌سازی شود (وگرنه یک temp_client باز می‌تواند نشت
         # کند) — این کار را _start_own_wizard انجام می‌دهد.
         self.wizards: dict = {}
+        # v2.15.0: announce feature — بدون wizard، ساده و قابل اعتماد
+        self._announce_pending: set = set()
+        self._announce_text: dict = {}
         # PATCH (v2.0.12): wizard TTL. هر wizard یک timestamp ست می‌شه و
         # وقتی از ۳۰ دقیقه بگذره، خودکار پاک می‌شه (و temp_client disconnect).
         # این از نشتِ TCP socket و session file lock در wizardهای رها‌شده
@@ -15577,64 +15580,48 @@ class SaaSBot:
     #       دکمه‌ی «ارسال» نشون می‌ده.
     #    ۳) OWNER روی `announce_send:` می‌زند → broadcast واقعی به همه‌ی
     #       user_id های جدولِ users. گزارش success/fail بعد از اتمام.
+    # v2.15.0: Announce — بدون wizard، ساده و قابل اعتماد
+    # flow:
+    #   ۱) OWNER روی owner_announce می‌زند → _announce_pending ست می‌شه
+    #   ۲) OWNER متن را می‌فرسته → message_h متن را در _announce_text ذخیره + preview
+    #   ۳) OWNER روی announce_send: می‌زند → broadcast واقعی
     async def _owner_start_announce(self, event):
         """📨 OWNER می‌خواهد پیامی به همه‌ی کاربران بفرستد."""
-        print(f"🔍 [DEBUG-ANNOUNCE] _owner_start_announce entered by {event.sender_id}", flush=True)
         if self._role(event.sender_id) != ROLE_OWNER:
-            print(f"🔍 [DEBUG-ANNOUNCE] role check FAILED: {self._role(event.sender_id)}", flush=True)
             await event.answer("⛔ فقط OWNER", alert=True)
             return
-        print(f"🔍 [DEBUG-ANNOUNCE] role check OK, starting wizard", flush=True)
-        await self._clear_admin_panel_wizard(event.sender_id)
-        # v2.14.12: back_route به admin_tools برای بازگشت درست بعد از cancel
-        self._start_own_wizard(event.sender_id, WIZ_ANNOUNCE, {"back": "admin_tools"})
-        print(f"🔍 [DEBUG-ANNOUNCE] wizard started, sending UI", flush=True)
-        # v2.14.10: ساده‌ترین شکل — فقط متن + یه دکمه
-        try:
-            from telethon import Button
-            await event.respond(
-                "**📨 ارسال پیام همگانی**\n\n"
-                "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).\n\n"
-                "⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.\n"
-                "⚠️ بین هر پیام ۵۰ms تأخیر است.",
-                buttons=[[Button.inline("انصراف", b"cancel_wizard")]],
-            )
-            print(f"🔍 [DEBUG-ANNOUNCE] UI sent OK (simple form)", flush=True)
-        except Exception as _e2:
-            print(f"❌ [DEBUG-ANNOUNCE] respond failed: {type(_e2).__name__}: {_e2}", flush=True)
-            try:
-                await event.answer("❌ خطا در نمایش. دوباره بزن.", alert=True)
-            except Exception:
-                pass
+        # پاک‌سازی wizard قبلی (اگه هست)
+        self._announce_pending.discard(event.sender_id)
+        self._announce_text.pop(event.sender_id, None)
+        # ست کردن pending
+        self._announce_pending.add(event.sender_id)
+        from telethon import Button
+        await event.respond(
+            "**📨 ارسال پیام همگانی**\n\n"
+            "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).\n\n"
+            "⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.\n"
+            "⚠️ بین هر پیام ۵۰ms تأخیر است.",
+            buttons=[[Button.inline("انصراف", b"announce_cancel")]],
+        )
 
     async def _owner_announce_send(self, event):
-        """✅ اجرای broadcast واقعی به همه‌ی کاربران از جدول users."""
-        print(f"🔍 [DEBUG-ANNOUNCE] _owner_announce_send entered by {event.sender_id}", flush=True)
+        """✅ اجرای broadcast واقعی به همه‌ی کاربران."""
         if self._role(event.sender_id) != ROLE_OWNER:
-            print(f"🔍 [DEBUG-ANNOUNCE] role check FAILED", flush=True)
             await event.answer("⛔ فقط OWNER", alert=True)
             return
-        wiz = self.wizards.get(event.sender_id)
-        text = (wiz or {}).get("data", {}).get("text")
-        print(f"🔍 [DEBUG-ANNOUNCE] wiz={wiz is not None}, state={wiz.get('state') if wiz else 'None'}, text={repr(text[:30]) if text else 'None'}", flush=True)
-        if not wiz or not text or wiz.get("state") != WIZ_ANNOUNCE_CONFIRM:
-            print(f"🔍 [DEBUG-ANNOUNCE] CHECK FAILED: wiz={wiz is not None}, text={bool(text)}, state={wiz.get('state') if wiz else 'N/A'}", flush=True)
+        text = self._announce_text.get(event.sender_id)
+        if not text:
             await event.answer("هیچ پیامی در انتظار ارسال نیست.", alert=True)
             return
-        print(f"🔍 [DEBUG-ANNOUNCE] check passed, starting broadcast", flush=True)
-        self.wizards.pop(event.sender_id, None)
+        self._announce_text.pop(event.sender_id, None)
+        self._announce_pending.discard(event.sender_id)
         await event.edit(
             UI.screen(
                 "📨 در حال ارسال...",
-                body=[f"{UI.GRAY} صبر کن — بستنِ broadcast تا پایان، spinner باید بسته بشه."],
+                body=[f"{UI.GRAY} صبر کن — broadcast در حال اجراست."],
             ),
             buttons=[],
         )
-        # v2.14.5: استفاده از list_active_bot_users که فقط کاربرانی که
-        # واقعاً ربات را /start کرده‌اند برمی‌گرداند. این کار از ارسال
-        # پیام به کاربرانی که ربات را بلاک کرده‌اند یا هرگز /start نزده‌اند
-        # جلوگیری می‌کند → FloodWait کمتر + گزارش دقیق‌تر.
-        # fallback به list_all_users در صورت خطا.
         users = list_active_bot_users()
         sent_ok = 0
         failed = 0
@@ -15647,19 +15634,11 @@ class SaaSBot:
                 await self.client.send_message(uid, text)
                 sent_ok += 1
             except errors.FloodWaitError as e:
-                # BUG-25 (§10.1/§20.8): قبلاً FloodWait مثل بقیه‌ی خطاها فقط
-                # «ناموفق» شمرده می‌شد و حلقه با همان فاصله‌ی ۵۰ms به‌سرعت
-                # ادامه می‌یافت — یعنی به‌محض flood، همه‌ی ارسال‌های بعدی هم
-                # محکوم به شکست بودند. حالا به‌اندازه‌ی درخواستِ تلگرام
-                # (+۲s grace) مکث می‌کنیم و broadcast برای بقیه‌ی کاربران
-                # ادامه می‌یابد؛ این کاربر ناموفق شمرده می‌شود (retry
-                # نمی‌شود تا شمارنده‌ها سرجای خودشان بمانند).
                 self._flood_until = time.time() + e.seconds + 2
                 await asyncio.sleep(e.seconds + 2)
                 failed += 1
             except Exception:
                 failed += 1
-            # جلوگیری از flood-wait (≈20 msg/sec امن است).
             await asyncio.sleep(0.05)
         await event.edit(
             UI.screen(
@@ -18281,79 +18260,8 @@ class SaaSBot:
             )
             return True
 
-        # TEST-G6-SYSTEM: wizard پیام همگانی — OWNER متن را می‌فرستد،
-        # بعد روی «ارسال» تأیید می‌کند (callback announce_send:).
-        if state == WIZ_ANNOUNCE:
-            print(f"🔍 [DEBUG-ANNOUNCE] WIZ_ANNOUNCE handler entered, text={repr(text[:50])}", flush=True)
-            if self._role(event.sender_id) != ROLE_OWNER:
-                self.wizards.pop(event.sender_id, None)
-                await event.respond("⛔ فقط OWNER می‌تواند پیام همگانی بفرستد.")
-                return True
-            if not text:
-                await event.respond("❌ متن پیام خالی است. دوباره بفرست:")
-                return True
-            # متن را در wizard ذخیره کن و preview + دکمه‌ی تأیید نشون بده.
-            self.wizards[event.sender_id] = {
-                "state": WIZ_ANNOUNCE_CONFIRM,
-                "data": {"text": text},
-                "_ts": time.time(),
-            }
-            print(f"🔍 [DEBUG-ANNOUNCE] preview sending", flush=True)
-            await event.respond(
-                UI.screen(
-                    "📨 پیش‌نمایش پیام همگانی",
-                    body=[
-                        "این پیام به همه‌ی کاربران (که ربات را start کرده‌اند) ارسال می‌شود:",
-                        "",
-                        UI.SEP,
-                        text,
-                        UI.SEP,
-                        f"{UI.AMBER} برای ارسال، دکمه‌ی زیر را بزن.",
-                    ],
-                    subtitle="اگه اشتباه است، «لغو» را بزن و دوباره بنویس.",
-                ),
-                buttons=[
-                    [UI.danger("📨 ارسال به همه", b"announce_send:go")],
-                    [UI.neutral(UI.L_CANCEL, "owner_announce")],
-                ],
-            )
-            print(f"🔍 [DEBUG-ANNOUNCE] preview sent OK", flush=True)
-            return True
-
-        # TEST-G6-SYSTEM: اگه کاربر در حالتِ WIZ_ANNOUNCE_CONFIRM است و
-        # متنِ جدید فرستاد، متن را با متنِ جدید عوض کن و preview را دوباره
-        # نشون بده (به‌جای سایلنت no-op یا fall-through به message handlers).
-        if state == WIZ_ANNOUNCE_CONFIRM:
-            if self._role(event.sender_id) != ROLE_OWNER:
-                self.wizards.pop(event.sender_id, None)
-                await event.respond("⛔ فقط OWNER می‌تواند پیام همگانی بفرستد.")
-                return True
-            if not text:
-                await event.respond("❌ متن پیام خالی است. دوباره بفرست:")
-                return True
-            self.wizards[event.sender_id] = {
-                "state": WIZ_ANNOUNCE_CONFIRM,
-                "data": {"text": text},
-                "_ts": time.time(),
-            }
-            await event.respond(
-                UI.screen(
-                    "📨 پیش‌نمایش به‌روزشده",
-                    body=[
-                        "متن جدید ذخیره شد. این پیام به همه‌ی کاربران ارسال می‌شود:",
-                        "",
-                        UI.SEP,
-                        text,
-                        UI.SEP,
-                        f"{UI.AMBER} برای ارسال، دکمه‌ی زیر را بزن.",
-                    ],
-                ),
-                buttons=[
-                    [UI.danger("📨 ارسال به همه", b"announce_send:go")],
-                    [UI.neutral(UI.L_CANCEL, "owner_announce")],
-                ],
-            )
-            return True
+        # v2.15.0: WIZ_ANNOUNCE / WIZ_ANNOUNCE_CONFIRM حذف شدند —
+        # announce feature حالا بدون wizard کار می‌کند (در message_h).
 
         if state == WIZ_USER_SEARCH:
             self.wizards.pop(event.sender_id, None)
@@ -18953,9 +18861,29 @@ class SaaSBot:
 
         @self.client.on(events.NewMessage)
         async def message_h(event):
-            print(f"🔍 [DEBUG-MSG] received from {event.sender_id}: {repr(event.raw_text[:50]) if event.raw_text else 'None'}", flush=True)
             if event.raw_text and event.raw_text.startswith("/"):
-                print(f"🔍 [DEBUG-MSG] skipping (starts with /)", flush=True)
+                return
+
+            # v2.15.0: announce feature — بدون wizard
+            uid = event.sender_id
+            if uid in self._announce_pending:
+                text = (event.raw_text or "").strip()
+                if not text:
+                    await event.respond("❌ متن پیام خالی است. دوباره بفرست:")
+                    return
+                self._announce_pending.discard(uid)
+                self._announce_text[uid] = text
+                from telethon import Button
+                await event.respond(
+                    "**📨 پیش‌نمایش پیام همگانی**\n\n"
+                    "این پیام به همه‌ی کاربران (که ربات را start کرده‌اند) ارسال می‌شود:\n\n"
+                    f"━━━━━━━━━━━━━━\n{text}\n━━━━━━━━━━━━━━\n\n"
+                    "🟡 برای ارسال، دکمه‌ی زیر را بزن.",
+                    buttons=[
+                        [Button.inline("📨 ارسال به همه", b"announce_send:go")],
+                        [Button.inline("انصراف", b"announce_cancel")],
+                    ],
+                )
                 return
 
             # v2.13.0 (TEST-WIZARD-FLOWS): پاکسازیِ دوره‌ایِ wizardهای قدیمیِ
@@ -18978,7 +18906,6 @@ class SaaSBot:
                 await self._try_delete_gate_message(event.sender_id, event.chat_id)
 
             wiz = self.wizards.get(event.sender_id)
-            print(f"🔍 [DEBUG-MSG] wizard state: {wiz.get('state') if wiz else 'None'}", flush=True)
             if wiz:
                 try:
                     if event.photo:
@@ -19327,21 +19254,20 @@ class SaaSBot:
                     set_setting(_key, _val, actor_id=event.sender_id)
                     await event.answer(f"✅ تنظیم شد: {_key}", alert=True)
                     return
-                # Announcements — previously completely missing.
+                # Announcements — v2.15.0: بدون wizard
                 if data == "owner_announce" and role == ROLE_OWNER:
-                    print(f"🔍 [DEBUG-ANNOUNCE] owner_announce clicked by {event.sender_id}, role={role}", flush=True)
                     await self._owner_start_announce(event)
                     return
                 if data == "owner_announce" and role != ROLE_OWNER:
-                    print(f"🔍 [DEBUG-ANNOUNCE] owner_announce clicked by {event.sender_id} but role={role} (not OWNER)", flush=True)
-                    await event.answer("⛔ فقط OWNER می‌تواند پیام همگانی بفرستد.", alert=True)
+                    await event.answer("⛔ فقط OWNER", alert=True)
+                    return
+                if data == "announce_cancel" and role == ROLE_OWNER:
+                    self._announce_pending.discard(event.sender_id)
+                    self._announce_text.pop(event.sender_id, None)
+                    await event.answer("❌ لغو شد.")
+                    await self._show_admin_tools(event, role)
                     return
                 if data.startswith("announce_send:") and role == ROLE_OWNER:
-                    # TEST-G6-SYSTEM: arg ignored (button uses
-                    # `announce_send:go` — the actual text comes from the
-                    # wizard state).
-                    print(f"🔍 [DEBUG-ANNOUNCE] announce_send: dispatched in callback_h, calling _owner_announce_send", flush=True)
-                    print(f"🔍 [DEBUG-ANNOUNCE] wizards dict: {list(self.wizards.keys())}", flush=True)
                     await self._owner_announce_send(event)
                     return
                 if data == "owner_dedicated_list" and role in (ROLE_OWNER, ROLE_ADMIN):
@@ -21120,7 +21046,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.16-debug"
+BUILD_VERSION = "2026-10-09-v2.15.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
