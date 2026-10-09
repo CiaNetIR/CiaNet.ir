@@ -15606,23 +15606,24 @@ class SaaSBot:
 
     async def _owner_announce_send(self, event):
         """✅ اجرای broadcast واقعی به همه‌ی کاربران."""
+        print(f"🔍 [ANNOUNCE] send clicked by {event.sender_id}", flush=True)
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("⛔ فقط OWNER", alert=True)
             return
         text = self._announce_text.get(event.sender_id)
+        print(f"🔍 [ANNOUNCE] text={repr(text[:30]) if text else 'None'}", flush=True)
         if not text:
             await event.answer("هیچ پیامی در انتظار ارسال نیست.", alert=True)
             return
         self._announce_text.pop(event.sender_id, None)
         self._announce_pending.discard(event.sender_id)
-        await event.edit(
-            UI.screen(
-                "📨 در حال ارسال...",
-                body=[f"{UI.GRAY} صبر کن — broadcast در حال اجراست."],
-            ),
-            buttons=[],
-        )
+        print(f"🔍 [ANNOUNCE] starting broadcast...", flush=True)
+        try:
+            await event.answer("📤 در حال ارسال...")
+        except Exception:
+            pass
         users = list_all_users()
+        print(f"🔍 [ANNOUNCE] users count: {len(users)}", flush=True)
         sent_ok = 0
         failed = 0
         for u in users:
@@ -21046,7 +21047,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-09-v2.15.0"
+BUILD_VERSION = "2026-10-09-v2.15.2-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
