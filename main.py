@@ -10078,26 +10078,40 @@ class AdminBot:
 
         cfg = self.sb.load_config()
         if not cfg:
-            # همان گاردِ _do_send_code — به‌صورت دفاعی اینجا هم: اگر config
-            # خالی/خراب باشد، اکانتِ لاگین‌شده را نمی‌توان با api_id/api_hash
-            # یک اکانت پایه ذخیره کرد. به‌جای StopIteration مبهم، پیام واضح +
-            # بستن تمیز ویزارد.
-            await event.respond(
-                "❌ config.json خالی/خراب است — اکانت ذخیره نشد. "
-                "با پشتیبانی تماس بگیر.",
-                buttons=[UI.nav_row(back=False)],
-            )
-            self.wizards.pop(event.sender_id, None)
-            return
-        try:
-            api_id, api_hash = _first_account_creds(cfg)
-        except RuntimeError as e:
-            await event.respond(
-                f"❌ {e}",
-                buttons=[UI.nav_row(back=False)],
-            )
-            self.wizards.pop(event.sender_id, None)
-            return
+            # v2.15.1: config خالیه — ولی اگه env vars داریم (API_ID/API_HASH)
+            # می‌تونیم اکانت جدید رو با اونا بسازیم. این deadlock رو شکسته.
+            env_api_id = os.environ.get("CIANET_API_ID", "").strip() or os.environ.get("API_ID", "").strip()
+            env_api_hash = os.environ.get("CIANET_API_HASH", "").strip() or os.environ.get("API_HASH", "").strip()
+            if env_api_id and env_api_hash:
+                # اکانت جدید رو با env creds بساز
+                try:
+                    api_id = int(env_api_id)
+                    api_hash = env_api_hash
+                except ValueError:
+                    await event.respond(
+                        "❌ API_ID در env var نامعتبر است. با پشتیبانی تماس بگیر.",
+                        buttons=[UI.nav_row(back=False)],
+                    )
+                    self.wizards.pop(event.sender_id, None)
+                    return
+            else:
+                await event.respond(
+                    "❌ config.json خالی است و API_ID/API_HASH در env vars تنظیم نشده. "
+                    "با پشتیبانی تماس بگیر.",
+                    buttons=[UI.nav_row(back=False)],
+                )
+                self.wizards.pop(event.sender_id, None)
+                return
+        else:
+            try:
+                api_id, api_hash = _first_account_creds(cfg)
+            except RuntimeError as e:
+                await event.respond(
+                    f"❌ {e}",
+                    buttons=[UI.nav_row(back=False)],
+                )
+                self.wizards.pop(event.sender_id, None)
+                return
         new_entry = {
             "type": "user",
             "api_id": api_id,
@@ -21043,7 +21057,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-09-v2.15.0"
+BUILD_VERSION = "2026-10-09-v2.15.1"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
