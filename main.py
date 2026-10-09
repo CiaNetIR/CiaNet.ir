@@ -9539,17 +9539,31 @@ class AdminBot:
                     await notify_event.answer("❌ لغو شد.")
                 except Exception:
                     pass
-                # مسیرِ ویزارد (tfachange/tfaremove/tfaemail) که روتر موقعِ
-                # شروعِ ویزارد روی پشته گذاشته بود، مثلِ NAV_BACK از پشته
-                # برداشته می‌شود تا «بازگشت» بعدی قدمِ اضافه نخورد.
-                _cur = self.nav.current(notify_event.sender_id) or ""
-                if _cur.startswith(("tfachange:", "tfaremove:", "tfaemail:")):
-                    self.nav.pop(notify_event.sender_id)
-                router = getattr(saas, "_router", None) if saas is not None else None
-                if router is not None:
+                # v2.14.12: اگه back_route یک route ساده (مثل admin_tools)
+                # هست، مستقیم به صفحه برگردون — نه nav stack.
+                _saas_for_back = getattr(self, "saas", None)
+                _router_for_back = getattr(_saas_for_back, "_router", None) if _saas_for_back else None
+                if _router_for_back is not None:
+                    # مسیرِ ویزارد (tfachange/tfaremove/tfaemail) که روتر موقعِ
+                    # شروعِ ویزارد روی پشته گذاشته بود، مثلِ NAV_BACK از پشته
+                    # برداشته می‌شود تا «بازگشت» بعدی قدمِ اضافه نخورد.
+                    _cur = self.nav.current(notify_event.sender_id) or ""
+                    if _cur.startswith(("tfachange:", "tfaremove:", "tfaemail:")):
+                        self.nav.pop(notify_event.sender_id)
                     # dispatch از ابتدا — همه‌ی گاردهای مالکیت/نقش مثلِ کلیکِ
                     # مستقیم اجرا می‌شوند (همان الگوی NAV_BACK و _nav_heal).
-                    await router(notify_event, _route=back_route, _depth=1)
+                    await _router_for_back(notify_event, _route=back_route, _depth=1)
+                elif back_route == "admin_tools" and _saas_for_back is not None:
+                    # v2.14.12: خاص برای admin_tools — مستقیم صدا بزن
+                    try:
+                        _role = _saas_for_back._role(notify_event.sender_id)
+                        await _saas_for_back._show_admin_tools(notify_event, _role)
+                    except Exception as _e:
+                        print(f"⚠️ [cancel_wizard] admin_tools fallback failed: {_e}")
+                        await notify_event.edit(
+                            "❌ لغو شد.",
+                            buttons=[[UI.neutral(UI.L_BACK, back_route)]],
+                        )
                 else:
                     # حالت standalone: پیامِ کوتاهِ لغو + دکمه‌ی بازگشت به مقصد.
                     await notify_event.edit(
@@ -15572,7 +15586,8 @@ class SaaSBot:
             return
         print(f"🔍 [DEBUG-ANNOUNCE] role check OK, starting wizard", flush=True)
         await self._clear_admin_panel_wizard(event.sender_id)
-        self._start_own_wizard(event.sender_id, WIZ_ANNOUNCE, {})
+        # v2.14.12: back_route به admin_tools برای بازگشت درست بعد از cancel
+        self._start_own_wizard(event.sender_id, WIZ_ANNOUNCE, {"back": "admin_tools"})
         print(f"🔍 [DEBUG-ANNOUNCE] wizard started, sending UI", flush=True)
         # v2.14.10: ساده‌ترین شکل — فقط متن + یه دکمه
         try:
@@ -15582,7 +15597,7 @@ class SaaSBot:
                 "متن پیام رو بفرست (همان چیزی که همه‌ی کاربران باید ببینند).\n\n"
                 "⚠️ فقط کاربرانی که ربات را start کرده‌اند پیام را دریافت می‌کنند.\n"
                 "⚠️ بین هر پیام ۵۰ms تأخیر است.",
-                buttons=[[Button.inline("انصراف", b"admin_back_to_hub")]],
+                buttons=[[Button.inline("انصراف", b"cancel_wizard")]],
             )
             print(f"🔍 [DEBUG-ANNOUNCE] UI sent OK (simple form)", flush=True)
         except Exception as _e2:
@@ -21096,7 +21111,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-08-v2.14.11-debug"
+BUILD_VERSION = "2026-10-08-v2.14.12-debug"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
