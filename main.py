@@ -2021,6 +2021,8 @@ def ensure_wallet_schema() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_sched_msg ON scheduled_messages(scheduled_at, sent)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_aff_referrer ON affiliate_commissions(referrer_id, paid)")
+        # F-06: unique index on order_id to prevent duplicate commission awards
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_aff_order ON affiliate_commissions(order_id)")
 
 
 def referral_link(bot_username: str, user_id: int) -> str:
@@ -2721,13 +2723,16 @@ def create_affiliate_commission(referrer_id: int, referred_id: int,
         return {"error": "self_referral"}
     commission = int(amount_toman * commission_percent / 100)
     with _conn() as c:
+        # F-06: INSERT OR IGNORE for dedup (unique index on order_id)
         cur = c.execute(
-            "INSERT INTO affiliate_commissions (referrer_id, referred_id, "
+            "INSERT OR IGNORE INTO affiliate_commissions (referrer_id, referred_id, "
             "order_id, amount_toman, commission_percent, commission_toman, "
             "paid, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
             (referrer_id, referred_id, order_id, amount_toman,
              commission_percent, commission, _now()),
         )
+        if cur.rowcount == 0:
+            return {"ok": True, "dedup": True}
     log_action(referrer_id, "affiliate_commission",
                f"referred={referred_id}, amount={amount_toman}, commission={commission}")
     return {"ok": True, "commission_toman": commission, "id": cur.lastrowid}
@@ -10920,6 +10925,7 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
     """Verify a 2FA password against stored hash.
 
     v2.12.31: پشتیبانی از argon2id و SHA-256 (هم salted هم unsalted legacy).
+    v2.15.2: simplified except chain — removes UnboundLocalError risk.
     """
     if not tag or not password:
         return False
@@ -10936,14 +10942,9 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
     if algo == "argon2id" or stored_hash.startswith("$argon2"):
         try:
             from argon2 import PasswordHasher
-            from argon2.exceptions import VerifyMismatchError
             _ph = PasswordHasher()
             _ph.verify(stored_hash, password.encode("utf-8"))
             return True
-        except ImportError:
-            return False
-        except VerifyMismatchError:
-            return False
         except Exception:
             return False
     # SHA-256 (legacy or salted)
@@ -22563,7 +22564,7 @@ def save_config(cfg: dict) -> bool:
     with _SAVE_CONFIG_LOCK:
         # یک backup best-effort از configِ فعلی، قبل از replace. اگر فایلِ
         # قدیمی به هر دلیلی (مثلاً در حافظه‌ی یک کورتینِ دیگر که در حال
-        # خواندنش بوده) 필요 باشد، هنوز .bak قابل‌بازیابی است.
+        # خواندنش بوده) لازم باشد، هنوز .bak قابل‌بازیابی است.
         try:
             if os.path.exists(CONFIG_FILE):
                 shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
@@ -23613,7 +23614,7 @@ class SelfBot:
         # PATCH (v2.0.10 ANTI-BAN): per-account ban counter — وقتی یک
         # اکانت ۳ بار در ۳۰ روز به خطای fatal-auth می‌خوره، خودکار
         # disabled می‌شه و OWNER notify می‌شه. این سیاست، اکانت‌های
-        # مشکل‌دار رو از استمرار در retry و ریسکِ 더ster به اشتراکِ
+        # مشکل‌دار رو از استمرار در retry و ریسکِ بیشتر به اشتراکِ
         # api_id محافظت می‌کنه.
         self.ban_count = 0
         self.ban_first_seen = 0.0

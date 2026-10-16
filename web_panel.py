@@ -2052,7 +2052,7 @@ async def health():
     except Exception as e:
         info["status"] = "degraded"
         info["db"] = "error"
-        print(f"❌ [health] DB ping failed: {type(e).__name__}: {e}")
+        print(f"❌ [[hhealth] DB ping failed: {type(e).__name__}: {e}")
     return info
 
 
