@@ -2048,6 +2048,8 @@ def ensure_wallet_schema() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_sched_msg ON scheduled_messages(scheduled_at, sent)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_aff_referrer ON affiliate_commissions(referrer_id, paid)")
+        # F-06: unique index on order_id to prevent duplicate commission awards
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_aff_order ON affiliate_commissions(order_id)")
 
 
 def referral_link(bot_username: str, user_id: int) -> str:
@@ -2340,7 +2342,7 @@ def wallet_pay_from_balance(user_id: int, amount: int, ref: str = "") -> dict:
 
 
 def pay_order_wallet_atomic(user_id: int, order_id: int) -> dict:
-    """پرداخت اتمیک فاکتور از موجودی کیف پول در یک تراکنش واحد BEGIN IMMEDIATE (M-16)."""
+    """پرداخت اتمیک فاکتور از موجودی کیف پول در یک تراکنش واحد BEGIN IMMEDIATE (M-14)."""
     with _conn_immediate() as c:
         order = c.execute(
             "SELECT * FROM orders WHERE id = ? AND user_id = ?",
@@ -2891,13 +2893,16 @@ def create_affiliate_commission(referrer_id: int, referred_id: int,
         return {"error": "self_referral"}
     commission = int(amount_toman * commission_percent / 100)
     with _conn() as c:
+        # F-06: INSERT OR IGNORE for dedup (unique index on order_id)
         cur = c.execute(
-            "INSERT INTO affiliate_commissions (referrer_id, referred_id, "
+            "INSERT OR IGNORE INTO affiliate_commissions (referrer_id, referred_id, "
             "order_id, amount_toman, commission_percent, commission_toman, "
             "paid, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
             (referrer_id, referred_id, order_id, amount_toman,
              commission_percent, commission, _now()),
         )
+        if cur.rowcount == 0:
+            return {"ok": True, "dedup": True}
     log_action(referrer_id, "affiliate_commission",
                f"referred={referred_id}, amount={amount_toman}, commission={commission}")
     return {"ok": True, "commission_toman": commission, "id": cur.lastrowid}
@@ -11088,8 +11093,7 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
     v2.12.31 (DEBUG-1 MEDIUM-1): از argon2id با per-account salt استفاده
     می‌کنیم به‌جای unsalted SHA-256. قبلاً rainbow-table recoverable بود.
     حالا با argon2id (memory-hard, random salt) crack کردن عملاً غیرممکن.
-   向后-compatible: هش‌های قدیمی SHA-256 همچنان قابل verify هستند (با
-    `_verify_last_2fa_password`).
+   Backward-incompatible: هش‌های قدیمی SHA-256 دیگر verify نمی‌شوند (فقط argon2id).
     """
     if not tag or not password:
         return
@@ -11135,10 +11139,9 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
         return False
     try:
         from argon2 import PasswordHasher
-        from argon2.exceptions import VerifyMismatchError
         _ph = PasswordHasher()
         return bool(_ph.verify(stored_hash, password.encode("utf-8")))
-    except (ImportError, VerifyMismatchError, Exception):
+    except Exception:  # F-04: except تکی — import ناموفق نباید UnboundLocalError بدهد
         return False
 
 
@@ -17341,7 +17344,7 @@ class SaaSBot:
 
     # v2.9.0: پرداخت با کیف پول
     async def _pay_order_from_wallet(self, event, oid: int):
-        """پرداخت اتمیک فاکتور از موجودی کیف پول در یک تراکنش واحد (M-16)."""
+        """پرداخت اتمیک فاکتور از موجودی کیف پول در یک تراکنش واحد (M-14)."""
         order = get_order(oid)
         if not order or order["user_id"] != event.sender_id:
             await event.answer("❌ فاکتور پیدا نشد.", alert=True)
@@ -22753,7 +22756,7 @@ def save_config(cfg: dict) -> bool:
     with _SAVE_CONFIG_LOCK:
         # یک backup best-effort از configِ فعلی، قبل از replace. اگر فایلِ
         # قدیمی به هر دلیلی (مثلاً در حافظه‌ی یک کورتینِ دیگر که در حال
-        # خواندنش بوده) 필요 باشد، هنوز .bak قابل‌بازیابی است.
+        # خواندنش بوده) لازم باشد، هنوز .bak قابل‌بازیابی است.
         try:
             if os.path.exists(CONFIG_FILE):
                 shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
@@ -23817,7 +23820,7 @@ class SelfBot:
         # PATCH (v2.0.10 ANTI-BAN): per-account ban counter — وقتی یک
         # اکانت ۳ بار در ۳۰ روز به خطای fatal-auth می‌خوره، خودکار
         # disabled می‌شه و OWNER notify می‌شه. این سیاست، اکانت‌های
-        # مشکل‌دار رو از استمرار در retry و ریسکِ 더ster به اشتراکِ
+        # مشکل‌دار رو از استمرار در retry و ریسکِ بیشتر به اشتراکِ
         # api_id محافظت می‌کنه.
         self.ban_count = 0
         self.ban_first_seen = 0.0

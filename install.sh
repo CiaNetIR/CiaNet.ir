@@ -300,7 +300,7 @@ echo "   /start → 🎛 پنل مدیریت → 🔄 آپدیت و ورژن →
 echo ""
 echo "📞 پشتیبانی: @CiaNetOwner"
 
-# Seed min-commit floor for supply-chain protection (CRIT-02)
+# Seed min-commit floor for supply-chain protection (CRIT-04)
 if command -v git >/dev/null 2>&1 && [ -d "${INSTALL_DIR:-/opt/cianet}/.git" ]; then
     mkdir -p "${INSTALL_DIR:-/opt/cianet}/data"
     git -C "${INSTALL_DIR:-/opt/cianet}" rev-parse HEAD > "${INSTALL_DIR:-/opt/cianet}/data/.min_commit_floor" 2>/dev/null || true
