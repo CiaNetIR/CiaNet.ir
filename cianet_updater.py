@@ -495,6 +495,9 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
 
         # 2. backup
         backup_path = _backup_main_py(repo_dir)
+        # F-01: کامیت فعلی را قبل از reset نگه دار — مسیر rollback بعد از
+        # شکست pip به old_commit اشاره می‌کرد بدون آنکه تعریف شود (F821).
+        old_commit = get_local_commit(repo_dir)
 
         # PATCH (v2.6.4 CRITICAL): قبل از هر چیز، safe.directory رو تنظیم کن
         # تا git روی سرورهایی که repo با user دیگه‌ای clone شده خطای
