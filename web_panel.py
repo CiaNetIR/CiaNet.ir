@@ -339,6 +339,21 @@ def _persist_rate_limit_db(key: str, now_ts: float, window_sec: float = 900.0) -
         return 0
 
 
+def _count_rate_limit_db(key: str, now_ts: float, window_sec: float = 300.0) -> int:
+    """F-03: شمارش فقط-خواندنی شکست‌های لاگین در DB (بدون INSERT) — برای
+    چکِ آغاز تلاش، تا ثبتِ هر تلاش موفق/ناموفق در DB نیفتد."""
+    try:
+        m = _main()
+        with m._conn() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS login_rate_limits (k TEXT, ts REAL)")
+            return int(c.execute(
+                "SELECT COUNT(*) FROM login_rate_limits WHERE k = ? AND ts > ?",
+                (key, now_ts - window_sec),
+            ).fetchone()[0])
+    except Exception:
+        return 0
+
+
 # ─── Password verification (bcrypt) ──────────────────────────────────
 def _verify_password(plain: str, hashed: str) -> bool:
     """
@@ -531,6 +546,12 @@ def _check_login_rate_limit(ip: str) -> tuple:
     if len(failures) >= _LOGIN_FAIL_THRESHOLD:
         _login_blocks[ip] = now + _LOGIN_BLOCK_DURATION
         return False, _LOGIN_BLOCK_DURATION
+    # F-03: شمارش DB-persisted — ری‌استارت پنل شمارنده‌های brute-force را
+    # صفر نمی‌کند؛ در-memory و DB با هم (max) ارزیابی می‌شوند.
+    db_n = _count_rate_limit_db(f"login:{ip}", now, window_sec=_LOGIN_FAIL_WINDOW)
+    if db_n >= _LOGIN_FAIL_THRESHOLD:
+        _login_blocks[ip] = now + _LOGIN_BLOCK_DURATION
+        return False, _LOGIN_BLOCK_DURATION
     return True, 0
 
 
@@ -539,6 +560,11 @@ def _record_login_failure(ip: str):
     failures = _login_failures.get(ip, [])
     failures.append(now)
     _login_failures[ip] = failures
+    # F-03: ثبت پایدار شکست در DB (پنجرهٔ همان _LOGIN_FAIL_WINDOW)
+    try:
+        _persist_rate_limit_db(f"login:{ip}", now, window_sec=_LOGIN_FAIL_WINDOW)
+    except Exception:
+        pass
 
 
 # v2.14.2 (BUG-27w): session storeها + login-failure dictها قبلاً هیچ‌وقت
