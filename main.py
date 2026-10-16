@@ -2918,26 +2918,6 @@ def list_affiliate_commissions(referrer_id: int, limit: int = 50) -> list:
     return [dict(r) for r in rows]
 
 
-# v2.10.0: ثبت کمیسیون affiliate وقتی یه سفارش paid می‌شه
-def _maybe_award_affiliate(user_id: int, order_id: int, amount_toman: int) -> None:
-    """اگه کاربر referrer داره، کمیسیون affiliate ثبت کن."""
-    try:
-        with _conn() as c:
-            row = c.execute(
-                "SELECT referred_by FROM users WHERE user_id = ?", (user_id,)
-            ).fetchone()
-        if not row or not row["referred_by"]:
-            return  # no referrer
-        referrer = int(row["referred_by"])
-        if referrer == user_id:
-            return  # self-referral guard
-        # درصد کمیسیون از settings (default 10%)
-        pct = int(get_setting("affiliate_commission_percent", "10") or "10")
-        create_affiliate_commission(referrer, user_id, order_id, amount_toman, pct)
-    except Exception as e:
-        print(f"⚠️ [affiliate] error: {e}")
-
-
 def affiliate_stats(referrer_id: int) -> dict:
     """آمار affiliate: تعداد، مجموع کمیسیون، پرداخت‌شده."""
     with _conn() as c:
@@ -4564,7 +4544,10 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
     try:
         urow = get_user(user_id)
         if urow and urow.get("referred_by"):
-            create_affiliate_commission(int(urow["referred_by"]), user_id, order_id, int(order.get("amount_toman") or 0))
+            # F-05: درصد کمیسیون از تنظیمات خوانده می‌شود (قبلاً همیشه 10 پیش‌فرض
+            # بود و تنظیم affiliate_commission_percent فقط در تابع مرده خوانده می‌شد)
+            _aff_pct = int(get_setting("affiliate_commission_percent", "10") or "10")
+            create_affiliate_commission(int(urow["referred_by"]), user_id, order_id, int(order.get("amount_toman") or 0), _aff_pct)
     except Exception:
         pass
     log_action(user_id, "order_paid_trc20", f"order={order_id}, plan={order['plan']}")
