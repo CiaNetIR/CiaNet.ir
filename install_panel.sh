@@ -234,11 +234,12 @@ print(bcrypt.encrypt('$PANEL_PASS'))
 " 2>/dev/null)
     set -e
     if [ -z "$PANEL_PASS_HASH" ]; then
-        # fallback با هش ساده‌تر (sha256) — بهتر از هیچ
-        echo -e "${YELLOW}   ⚠️  passlib/bcrypt در venv کار نکرد — استفاده از sha256 (کم‌امن‌تر)${NC}"
-        echo -e "${YELLOW}   برای استفاده از bcrypt بعد از نصب:${NC}"
-        echo -e "${YELLOW}   $PYTHON_BIN -m pip install --upgrade 'passlib[bcrypt]'${NC}"
-        PANEL_PASS_HASH="sha256:"$(echo -n "$PANEL_PASS" | sha256sum | awk '{print $1}')
+        # F-02: fail-closed — پنل دیگر هش sha256 را نمی‌پذیرد؛ ادامه دادن
+        # یعنی نصبِ «موفقی» که ادمین هرگز نمی‌تواند لاگین شود.
+        echo -e "${RED}   ✗ passlib/bcrypt در venv در دسترس نیست — نصب ادامه نمی‌یابد (fail-closed).${NC}"
+        echo -e "${RED}   ابتدا نصب کنید: $PYTHON_BIN -m pip install --upgrade 'passlib[bcrypt]'${NC}"
+        echo -e "${RED}   سپس install_panel.sh را دوباره اجرا کنید.${NC}"
+        exit 1
     fi
 
     # تنظیم PANEL_ADMIN_USER اگه نباشه

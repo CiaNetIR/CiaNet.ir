@@ -451,6 +451,11 @@ async def _startup():
         print("   ⚠️  PANEL_ADMIN_PASS_HASH not set — login disabled!", flush=True)
         print("   Run: python3 -c \"from passlib.hash import bcrypt; print(bcrypt.hash('yourpass'))\"",
               flush=True)
+    elif PANEL_ADMIN_PASS_HASH.startswith("sha256:"):
+        # F-02: هش sha256 دیگر پشتیبانی نمی‌شود — بدون این هشدار، ادمینِ
+        # نصب‌های قدیمی بی‌پیام از لاگین رد می‌شد.
+        print("   ⛔ PANEL_ADMIN_PASS_HASH از نوع sha256 است و دیگر پشتیبانی نمی‌شود!", flush=True)
+        print("   پسورد پنل را با bcrypt بازتولید کنید (install_panel.sh جدید) و در env جایگزین کنید.", flush=True)
     print(f"   CORS origins: {ALLOWED_ORIGINS}", flush=True)
     print(f"   Data dir: {DATA_DIR}", flush=True)
 
