@@ -8,9 +8,6 @@
 # برای گرفتن لایسنس با OWNER تماس بگیرید.
 
 set -e
-umask 077
-unset HISTFILE
-export HISTCONTROL=ignorespace:erasedups
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -232,11 +229,6 @@ Environment=HOME=/opt/cianet
 EnvironmentFile=/etc/selfbot.env
 ExecStart=/opt/cianet/.venv/bin/python -u main.py all
 Restart=always
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/cianet /etc/cianet /var/log /tmp
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
@@ -299,10 +291,3 @@ echo "🔧 برای آپدیت خودکار:"
 echo "   /start → 🎛 پنل مدیریت → 🔄 آپدیت و ورژن → 🟢 آپدیت خودکار: فعال"
 echo ""
 echo "📞 پشتیبانی: @CiaNetOwner"
-
-# Seed min-commit floor for supply-chain protection (CRIT-02)
-if command -v git >/dev/null 2>&1 && [ -d "${INSTALL_DIR:-/opt/cianet}/.git" ]; then
-    mkdir -p "${INSTALL_DIR:-/opt/cianet}/data"
-    git -C "${INSTALL_DIR:-/opt/cianet}" rev-parse HEAD > "${INSTALL_DIR:-/opt/cianet}/data/.min_commit_floor" 2>/dev/null || true
-    chmod 600 "${INSTALL_DIR:-/opt/cianet}/data/.min_commit_floor" 2>/dev/null || true
-fi

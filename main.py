@@ -344,7 +344,6 @@ def db_init_db():
         c.execute('CREATE INDEX IF NOT EXISTS idx_sales_users_expiry ON sales_users(plan_expiry)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_self_accounts_user ON self_accounts(user_id)')
-        c.execute("UPDATE self_accounts SET api_hash = '[REDACTED]', bot_token = '[REDACTED]' WHERE api_hash IS NOT NULL OR bot_token IS NOT NULL")
 
 # ========== توابع عمومی کاربران (از helper.py) ==========
 
@@ -1270,8 +1269,6 @@ def _migrate_schema(c) -> None:
             else:
                 c.execute("ALTER TABLE payments ADD COLUMN receipt_ref TEXT")
             print("✅ [saas_db] مهاجرت payments با موفقیت انجام شد — هیچ داده‌ای از دست نرفت.")
-        if "receipt_file_uid" not in cols:
-            c.execute("ALTER TABLE payments ADD COLUMN receipt_file_uid TEXT")
 
     # ── مهاجرت delete_journal: افزودن ستون status (ردیف‌های قدیمی → DELETE_PENDING) ──
     if "delete_journal" in tables:
@@ -1299,12 +1296,6 @@ def _migrate_schema(c) -> None:
         if "original_amount_toman" not in cols:
             c.execute("ALTER TABLE orders ADD COLUMN original_amount_toman INTEGER")
             added = True
-        if "amount_salt" not in cols:
-            c.execute("ALTER TABLE orders ADD COLUMN amount_salt TEXT DEFAULT '0.00'")
-            added = True
-        if "receipt_file_uid" not in cols:
-            c.execute("ALTER TABLE orders ADD COLUMN receipt_file_uid TEXT")
-            added = True
         if added:
             print("✅ [saas_db] مهاجرت orders با موفقیت انجام شد — ستون‌های تخفیف اضافه شدند.")
 
@@ -1323,15 +1314,9 @@ def _migrate_schema(c) -> None:
 
 
 def init_db() -> None:
-    if os.path.exists(DB_PATH):
-        try:
-            _bak_date = datetime.now(timezone.utc).strftime("%Y%m%d")
-            _bak_path = f"{DB_PATH}.bak.{_bak_date}"
-            if not os.path.exists(_bak_path):
-                shutil.copy2(DB_PATH, _bak_path)
-                _chmod_private(_bak_path, 0o600)
-        except Exception as _be:
-            print(f"⚠️ [saas_db] pre-migration backup failed: {_be}")
+    # v2.12.29 (DEEP-6 #6): از _conn_immediate استفاده کن تا مهاجرت
+    # atomic باشه. قبلاً _conn بود که auto-commit می‌کرد و نیمه‌مهاجرت
+    # ممکن بود.
     with _conn_immediate() as c:
         _migrate_schema(c)
         c.executescript("""
@@ -1954,10 +1939,6 @@ def ensure_wallet_schema() -> None:
         if "auto_renew_enabled" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN auto_renew_enabled INTEGER NOT NULL DEFAULT 0")
             print("✅ [auto_renew] ستون auto_renew_enabled به users اضافه شد")
-        if "api_id" not in cols:
-            c.execute("ALTER TABLE users ADD COLUMN api_id INTEGER DEFAULT NULL")
-        if "api_hash" not in cols:
-            c.execute("ALTER TABLE users ADD COLUMN api_hash TEXT DEFAULT NULL")
         # v2.12.11 (QA3-QUICK BUG#2): ستون extensions_applied روی orders
         # — برای محدود کردنِ دفعاتِ اکستندِ فاکتورِ pending با رسیدِ آپلود
         # شده. قبلاً expiry_loop هر ۷ روز دوباره اکستند می‌کرد → حلقه‌ی
@@ -2026,14 +2007,6 @@ def ensure_wallet_schema() -> None:
             ")"
         )
         c.execute(
-            "CREATE TABLE IF NOT EXISTS broadcast_counters ("
-            "  owner_id TEXT NOT NULL,"
-            "  date TEXT NOT NULL,"
-            "  count INTEGER NOT NULL DEFAULT 0,"
-            "  PRIMARY KEY (owner_id, date)"
-            ")"
-        )
-        c.execute(
             "CREATE TABLE IF NOT EXISTS affiliate_commissions ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
             "  referrer_id INTEGER NOT NULL,"
@@ -2060,8 +2033,6 @@ def parse_referral_arg(text: str):
     return int(m.group(1)) if m else None
 
 
-_REFERRAL_RATE_WINDOW = {}
-
 def attach_referrer(user_id: int, referrer_id: int) -> bool:
     """
     ثبتِ دعوت‌کننده برای یک کاربرِ تازه.
@@ -2072,12 +2043,6 @@ def attach_referrer(user_id: int, referrer_id: int) -> bool:
     """
     if not user_id or not referrer_id or user_id == referrer_id:
         return False
-    now_ts = time.time()
-    hist = [t for t in _REFERRAL_RATE_WINDOW.get(referrer_id, []) if now_ts - t < 3600]
-    if len(hist) >= 20:
-        return False
-    hist.append(now_ts)
-    _REFERRAL_RATE_WINDOW[referrer_id] = hist
     with _conn_immediate() as c:
         row = c.execute("SELECT referred_by FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if row is None or row["referred_by"] is not None:
@@ -2111,63 +2076,29 @@ def referral_stats(user_id: int) -> dict:
 
 
 def claim_referral_rewards(user_id: int) -> int:
-    """اعطای اتمیک جایزه دعوت در یک تراکنش BEGIN IMMEDIATE همراه با قید یکتایی."""
+    """
+    جایزه‌های به‌دست‌آمده ولی دریافت‌نشده را اعمال می‌کند و تعدادشان را
+    برمی‌گرداند. اتمیک: شمارنده‌ی دریافت‌شده‌ها فقط وقتی بالا می‌رود که
+    اشتراک واقعاً ساخته شده باشد.
+    """
+    st = referral_stats(user_id)
+    n = st["pending"]
+    if n <= 0:
+        return 0
     granted = 0
-    with _conn_immediate() as c:
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS referral_reward_grants ("
-            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  referrer_id INTEGER NOT NULL,"
-            "  slot_index INTEGER NOT NULL,"
-            "  reward_type TEXT NOT NULL,"
-            "  created_at TEXT NOT NULL,"
-            "  UNIQUE(referrer_id, slot_index, reward_type)"
-            ")"
-        )
-        invited = c.execute(
-            "SELECT COUNT(*) AS n FROM users WHERE referred_by = ?", (user_id,)
-        ).fetchone()["n"]
-        row = c.execute(
-            "SELECT referral_rewards FROM users WHERE user_id = ?", (user_id,)
-        ).fetchone()
-        rewards = int((row["referral_rewards"] or 0) if row else 0)
-        earned = invited // REFERRAL_GOAL
-        pending = max(0, earned - rewards)
-        if pending <= 0:
-            return 0
-        for idx in range(rewards + 1, rewards + pending + 1):
-            try:
-                c.execute(
-                    "INSERT INTO referral_reward_grants (referrer_id, slot_index, reward_type, created_at) "
-                    "VALUES (?, ?, 'sub_gift', ?)",
-                    (user_id, idx, _now()),
-                )
-            except sqlite3.IntegrityError:
-                continue
-            existing = c.execute(
-                "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' "
-                "ORDER BY expire_date DESC LIMIT 1",
-                (user_id,),
-            ).fetchone()
-            now_utc = datetime.now(timezone.utc)
-            if existing:
-                existing_expire = _parse_date(existing["expire_date"])
-                base = existing_expire if existing_expire > now_utc else now_utc
-                c.execute("UPDATE subscriptions SET status = 'superseded' WHERE id = ?", (existing["id"],))
-            else:
-                base = now_utc
-            c.execute(
-                "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, "
-                "license_id, selfbot_tag, created_at) VALUES (?, 'هدیه دعوت', ?, ?, 'active', NULL, NULL, ?)",
-                (user_id, _format_date(now_utc), _format_date(base + timedelta(days=REFERRAL_REWARD_DAYS)), _now()),
-            )
+    for _ in range(n):
+        try:
+            create_subscription(user_id, "هدیه دعوت", REFERRAL_REWARD_DAYS)
             granted += 1
-        if granted:
-            c.execute(
-                "UPDATE users SET referral_rewards = COALESCE(referral_rewards, 0) + ? WHERE user_id = ?",
-                (granted, user_id),
-            )
+        except Exception as e:
+            print(f"⚠️ [referral] ساخت اشتراک هدیه ناموفق: {type(e).__name__}: {e}")
+            break
     if granted:
+        with _conn() as c:
+            c.execute(
+                "UPDATE users SET referral_rewards = COALESCE(referral_rewards, 0) + ? "
+                "WHERE user_id = ?", (granted, user_id),
+            )
         log_action(user_id, "referral_reward", f"{granted}×{REFERRAL_REWARD_DAYS}d")
     return granted
 
@@ -2337,67 +2268,6 @@ def wallet_pay_from_balance(user_id: int, amount: int, ref: str = "") -> dict:
                 f"amount={amount}, ref={ref or '-'}, new_balance={new_balance}")
     return {"ok": True, "balance": new_balance, "tx_id": tx_id}
 
-
-
-def pay_order_wallet_atomic(user_id: int, order_id: int) -> dict:
-    """پرداخت اتمیک فاکتور از موجودی کیف پول در یک تراکنش واحد BEGIN IMMEDIATE (M-16)."""
-    with _conn_immediate() as c:
-        order = c.execute(
-            "SELECT * FROM orders WHERE id = ? AND user_id = ?",
-            (order_id, user_id),
-        ).fetchone()
-        if not order:
-            return {"ok": False, "error": "order_not_found"}
-        order = dict(order)
-        if order["status"] != ORDER_STATUS_PENDING:
-            return {"ok": False, "error": "order_not_pending"}
-        amount = int(order["amount_toman"])
-        urow = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if urow is None:
-            return {"ok": False, "error": "user_not_found"}
-        current = int(urow["wallet_balance"] or 0)
-        if current < amount:
-            return {"ok": False, "error": "insufficient_balance", "balance": current}
-        new_balance = current - amount
-        c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?", (new_balance, user_id))
-        c.execute(
-            "INSERT INTO wallet_transactions "
-            "(user_id, amount, balance_after, type, ref, reason, created_by, created_at) "
-            "VALUES (?, ?, ?, 'payment', ?, 'خرج از کیف پول', ?, ?)",
-            (user_id, -amount, new_balance, f"order:{order['order_no']}", user_id, _now()),
-        )
-        cur = c.execute(
-            "UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (_now(), order_id),
-        )
-        if cur.rowcount == 0:
-            raise RuntimeError("order_already_paid_race")
-        plan_name = order["plan"]
-        days = 30
-        if plan_name != DEDICATED_BOT_PLAN:
-            prow = c.execute("SELECT duration_days FROM pricing WHERE plan = ?", (plan_name,)).fetchone()
-            if prow and prow["duration_days"]:
-                days = int(prow["duration_days"])
-            existing = c.execute(
-                "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' "
-                "ORDER BY expire_date DESC LIMIT 1",
-                (user_id,),
-            ).fetchone()
-            now_utc = datetime.now(timezone.utc)
-            if existing:
-                existing_expire = _parse_date(existing["expire_date"])
-                base = existing_expire if existing_expire > now_utc else now_utc
-                c.execute("UPDATE subscriptions SET status = 'superseded' WHERE id = ?", (existing["id"],))
-            else:
-                base = now_utc
-            c.execute(
-                "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, "
-                "license_id, selfbot_tag, created_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, ?)",
-                (user_id, plan_name, _format_date(now_utc), _format_date(base + timedelta(days=days)), _now()),
-            )
-    log_action(user_id, "wallet_payment_atomic", f"order={order_id}, amount={amount}, new_balance={new_balance}")
-    return {"ok": True, "balance": new_balance, "plan": plan_name, "days": days, "amount": amount, "order_no": order["order_no"]}
 
 def list_wallet_transactions(user_id: int, limit: int = 20) -> list:
     """آخرین N تراکنشِ کیف پول کاربر — جدیدترین اول."""
@@ -2665,61 +2535,55 @@ def auto_renew_subscription(user_id: int) -> dict:
     expire_date گذشته) هم به‌عنوان «نیاز به تمدید» در نظر گرفته می‌شه.
     """
     # v2.10.0: atomic lock — دو فراخوانی هم‌زمان نمی‌تونن هر دو succeed کنن
+    with _conn_immediate() as c:
+        # v2.12.21: فقط active با expire_date آینده رو «فعلی» در نظر بگیر.
+        # اگه active ولی expire_date گذشته (در حال expire شدن)، نیاز به
+        # تمدید هست.
+        # v2.12.22 (re-audit): از _now_date() + >= استفاده می‌کنیم (همون
+        # end-of-day semantic که در list_expired_subscriptions استفاده می‌شه).
+        active = c.execute(
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' "
+            "AND expire_date >= ? LIMIT 1",
+            (user_id, _now_date())
+        ).fetchone()
+        if active:
+            return {"ok": True, "renewed": False, "reason": "already_active"}
+    # پیدا کردن آخرین پلن کاربر
+    with _conn() as c:
+        last_sub = c.execute(
+            "SELECT plan FROM subscriptions WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+    if not last_sub:
+        return {"ok": True, "renewed": False, "reason": "no_previous_plan"}
+    plan_name = last_sub["plan"]
+    pricing = get_pricing(plan_name)
+    if not pricing:
+        return {"ok": True, "renewed": False, "reason": "plan_not_found"}
+    amount = int(pricing["price_toman"])
+    days = int(pricing["duration_days"] or 30)
+    bal = get_wallet_balance(user_id)
+    if bal < amount:
+        return {"ok": True, "renewed": False, "reason": "insufficient_balance"}
+    # پرداخت از کیف پول
+    pay_result = wallet_pay_from_balance(user_id, amount, ref=f"auto_renew:{plan_name}")
+    if not pay_result.get("ok"):
+        return {"ok": False, "renewed": False, "reason": pay_result.get("error")}
+    # ساخت اشتراک جدید
+    # v2.12.27 (HUNT-1 #2/HUNT-4 #8.7): refund در صورت خطا
     try:
-        with _conn_immediate() as c:
-            active = c.execute(
-                "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' "
-                "AND expire_date >= ? LIMIT 1",
-                (user_id, _now_date())
-            ).fetchone()
-            if active:
-                return {"ok": True, "renewed": False, "reason": "already_active"}
-            last_sub = c.execute(
-                "SELECT plan FROM subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
-                (user_id,),
-            ).fetchone()
-            if not last_sub:
-                return {"ok": True, "renewed": False, "reason": "no_previous_plan"}
-            plan_name = last_sub["plan"]
-            pricing = c.execute("SELECT * FROM pricing WHERE plan = ?", (plan_name,)).fetchone()
-            if not pricing:
-                return {"ok": True, "renewed": False, "reason": "plan_not_found"}
-            amount = int(pricing["price_toman"])
-            days = int(pricing["duration_days"] or 30)
-            urow = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
-            current_bal = int(urow["wallet_balance"] or 0) if urow else 0
-            if current_bal < amount:
-                return {"ok": True, "renewed": False, "reason": "insufficient_balance"}
-            new_balance = current_bal - amount
-            c.execute("UPDATE users SET wallet_balance = ? WHERE user_id = ?", (new_balance, user_id))
-            c.execute(
-                "INSERT INTO wallet_transactions "
-                "(user_id, amount, balance_after, type, ref, reason, created_by, created_at) "
-                "VALUES (?, ?, ?, 'payment', ?, 'تمدید خودکار اشتراک', ?, ?)",
-                (user_id, -amount, new_balance, f"auto_renew:{plan_name}", user_id, _now()),
-            )
-            existing = c.execute(
-                "SELECT * FROM subscriptions WHERE user_id = ? AND status = 'active' "
-                "ORDER BY expire_date DESC LIMIT 1",
-                (user_id,),
-            ).fetchone()
-            now_utc = datetime.now(timezone.utc)
-            if existing:
-                existing_expire = _parse_date(existing["expire_date"])
-                base = existing_expire if existing_expire > now_utc else now_utc
-                c.execute("UPDATE subscriptions SET status = 'superseded' WHERE id = ?", (existing["id"],))
-            else:
-                base = now_utc
-            c.execute(
-                "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, "
-                "license_id, selfbot_tag, created_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, ?)",
-                (user_id, plan_name, _format_date(now_utc), _format_date(base + timedelta(days=days)), _now()),
-            )
+        create_subscription(user_id, plan_name, days)
     except Exception as _e:
-        print(f"⚠️ [auto_renew] atomic transaction failed: {_e}")
-        return {"ok": False, "renewed": False, "reason": f"tx_failed: {type(_e).__name__}"}
+        print(f"⚠️ [auto_renew] create_subscription failed: {_e} — refunding")
+        try:
+            wallet_credit(user_id, amount, OWNER_ID,
+                          reason="refund: auto_renew create_subscription failed")
+        except Exception as _re:
+            print(f"❌ [auto_renew] refund FAILED: {_re}")
+        return {"ok": False, "renewed": False,
+                "reason": f"create_subscription_failed: {type(_e).__name__}"}
     log_action(user_id, "auto_renew", f"plan={plan_name}, amount={amount}, days={days}")
-    return {"ok": True, "renewed": True, "plan": plan_name, "days": days, "balance": new_balance}
+    return {"ok": True, "renewed": True, "plan": plan_name, "days": days, "balance": pay_result["balance"]}
 
 
 # v2.9.9: پیام زمان‌بندی‌شده
@@ -2844,40 +2708,6 @@ def find_auto_reply(tag: str, text: str, user_id: int = None) -> str:
 
 
 # v2.9.9: affiliate commission
-
-def get_broadcast_daily_count(owner_key: str) -> int:
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    try:
-        with _conn() as c:
-            row = c.execute(
-                "SELECT count FROM broadcast_counters WHERE owner_id = ? AND date = ?",
-                (str(owner_key), today_str),
-            ).fetchone()
-            return int(row["count"]) if row else 0
-    except Exception:
-        return 0
-
-
-def increment_broadcast_daily_count(owner_key: str, delta: int = 1, cap: int = 200) -> bool:
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    try:
-        with _conn_immediate() as c:
-            row = c.execute(
-                "SELECT count FROM broadcast_counters WHERE owner_id = ? AND date = ?",
-                (str(owner_key), today_str),
-            ).fetchone()
-            cur_val = int(row["count"]) if row else 0
-            if cur_val + delta > cap:
-                return False
-            c.execute(
-                "INSERT INTO broadcast_counters (owner_id, date, count) VALUES (?, ?, ?) "
-                "ON CONFLICT(owner_id, date) DO UPDATE SET count = count + ?",
-                (str(owner_key), today_str, delta, delta),
-            )
-            return True
-    except Exception:
-        return False
-
 def create_affiliate_commission(referrer_id: int, referred_id: int,
                                 order_id: int, amount_toman: int,
                                 commission_percent: int = 10) -> dict:
@@ -4072,7 +3902,7 @@ def _license_batch_result_text(result: dict) -> str:
 #  پرداخت‌ها
 # ─────────────────────────────────────────────────────
 
-def create_payment(user_id: int, plan: str, amount: int, receipt_ref: str, receipt_file_uid: str = None) -> int:
+def create_payment(user_id: int, plan: str, amount: int, receipt_ref: str) -> int:
     """
     receipt_ref باید یک مرجع قابل‌بازیابی به پیام اصلیِ رسید باشد، مثلاً
     f"{chat_id}:{message_id}" — نه صرفاً یک عدد داخلی media که به‌تنهایی
@@ -4088,19 +3918,19 @@ def create_payment(user_id: int, plan: str, amount: int, receipt_ref: str, recei
     with _conn_immediate() as c:
         # v2.13.0: dedup check — atomic با INSERT
         existing = c.execute(
-            "SELECT id, status FROM payments WHERE (receipt_ref = ? OR (? IS NOT NULL AND receipt_file_uid = ?)) "
+            "SELECT id, status FROM payments WHERE receipt_ref = ? "
             "AND status IN ('pending', 'approved') LIMIT 1",
-            (receipt_ref, receipt_file_uid, receipt_file_uid),
+            (receipt_ref,),
         ).fetchone()
         if existing:
             raise ValueError(
-                f"این تصویر رسید قبلاً برای پرداخت #{existing['id']} "
+                f"این رسید قبلاً برای پرداخت #{existing['id']} "
                 f"(وضعیت: {existing['status']}) ثبت شده — هر رسید فقط یک‌بار قابل استفاده است."
             )
         cur = c.execute(
-            "INSERT INTO payments (user_id, plan, amount, receipt_ref, receipt_file_uid, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-            (user_id, plan, amount, receipt_ref, receipt_file_uid, _now()),
+            "INSERT INTO payments (user_id, plan, amount, receipt_ref, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?)",
+            (user_id, plan, amount, receipt_ref, _now()),
         )
         return cur.lastrowid
 
@@ -4109,16 +3939,6 @@ def get_payment(payment_id: int):
     with _conn() as c:
         row = c.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
     return dict(row) if row else None
-
-
-def cleanup_stale_approved_payments() -> int:
-    with _conn_immediate() as c:
-        cur = c.execute(
-            "UPDATE orders SET status = 'paid', pay_method = 'card', paid_at = COALESCE(paid_at, ?) "
-            "WHERE status = 'pending' AND payment_id IN (SELECT id FROM payments WHERE status = 'approved')",
-            (_now(),),
-        )
-        return cur.rowcount
 
 
 def list_pending_payments() -> list:
@@ -4255,29 +4075,22 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
     # باشه، order گیر می‌کنه و قابل پرداخت نیست.
     if amount_toman <= 0:
         return {"error": "invalid_amount"}
-    from decimal import Decimal, ROUND_HALF_UP
-    base_usdt_dec = Decimal(str(amount_usdt or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     if discount_code:
         result = apply_discount_code(discount_code, amount_toman)
         if result.get("ok"):
             amount_toman = result["amount"]
             discount_percent = result["percent"]
             applied_code = discount_code
-            base_usdt_dec = (base_usdt_dec * Decimal(100 - discount_percent) / Decimal(100)).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
+            # recalculate usdt based on new amount
+            # (با فرض نرخ ثابت — recalculated by caller if needed)
+            amount_usdt = round(amount_usdt * (100 - discount_percent) / 100, 2)
         else:
             return {"error": result.get("error", "discount_failed")}
-    salt_cents = secrets.randbelow(99) + 1
-    salt_dec = (Decimal(salt_cents) / Decimal(100)).quantize(Decimal("0.01"))
-    if base_usdt_dec > Decimal("0"):
-        final_usdt_dec = base_usdt_dec + salt_dec
-    else:
-        final_usdt_dec = Decimal("0.00")
-        salt_dec = Decimal("0.00")
-    amount_usdt = float(final_usdt_dec)
-    amount_salt_str = str(salt_dec)
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).strftime(_DATETIME_FMT)
+    # PATCH (P1-1 BUG-29): order_seq قبلاً با تراکنشِ deferred خوانده/نوشته
+    # می‌شد؛ دو سفارشِ هم‌زمان شماره‌ی یکسان می‌گرفتند و روی order_no UNIQUE
+    # با استثنای مدیریت‌نشده می‌شکستند. حالا «افزایش seq + ثبت سفارش» در
+    # یک تراکنش BEGIN IMMEDIATE اتمیک است.
     try:
         with _conn_immediate() as c:
             row = c.execute("SELECT value FROM settings WHERE key = 'order_seq'").fetchone()
@@ -4288,10 +4101,10 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
                 (str(seq),),
             )
             cur = c.execute(
-                "INSERT INTO orders (order_no, user_id, plan, amount_toman, amount_usdt, amount_salt, status, "
+                "INSERT INTO orders (order_no, user_id, plan, amount_toman, amount_usdt, status, "
                 "created_at, expires_at, discount_code, discount_percent, original_amount_toman) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
-                (f"ORD-{seq:05d}", user_id, plan, amount_toman, amount_usdt, amount_salt_str, _now(), expires_at,
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+                (f"ORD-{seq:05d}", user_id, plan, amount_toman, amount_usdt, _now(), expires_at,
                  applied_code, discount_percent, original_amount),
             )
             oid = cur.lastrowid
@@ -4307,7 +4120,7 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
                 with _conn_immediate() as c:
                     c.execute(
                         "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
-                        "WHERE UPPER(code) = UPPER(?) AND used_count > 0",
+                        "WHERE code = ? AND used_count > 0",
                         (applied_code,),
                     )
             except Exception as _rb:
@@ -4375,7 +4188,7 @@ def expire_order(order_id: int) -> None:
             try:
                 c.execute(
                     "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
-                    "WHERE UPPER(code) = UPPER(?) AND used_count > 0",
+                    "WHERE code = ? AND used_count > 0",
                     (discount_code,),
                 )
             except Exception as _e:
@@ -4449,7 +4262,7 @@ def cancel_order(order_id: int, user_id: int) -> None:
             try:
                 c.execute(
                     "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
-                    "WHERE UPPER(code) = UPPER(?) AND used_count > 0",
+                    "WHERE code = ? AND used_count > 0",
                     (discount_code,),
                 )
             except Exception as _e:
@@ -4482,7 +4295,7 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
     """
     txid = (txid or "").strip().lower()
     try:
-        with _conn_immediate() as c:
+        with _conn() as c:
             # replay: این هش قبلاً برای فاکتورِ پرداخت‌شده‌ای استفاده شده؟
             used = c.execute(
                 "SELECT id FROM orders WHERE txid = ? AND status = 'paid' LIMIT 1", (txid,)
@@ -4556,28 +4369,14 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
         # باقی نمی‌ماند. جزئیات فنی فقط در لاگ سرور.
         print(f"⚠️ [saas_db] pay_order_trc20_atomic خطا: {type(e).__name__}: {e}")
         return {"ok": False, "error": "unknown_error"}
-    try:
-        urow = get_user(user_id)
-        if urow and urow.get("referred_by"):
-            create_affiliate_commission(int(urow["referred_by"]), user_id, order_id, int(order.get("amount_toman") or 0))
-    except Exception:
-        pass
     log_action(user_id, "order_paid_trc20", f"order={order_id}, plan={order['plan']}")
     return {"ok": True, "plan": order["plan"], "duration": duration}
 
 
-def set_order_payment_id(order_id: int, payment_id: int, user_id: int = None, receipt_file_uid: str = None) -> bool:
-    """اتصال یک‌بارنویس فاکتور به رسید کارتی ثبت‌شده با بررسی اجباری مالکیت (ضد IDOR)."""
-    with _conn_immediate() as c:
-        if user_id is None:
-            prow = c.execute("SELECT user_id FROM payments WHERE id = ?", (payment_id,)).fetchone()
-            user_id = int(prow["user_id"]) if prow else -1
-        cur = c.execute(
-            "UPDATE orders SET payment_id = ?, receipt_file_uid = COALESCE(?, receipt_file_uid) "
-            "WHERE id = ? AND payment_id IS NULL AND status = 'pending' AND user_id = ?",
-            (payment_id, receipt_file_uid, order_id, user_id),
-        )
-        return cur.rowcount > 0
+def set_order_payment_id(order_id: int, payment_id: int) -> None:
+    """اتصال فاکتور به رسیدِ کارتیِ ثبت‌شده، تا بعد از تایید ادمین فاکتور هم paid شود."""
+    with _conn() as c:
+        c.execute("UPDATE orders SET payment_id = ? WHERE id = ?", (payment_id, order_id))
 
 
 # ─────────────────────────────────────────────────────
@@ -5128,40 +4927,51 @@ def build_backup_zip(zip_path: str, password: Optional[str] = None) -> bool:
         # فقط وقتی password داده شده انجام می‌شود. فایلِ validate‌شده
         # in-place (همان مسیر) با Fernet ciphertext جایگزین می‌شود تا
         # caller بدون تغییرِ مسیر بتواند آن را send_file کند.
-        if password is None:
-            password = os.environ.get("CIANET_BACKUP_PASS", "").strip()
-        if not password:
-            print("⛔ [backup] CIANET_BACKUP_PASS تنظیم نشده است — ساخت بکاپ بدون رمزنگاری متوقف شد (fail-closed).")
-            try:
-                os.remove(zip_path)
-            except Exception:
-                pass
-            return False
         if password:
             try:
                 import base64
                 from cryptography.fernet import Fernet
-                from cryptography.hazmat.primitives import hashes
-                from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-                salt = os.urandom(16)
-                kdf = PBKDF2HMAC(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=salt,
-                    iterations=100_000,
+                key = base64.urlsafe_b64encode(
+                    hashlib.sha256(password.encode("utf-8")).digest()
                 )
-                key = base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
                 fernet = Fernet(key)
                 with open(zip_path, "rb") as src:
                     plain = src.read()
-                enc = b"CNB1" + salt + fernet.encrypt(plain)
+                enc = fernet.encrypt(plain)
+                # نوشتنِ اتمیک: اول در فایلِ موقت، بعد os.replace تا در صورت
+                # قطعِ برق/کرش، فایلِ plain دست‌نخورده باقی بماند.
                 tmp_enc = zip_path + ".enc.tmp"
                 with open(tmp_enc, "wb") as dst:
                     dst.write(enc)
                 os.replace(tmp_enc, zip_path)
                 _chmod_private(zip_path)
+            except ImportError:
+                # cryptography نصب نیست — fallback به ZipCrypto ضعیف. برای
+                # این کار باید ZIP را دوباره با pwd ساخت. چون ZipCrypto
+                # به‌سادگی قابل شکستن است، فقط best-effort است.
+                print("⚠️ [backup] cryptography نصب نیست — fallback به ZipCrypto ضعیف")
+                try:
+                    weak_zip = zip_path + ".weak.tmp"
+                    with zipfile.ZipFile(
+                        weak_zip, "w", zipfile.ZIP_DEFLATED,
+                    ) as zf_out:
+                        zf_out.setpassword(password.encode("utf-8"))
+                        with zipfile.ZipFile(zip_path, "r") as zf_in:
+                            for item in zf_in.infolist():
+                                zf_out.writestr(
+                                    item, zf_in.read(item.filename)
+                                )
+                    os.replace(weak_zip, zip_path)
+                    _chmod_private(zip_path)
+                except Exception as ee:
+                    print(f"⚠️ [backup] ZipCrypto fallback هم ناموفق: {ee}")
+                    try:
+                        os.remove(zip_path)
+                    except Exception:
+                        pass
+                    return False
             except Exception as e:
-                print(f"⛔ [backup] رمزگذاری PBKDF2+Fernet ناموفق (fail-closed): {e}")
+                print(f"⚠️ [backup] رمزگذاری Fernet ناموفق: {e}")
                 try:
                     os.remove(zip_path)
                 except Exception:
@@ -9082,11 +8892,8 @@ class AdminBot:
 
         try:
             if feature == "enabled":
-                if new_value:
-                    bot.enabled = True
-                    bot._persist(enabled=True)
-                else:
-                    await bot._power_off_full()
+                bot.enabled = new_value
+                bot._persist(enabled=new_value)
             elif feature == "time_enabled":
                 bot.time_enabled = new_value
                 if new_value:
@@ -9357,10 +9164,9 @@ class AdminBot:
         )
 
     async def _finish_proxy(self, event, data: dict):
-        if not _is_safe_proxy_host(data.get("addr", "")):
-            self.wizards.pop(event.sender_id, None)
-            await event.respond("⛔ آدرس پروکسی نامعتبر است (IP داخلی یا محلی مجاز نیست).")
-            return
+        # v2.12.8: تنها مسیرِ باقی‌مانده، تنظیمِ پروکسی برای یک اکانت
+        # از‌قبل‌موجود است. مسیرِ new_account_login حذف شده — لاگین همیشه
+        # مستقیم انجام می‌شود.
         proxy_cfg = {
             "proxy_type": data["proxy_type"],
             "addr": data["addr"],
@@ -9536,16 +9342,19 @@ class AdminBot:
             return {ADMIN_ID}
 
     async def _send_backup(self, scheduled_hour: int = None):
-        """بکاپ کامل روزانه (manifest) و ارسال به OWNER/ADMIN ها (رمزگذاری‌شده با CIANET_BACKUP_PASS)."""
-        backup_pass = os.environ.get("CIANET_BACKUP_PASS", "").strip()
-        if not backup_pass:
-            print("⛔ [admin_bot] متغیر محیطی CIANET_BACKUP_PASS تنظیم نشده است — بکاپ روزانه ارسال نشد (fail-closed).")
-            return
-        _fd_bkp, backup_path = tempfile.mkstemp(prefix="cianet_bkp_", suffix=".zip")
-        os.close(_fd_bkp)
+        """بکاپ کامل روزانه (manifest) و ارسال به OWNER/ADMIN ها.
+
+        scheduled_hour: فقط برای کپشن (کاربر بفهمد کدام نوبت است).
+        v1.9.2: لاگ کامل + timeout ۵ دقیقه + ارسال پیام خطا در صورت شکست.
+        """
+        backup_path = os.path.join(tempfile.gettempdir(), _backup_file_name())
         try:
+            # v1.9.3: timeout ۶۰ ثانیه برای build. اگه session قفل باشه،
+            # sqlite.backup() بی‌نهایت صبر می‌کرد و scheduler برای همیشه
+            # hang می‌کرد. حالا اگه بیش از ۶۰ ثانیه طول بکشه، fail می‌شه
+            # (snapshot فایل فردا امتحان می‌شه).
             ok = await asyncio.wait_for(
-                asyncio.to_thread(build_backup_zip, backup_path, backup_pass),
+                asyncio.to_thread(build_backup_zip, backup_path),
                 timeout=60.0,
             )
             if not ok:
@@ -11024,32 +10833,6 @@ WIZ_CAP_USER_ID = "awaiting_cap_user_id"
 _GATE_RETRY_COOLDOWN = 5
 
 
-
-def _is_safe_proxy_host(host: str) -> bool:
-    """اعتبارسنجی هاست پروکسی در برابر SSRF (مسدودسازی IPهای لوکال، خصوصی، link-local و metadata)."""
-    import ipaddress
-    import socket
-    h = (host or "").strip().lower()
-    if not h or h in ("localhost", "localhost.localdomain") or h.endswith((".local", ".internal")):
-        return False
-    try:
-        ip_obj = ipaddress.ip_address(h)
-        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_reserved or ip_obj.is_unspecified:
-            return False
-        return True
-    except ValueError:
-        pass
-    try:
-        infos = socket.getaddrinfo(h, None)
-        for info in infos:
-            addr = info[4][0]
-            ip_obj = ipaddress.ip_address(addr)
-            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_reserved or ip_obj.is_unspecified:
-                return False
-    except Exception:
-        return False
-    return True
-
 def _normalize_channel(channel) -> str:
     """
     نرمال‌سازی یک‌جای ورودی کانال: یوزرنیم، @یوزرنیم، لینک t.me یا
@@ -11113,15 +10896,31 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
         )
         acc["last_2fa_hash"] = _ph.hash(password.encode("utf-8"))
         acc["last_2fa_hash_algo"] = "argon2id"
+    except ImportError:
+        # argon2-cffi نصب نیست — fallback به SHA-256 با tag به‌عنوان salt
+        # (بهتر از unsalted ولی هنوز هم vulnerability پایین‌تری از argon2)
+        import hashlib
+        acc["last_2fa_hash"] = hashlib.sha256(
+            f"{tag}:{password}".encode("utf-8")
+        ).hexdigest()
+        acc["last_2fa_hash_algo"] = "sha256_tagged"
     except Exception as _e:
-        print(f"⛔ [2fa] argon2id hash failed (fail-closed, no sha256 fallback): {_e}")
-        return
+        # fallback نهایی
+        import hashlib
+        print(f"⚠️ [2fa] argon2 hash failed ({_e}) — fallback به SHA-256 salted")
+        acc["last_2fa_hash"] = hashlib.sha256(
+            f"{tag}:{password}".encode("utf-8")
+        ).hexdigest()
+        acc["last_2fa_hash_algo"] = "sha256_tagged"
     acc["last_2fa_login_at"] = _now()
     save_config(cfg)
 
 
 def _verify_last_2fa_password(tag: str, password: str) -> bool:
-    """اعتبارسنجی رمز 2FA فقط با Argon2id (حذف کامل fallback ضعیف SHA-256)."""
+    """Verify a 2FA password against stored hash.
+
+    v2.12.31: پشتیبانی از argon2id و SHA-256 (هم salted هم unsalted legacy).
+    """
     if not tag or not password:
         return False
     cfg = load_config()
@@ -11131,15 +10930,34 @@ def _verify_last_2fa_password(tag: str, password: str) -> bool:
     if not isinstance(acc, dict):
         return False
     stored_hash = acc.get("last_2fa_hash")
-    if not stored_hash or not str(stored_hash).startswith("$argon2"):
+    if not stored_hash:
         return False
-    try:
-        from argon2 import PasswordHasher
-        from argon2.exceptions import VerifyMismatchError
-        _ph = PasswordHasher()
-        return bool(_ph.verify(stored_hash, password.encode("utf-8")))
-    except (ImportError, VerifyMismatchError, Exception):
-        return False
+    algo = acc.get("last_2fa_hash_algo", "")
+    if algo == "argon2id" or stored_hash.startswith("$argon2"):
+        try:
+            from argon2 import PasswordHasher
+            from argon2.exceptions import VerifyMismatchError
+            _ph = PasswordHasher()
+            _ph.verify(stored_hash, password.encode("utf-8"))
+            return True
+        except ImportError:
+            return False
+        except VerifyMismatchError:
+            return False
+        except Exception:
+            return False
+    # SHA-256 (legacy or salted)
+    import hashlib
+    if algo == "sha256_tagged":
+        expected = hashlib.sha256(f"{tag}:{password}".encode("utf-8")).hexdigest()
+    else:
+        # original unsalted SHA-256 (legacy)
+        expected = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    # v2.14.2 (P2-10 / §20.11): مقایسه‌ی hash باید واقعاً constant-time باشد —
+    # zip-all با early-exit نبود؛ hmac.compare_digest جایگزین شد (طول‌های
+    # نابرابر هم fail-closed است، پس گارد طول جداگانه لازم نیست).
+    import hmac
+    return hmac.compare_digest(expected, stored_hash)
 
 
 def _purge_old_2fa_plaintext() -> None:
@@ -12494,9 +12312,8 @@ class SaaSBot:
             if bal < price:
                 await event.answer("❌ موجودی کافی نیست.", alert=True)
                 return
-            # v2.11.3: اول order بساز، بعد پول کم کن (با محاسبه‌ی مبلغ واقعی USDT)
-            _ded_usdt, _ded_rate = await self._compute_order_amounts(price)
-            order = create_order(uid, "ربات اختصاصی", price, _ded_usdt)
+            # v2.11.3: اول order بساز، بعد پول کم کن
+            order = create_order(uid, "ربات اختصاصی", price, 0.0)
             if not isinstance(order, dict) or "id" not in order:
                 await event.answer("❌ خطا در ساخت سفارش.", alert=True)
                 return
@@ -12525,10 +12342,9 @@ class SaaSBot:
                 buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
             )
         elif method == "card":
-            _ded_usdt, _ded_rate = await self._compute_order_amounts(price)
-            order = create_order(uid, "ربات اختصاصی", price, _ded_usdt)
+            order = create_order(uid, "ربات اختصاصی", price, 0.0)
             if isinstance(order, dict) and "id" in order:
-                await self._show_invoice(event, order, _ded_rate)
+                await self._show_invoice(event, order, 0)
             else:
                 await event.answer("❌ خطا در ساخت سفارش.", alert=True)
 
@@ -14728,17 +14544,6 @@ class SaaSBot:
             )
             return
 
-        # اعتبارسنجی AST قبل از جایگزینی (M-21)
-        try:
-            import ast as _ast
-            _ast.parse(src_path.read_text(encoding="utf-8"))
-        except Exception as _ast_e:
-            await event.edit(
-                f"❌ فایل نسخه‌ی انتخابی معتبر نیست (خطای سینتکس AST): {_ast_e}",
-                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
-            )
-            return
-
         # جایگزینی
         try:
             _shutil.copy2(src_path, main_py)
@@ -15470,8 +15275,7 @@ class SaaSBot:
         except Exception as e:
             print(f"⚠️ [backup] init_db در حین بکاپ خطا داد: {e}")
 
-        _fd_bkp, backup_path = tempfile.mkstemp(prefix="cianet_bkp_", suffix=".zip")
-        os.close(_fd_bkp)
+        backup_path = os.path.join(tempfile.gettempdir(), _backup_file_name())
         # v2.13.0 (DEBUG-2-BACKUP-SEC): رمزگذاری فایل بکاپ با Fernet.
         # رمز در پیامِ جداگانه به Saved Messages ("me") ارسال می‌شود، نه
         # در همان چتی که فایل می‌رود — تا اگه فایل بکاپ به سرورِ تلگرام
@@ -15561,7 +15365,20 @@ class SaaSBot:
             password_target = "Saved Messages"
             print(f"✅ [backup] رمز بکاپ به Saved Messages ارسال شد")
         except Exception as e:
-            print(f"⚠️ [backup] ارسال رمز به Saved Messages ناموفق بود (حذف fallback ارسال در همان چت طبق M-12): {type(e).__name__}")
+            print(f"⚠️ [backup] ارسال رمز به Saved Messages فیل شد (احتمالاً bot-mode): {type(e).__name__}: {e}")
+            # TEST-G6-SYSTEM: fallback — ارسال مستقیم به چتِ OWNER. این
+            # کم‌امن‌تر از separation اصلی است (رمز و فایل در یک چت)، ولی
+            # حداقل OWNER واقعاً رمز را دریافت می‌کند — به‌جای یک lie.
+            try:
+                await asyncio.wait_for(
+                    self.client.send_message(event.chat_id, _pw_body),
+                    timeout=30.0,
+                )
+                password_sent = True
+                password_target = "همین چت"
+                print(f"✅ [backup] رمز بکاپ به چتِ OWNER ارسال شد (fallback)")
+            except Exception as e2:
+                print(f"⚠️ [backup] ارسال رمز به چتِ OWNER هم فیل شد: {type(e2).__name__}: {e2}")
         # v1.9.2: کل فرآیند send_file و send_message زیر یه try/except مستقل
         # و با لاگ کامل. قبلاً اگه send_file فیل می‌شد، حتی پیام خطا هم
         # به کاربر نمی‌رسید (silent fail). حالا هر خطا با traceback کامل
@@ -17279,11 +17096,7 @@ class SaaSBot:
                 # v2.10.2: فقط درگاه‌های فعال
                 # v2.10.3: فقط درگاه‌های فعال — با برچسب‌های فارسی درست
         buttons = []
-        if (
-            get_setting("pay_trc20_enabled", "1") == "1"
-            and order.get("plan") != DEDICATED_BOT_PLAN
-            and float(order.get("amount_usdt") or 0) > 0
-        ):
+        if get_setting("pay_trc20_enabled", "1") == "1":
             buttons.append([UI.go("💵 پرداخت با تتر (TRC20)", f"order_tron:{order['id']}".encode())])
         if get_setting("pay_card_enabled", "1") == "1":
             buttons.append([UI.go("💳 پرداخت با کارت", f"order_card:{order['id']}".encode())])
@@ -17341,28 +17154,60 @@ class SaaSBot:
 
     # v2.9.0: پرداخت با کیف پول
     async def _pay_order_from_wallet(self, event, oid: int):
-        """پرداخت اتمیک فاکتور از موجودی کیف پول در یک تراکنش واحد (M-16)."""
+        """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه."""
         order = get_order(oid)
         if not order or order["user_id"] != event.sender_id:
             await event.answer("❌ فاکتور پیدا نشد.", alert=True)
             return
+        if order["status"] != ORDER_STATUS_PENDING:
+            await event.answer("❌ این فاکتور قابل پرداخت نیست.", alert=True)
+            return
         amount = int(order["amount_toman"])
+        bal = get_wallet_balance(event.sender_id)
+        if bal < amount:
+            await event.answer(
+                f"❌ موجودی کافی نیست.\n"
+                f"مبلغ فاکتور: {fa_digits(amount)} Toman\n"
+                f"موجودی شما: {fa_digits(bal)} Toman",
+                alert=True,
+            )
+            return
+        # کسر از کیف پول
+        pay_result = wallet_pay_from_balance(
+            event.sender_id, amount, ref=f"order:{order['order_no']}"
+        )
+        if not pay_result.get("ok"):
+            await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
+            return
+        # v2.10.4: atomic — WHERE status='pending' برای جلوگیری از double-pay
+        # v2.12.25 (DEEP-1-CONCURRENCY #2): fix dead refund branch —
+        # قبلاً pass بود و refund بر اساس status check انجام می‌شد که
+        # race condition داشت. حالا مستقیماً rowcount چک می‌شه.
         try:
-            pay_result = pay_order_wallet_atomic(event.sender_id, oid)
-            if not pay_result.get("ok"):
-                err = pay_result.get("error")
-                if err == "insufficient_balance":
-                    bal = pay_result.get("balance", 0)
-                    await event.answer(
-                        f"❌ موجودی کافی نیست.\nمبلغ فاکتور: {fa_digits(amount)} Toman\nموجودی شما: {fa_digits(bal)} Toman",
-                        alert=True,
-                    )
-                else:
-                    await event.answer("❌ این فاکتور قابل پرداخت نیست.", alert=True)
+            with _conn_immediate() as c:
+                cur = c.execute(
+                    "UPDATE orders SET status = 'paid', pay_method = 'wallet', "
+                    "paid_at = ? WHERE id = ? AND status = 'pending'",
+                    (_now(), oid),
+                )
+                _won = cur.rowcount > 0
+            if not _won:
+                wallet_credit(event.sender_id, amount, OWNER_ID,
+                              reason="refund: order already paid (race)")
+                await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
                 return
-            plan_name = pay_result["plan"]
-            if plan_name == DEDICATED_BOT_PLAN:
-                await self._activate_dedicated_bot(event.sender_id)
+            # v2.9.4: استفاده از duration_days از جدول pricing — قبلاً
+            # با regex از نام پلن می‌خوندیم که برای نام‌های فارسی (۱ ماهه)
+            # اشتباه می‌داد.
+            plan_name = order["plan"]
+            days = 30  # default fallback
+            try:
+                _pricing = get_pricing(plan_name)
+                if _pricing and _pricing.get("duration_days"):
+                    days = int(_pricing["duration_days"])
+            except Exception:
+                pass
+            create_subscription(event.sender_id, plan_name, days)
             # v2.12.21 (QA7-USER6 BUG#5): _pay_order_from_wallet،
             # _resume_user_selfbots رو صدا نمی‌زد. این یعنی کاربر بعد از
             # تمدید، SelfBotش همچنان disabled می‌موند تا restart بعدی.
@@ -17448,9 +17293,6 @@ class SaaSBot:
         order = get_order(order_id)
         if not order or order["user_id"] != event.sender_id or order["status"] != ORDER_STATUS_PENDING:
             await event.answer("این فاکتور معتبر نیست (شاید منقضی یا پرداخت شده).", alert=True)
-            return
-        if order.get("plan") == DEDICATED_BOT_PLAN or float(order.get("amount_usdt") or 0) <= 0:
-            await event.answer("❌ پرداخت تتری برای این فاکتور مجاز نیست.", alert=True)
             return
         wallet = (get_setting("usdt_wallet") or "").strip()
         if not wallet:
@@ -17941,9 +17783,9 @@ class SaaSBot:
                 self.wizards.pop(event.sender_id, None)
                 await event.respond("❌ فاکتور پیدا نشد.")
                 return True
-            if order["status"] != ORDER_STATUS_PENDING or order.get("discount_code"):
+            if order["status"] != ORDER_STATUS_PENDING:
                 self.wizards.pop(event.sender_id, None)
-                await event.respond("❌ این فاکتور قابل ویرایش نیست یا قبلاً کد تخفیف روی آن اعمال شده است.")
+                await event.respond("❌ این فاکتور قابل ویرایش نیست.")
                 return True
             # اعمال تخفیف
             new_amount = apply_discount_code(code, int(order["amount_toman"]))
@@ -17968,21 +17810,13 @@ class SaaSBot:
             # کم می‌کرد (rollbackِ دوگانه — §11.4).
             _order_saved = False
             try:
-                from decimal import Decimal, ROUND_HALF_UP
-                _old_salt = Decimal(str(order.get("amount_salt") or "0.00"))
-                _base_u = max(Decimal("0.00"), Decimal(str(order["amount_usdt"])) - _old_salt)
-                _disc_u = (_base_u * Decimal(100 - new_amount["percent"]) / Decimal(100)).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
-                _new_salt = (Decimal(secrets.randbelow(99) + 1) / Decimal(100)).quantize(Decimal("0.01"))
-                _final_u = float(_disc_u + _new_salt) if _disc_u > 0 else 0.0
                 with _conn_immediate() as c:
                     c.execute(
                         "UPDATE orders SET discount_code = ?, discount_percent = ?, "
-                        "amount_toman = ?, amount_usdt = ?, amount_salt = ?, original_amount_toman = ? "
-                        "WHERE id = ? AND status = 'pending' AND discount_code IS NULL",
+                        "amount_toman = ?, amount_usdt = ?, original_amount_toman = ? "
+                        "WHERE id = ?",
                         (code, new_amount["percent"], new_amount["amount"],
-                         _final_u, str(_new_salt),
+                         round(order["amount_usdt"] * (100 - new_amount["percent"]) / 100, 2),
                          int(order["amount_toman"]), oid),
                     )
                 _order_saved = True
@@ -18004,7 +17838,7 @@ class SaaSBot:
                         with _conn_immediate() as c:
                             c.execute(
                                 "UPDATE discount_codes SET used_count = MAX(0, used_count - 1) "
-                                "WHERE UPPER(code) = UPPER(?) AND used_count > 0",
+                                "WHERE code = ? AND used_count > 0",
                                 (code,),
                             )
                     except Exception as _rb:
@@ -18079,7 +17913,6 @@ class SaaSBot:
             holder = holder.strip() or DEFAULT_CARD_HOLDER
             set_setting("card_number", number)
             set_setting("card_holder", holder)
-            log_action(event.sender_id, "set_card_number", f"card=****{number[-4:]}")
             await event.respond(f"✅ شماره کارت به‌روزرسانی شد:\n`{number}`\nبه نام: {holder}")
             return True
 
@@ -18092,7 +17925,6 @@ class SaaSBot:
                 )
                 return True
             set_setting("usdt_wallet", w)
-            log_action(event.sender_id, "set_usdt_wallet", f"wallet={w[:6]}...{w[-4:]}")
             self.wizards.pop(event.sender_id, None)
             await event.respond(f"✅ آدرس کیف پول تتر ذخیره شد:\n`{w}`")
             return True
@@ -18168,11 +18000,9 @@ class SaaSBot:
             txid = text.strip()
             order = get_order(data.get("order_id", 0))
             if not order or order["user_id"] != event.sender_id \
-                    or order["status"] != ORDER_STATUS_PENDING \
-                    or order.get("plan") == DEDICATED_BOT_PLAN \
-                    or float(order.get("amount_usdt") or 0) <= 0:
+                    or order["status"] != ORDER_STATUS_PENDING:
                 self.wizards.pop(event.sender_id, None)
-                await event.respond("❌ این فاکتور برای پرداخت تتر معتبر نیست.")
+                await event.respond("❌ این فاکتور دیگر معتبر نیست (منقضی یا پرداخت شده).")
                 return True
             wallet = (get_setting("usdt_wallet") or "").strip()
             if not wallet:
@@ -18573,35 +18403,15 @@ class SaaSBot:
         # receipt_ref یک مرجع قابل‌بازیابی به خودِ پیام است (chat_id:message_id)
         # نه صرفاً event.photo.id که به‌تنهایی برای دانلود مجدد کافی نیست.
         receipt_ref = f"{event.chat_id}:{event.message.id}"
-        photo_bytes = None
-        try:
-            photo_bytes = await event.download_media(bytes)
-        except Exception:
-            photo_bytes = None
-        if photo_bytes:
-            receipt_file_uid = hashlib.sha256(photo_bytes).hexdigest()
-        else:
-            _pid = getattr(getattr(event, "photo", None), "id", None) or f"{event.chat_id}:{event.message.id}"
-            receipt_file_uid = f"tgphoto:{_pid}"
         order_no = ""
         if data.get("order_id"):
             order = get_order(data["order_id"])
             if order and order["user_id"] == event.sender_id \
                     and order["status"] == ORDER_STATUS_PENDING:
                 order_no = order["order_no"]
-        try:
-            pay_id = create_payment(
-                event.sender_id, data["plan"], data["amount"],
-                receipt_ref, receipt_file_uid=receipt_file_uid
-            )
-        except ValueError as _ve:
-            await event.respond(f"❌ {_ve}")
-            return True
+        pay_id = create_payment(event.sender_id, data["plan"], data["amount"], receipt_ref)
         if data.get("order_id") and order_no:
-            set_order_payment_id(
-                data["order_id"], pay_id,
-                user_id=event.sender_id, receipt_file_uid=receipt_file_uid
-            )
+            set_order_payment_id(data["order_id"], pay_id)
         self.wizards.pop(event.sender_id, None)
         await event.respond("✅ رسید شما ثبت شد.\n\nپس از بررسی مدیریت تایید خواهد شد.")
         pay_ref = f" (فاکتور {order_no})" if order_no else ""
@@ -23192,12 +23002,9 @@ async def _verify_trc20_transfer(txid: str, wallet: str, min_usdt) -> tuple:
                 value = Decimal(str(t.get("value") or "0")) / Decimal("1000000")
             except (InvalidOperation, ValueError):
                 return False, "مبلغ تراکنش نامعتبر است"
-            from decimal import ROUND_HALF_UP
-            value_q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            min_q = min_dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if value_q != min_q:
-                return False, (f"مبلغ واریزی ({value_q} USDT) باید دقیقاً برابر مبلغ "
-                               f"فاکتور ({min_q} USDT شامل سنت امنیتی) باشد")
+            if value < min_dec:
+                return False, (f"مبلغ واریزی ({value} USDT) کمتر از مبلغ "
+                               f"فاکتور ({min_dec} USDT) است")
             # v2.13.0 (DEBUG-2 CRIT-1): check block_timestamp — must be within last 24h
             # BUG-15 (P1-4, §11.3): این چک REQUIRED است — قبلاً اگر
             # block_timestamp غایب/صفر بود چکِ ۲۴ ساعت کلاً skip می‌شد
@@ -23520,21 +23327,10 @@ async def _get_toman_price(coin: str) -> float:
     )
     exir_p, nobitex_p, wallex_p, tabdeal_p, cg_p, *_ = results
 
-    valid_prices = [float(p) for p in (exir_p, nobitex_p, wallex_p, tabdeal_p, cg_p) if not isinstance(p, Exception) and p and p > 0]
-    if not valid_prices:
-        return 0.0
-    sorted_p = sorted(valid_prices)
-    median_p = sorted_p[len(sorted_p) // 2]
-    last_key = f"_last_valid_toman_{coin}"
-    last_valid = getattr(_get_toman_price, last_key, 0.0) or median_p
     for p in (exir_p, nobitex_p, wallex_p, tabdeal_p, cg_p):
         if not isinstance(p, Exception) and p and p > 0:
-            if 0.80 * last_valid <= float(p) <= 1.20 * last_valid:
-                setattr(_get_toman_price, last_key, float(p))
-                return float(p)
-    clamped = max(0.80 * last_valid, min(1.20 * last_valid, median_p))
-    setattr(_get_toman_price, last_key, float(clamped))
-    return float(clamped)
+            return p
+    return 0.0
 
 
 async def _get_usd_toman_rate() -> float:
@@ -24296,9 +24092,6 @@ class SelfBot:
                     "account has been terminated",
                     "your account has been terminated",
                     "violated telegram's terms",
-                    "account was deactivated",
-                    "account has been frozen",
-                    "session was terminated",
                 )
                 _CRITICAL_WARN_PHRASES_FA = (
                     "حساب شما حذف شده",
@@ -24602,7 +24395,6 @@ class SelfBot:
         if not self.client or not self.client.is_connected():
             return None
         try:
-            self._api_calls_today = getattr(self, "_api_calls_today", 0) + 1
             return await asyncio.wait_for(self.client(request), timeout=timeout)
         except errors.FloodWaitError as e:
             # v2.9.1: ثبت flood_until
@@ -24732,17 +24524,6 @@ class SelfBot:
                     skipped += 1
                     continue
 
-                _bcast_owner_key = str(self.cfg.get("owner_user_id") or self.cfg.get("tg_user_id") or self.tag)
-                if not increment_broadcast_daily_count(_bcast_owner_key, 1, cap=OUT_DAILY_MAX):
-                    skipped += 1
-                    try:
-                        await event.edit(
-                            f"⚠️ سقف ارسال روزانه ({OUT_DAILY_MAX} پیام در روز) پر شد.\n"
-                            f"✅ موفق: {sent_ok} | ❌ ناموفق: {sent_fail} | ⏭ ردشده: {skipped}"
-                        )
-                    except Exception:
-                        pass
-                    return
                 # ارسال (forward)
                 try:
                     await reply_msg.forward_to(d.id)
@@ -26016,8 +25797,7 @@ class SelfBot:
         # user_id = owner_user_id اکانت از config تا فقط پاسخ‌های خودِ مالکِ
         # همین اکانت match شوند (auto_replies.user_id = آیدی پنلیِ مالک).
         if (
-            self.enabled
-            and sid != self.TELEGRAM_SERVICE_ID
+            sid != self.TELEGRAM_SERVICE_ID
             and sid != self.my_id
             and (event.raw_text or "").strip()
             and not (self._flood_until and time.time() < self._flood_until)
@@ -26049,8 +25829,8 @@ class SelfBot:
             except Exception as e:
                 print(f"⚠️ [auto_reply:{self.tag}] خطا در پاسخ خودکار: {type(e).__name__}")
 
-        # سکوت — سیاست واحد: فقط وقتی سلف روشن است اعمال می‌شود و پیامِ سکوت‌شده هرگز auto-read نمی‌شود
-        if self.enabled and self._is_silenced(event.chat_id, event.is_private):
+        # سکوت
+        if self._is_silenced(event.chat_id, event.is_private):
             try:
                 await self.client.delete_messages(event.chat_id, [event.id], revoke=True)
             except Exception:
@@ -26059,14 +25839,12 @@ class SelfBot:
 
         # تیک خودکار
         do_read = False
-        if self.enabled:
-            is_broadcast_only = bool(event.is_channel and not event.is_group)
-            if event.is_private and self.auto_read_pv:
-                do_read = True
-            elif is_broadcast_only and self.auto_read_channel:
-                do_read = True
-            elif event.is_group and self.auto_read_group:
-                do_read = True
+        if event.is_private and self.auto_read_pv:
+            do_read = True
+        elif event.is_group and self.auto_read_group:
+            do_read = True
+        elif event.is_channel and self.auto_read_channel:
+            do_read = True
 
         if do_read:
             try:
@@ -26086,12 +25864,8 @@ class SelfBot:
             if ttl:
                 sender = getattr(event.sender, 'first_name', 'نامشخص')
                 ext = "jpg" if event.photo else "mp4"
-                owner_dir = os.path.join(DOWNLOADS_DIR, str(self.cfg.get("owner_user_id") or self.tag))
-                os.makedirs(owner_dir, mode=0o700, exist_ok=True)
-                _chmod_private(owner_dir, 0o700)
-                path = os.path.join(owner_dir, f"auto_{secrets.token_hex(8)}.{ext}")
+                path = os.path.join(DOWNLOADS_DIR, f"auto_{random.randint(100000, 9999999)}.{ext}")
                 await event.download_media(file=path)
-                _chmod_private(path, 0o600)
                 try:
                     await self.client.send_file("me", path,
                                                  caption=f"🔥 خودکار | از {sender} | ⏳{ttl}s")
@@ -26267,32 +26041,15 @@ class SelfBot:
         try:
             html_path = await self._build_chat_html(chat_id, sender_name, deleted_ids=set(deleted_ids))
             if html_path:
-                sent_res = None
-                for _attempt in range(2):
-                    await self._wait_outbound_cooldown()
-                    try:
-                        sent_res = await self.client.send_file(
-                            "me", html_path,
-                            caption=f"🗑 صفحه‌ی چت با «{sender_name}» — پیام‌های حذف‌شده با رنگ مشخص شده‌اند"
-                        )
-                        break
-                    except errors.FloodWaitError as _fwe:
-                        _wait = (_fwe.seconds or 30) + 2
-                        self._flood_until = time.time() + _wait
-                        print(f"⏳ [tracker:{self.tag}] FloodWait {_wait}s در ارسال HTML ردیاب")
-                        await asyncio.sleep(_wait)
-                if sent_res is not None:
-                    try:
-                        os.remove(html_path)
-                    except OSError:
-                        pass
-                    for e in deleted_entries:
-                        cache_entry = self._msg_cache.get((chat_id, e["msg_id"]))
-                        if cache_entry is not None:
-                            self._forget_msg_bytes(cache_entry)
-                            cache_entry["media_bytes"] = None
-                else:
-                    print(f"⚠️ [{self.tag}] ارسال فایل HTML ردیاب ناموفق بود — فایل حفظ شد: {html_path}")
+                await self.client.send_file(
+                    "me", html_path,
+                    caption=f"🗑 صفحه‌ی چت با «{sender_name}» — پیام‌های حذف‌شده با رنگ مشخص شده‌اند"
+                )
+                os.remove(html_path)
+                for e in deleted_entries:
+                    cache_entry = self._msg_cache.get((chat_id, e["msg_id"]))
+                    if cache_entry is not None:
+                        cache_entry["media_bytes"] = None
         except Exception as e:
             print(f"⚠️ [{self.tag}] خطا در ساخت HTML ردیاب: {e}")
 
@@ -26644,16 +26401,6 @@ class SelfBot:
         except Exception:
             pass
 
-    async def _wait_outbound_cooldown(self) -> None:
-        """انتظار هوشمند (warmup-aware) برای عبور از فاصله‌ی اجباری _gate_outbound قبل از ارسال فایل."""
-        now = time.time()
-        if self._flood_until and now < self._flood_until:
-            await asyncio.sleep(max(0.0, self._flood_until - now) + 0.1)
-            now = time.time()
-        cd = OUT_COOLDOWN_SEC / (WARMUP_RATE_MULTIPLIER if now < self._warmup_until else 1.0)
-        if self._out_last_ts and (now - self._out_last_ts) < cd:
-            await asyncio.sleep(cd - (now - self._out_last_ts) + 0.05)
-
     def _gate_outbound(self) -> bool:
         """v2.9.1: قبل از هر send_message/file صدا زده می‌شه.
         برمی‌گردونه True اگه مجاز باشه، False اگه باید skip بشه.
@@ -26705,35 +26452,17 @@ class SelfBot:
         orig_send_message = client.send_message
         orig_send_file = client.send_file
 
-        async def _notify_ratelimit_drop(kind: str):
-            now_ts = time.time()
-            self._last_ratelimit_drop_ts = now_ts
-            print(
-                f"⚠️ [ratelimit:{self.tag}] ارسال ({kind}) به دلیل محدودیت نرخ/ضدبن متوقف شد "
-                f"(out_today={self._out_today}, flood_until={self._flood_until:.0f})"
-            )
-            last_notif = getattr(self, "_last_ratelimit_notif_ts", 0.0)
-            if now_ts - last_notif >= 60.0:
-                self._last_ratelimit_notif_ts = now_ts
-                try:
-                    await orig_send_message(
-                        "me",
-                        f"⚠️ [ضدبن/محدودیت نرخ] یک پیام خروجی ({kind}) به دلیل سقف ارسال یا فاصله‌ی ضدبن متوقف شد."
-                    )
-                except Exception:
-                    pass
-
         async def wrapped_send_message(*args, **kwargs):
+            # v2.9.1: gate check — اگه rate-limited، silent skip
             if not self._gate_outbound():
-                await _notify_ratelimit_drop("message")
                 return None
             result = await orig_send_message(*args, **kwargs)
             await self._preserve_offline()
             return result
 
         async def wrapped_send_file(*args, **kwargs):
+            # v2.10.0: gate check (قبلاً missing بود)
             if not self._gate_outbound():
-                await _notify_ratelimit_drop("file")
                 return None
             result = await orig_send_file(*args, **kwargs)
             await self._preserve_offline()
@@ -26861,53 +26590,8 @@ class SelfBot:
         self.tabchi_enabled = False
         self.tabchi_next_run_at = None
 
-    async def _power_off_full(self) -> None:
-        """خاموش‌سازی کامل سلف‌بات و توقف همه‌ی حلقه‌ها و فلگ‌های پس‌زمینه."""
-        was_bio_enabled = self.bio_enabled
-        self.enabled = False
-        self.time_enabled = False
-        self.online_enabled = False
-        self.bio_enabled = False
-        self.auto_read_pv = False
-        self.auto_read_group = False
-        self.auto_read_channel = False
-        self.silence_all = False
-        self.silence_pv = {}
-        self.tracker_enabled = False
-        self.enemies = {}
-        self._persist_enemies()
-        await self._stop_time_loops()
-        await self._preserve_offline()
-        await self._stop_bio_loop()
-        await self._stop_tabchi()
-        await self._set_profile(self.base_name, "")
-        if was_bio_enabled:
-            try:
-                await self._set_bio(self.base_bio)
-            except Exception:
-                pass
-        self._clear_tracker_cache()
-        set_state(self.tag, "silence_pv", json.dumps({}))
-        self._persist(
-            enabled=False, time_enabled=False, online_enabled=False,
-            bio_enabled=False,
-            auto_read_pv=False, auto_read_group=False, auto_read_channel=False,
-            silence_all=False, tracker_enabled=False,
-            tabchi_running=False, tabchi_chat=None, tabchi_text="", tabchi_media=None,
-            tabchi_next_run_at=None,
-        )
-
     async def _handle(self, event, text: str):
         if not text:
-            return
-        # M-11: دستورات مدیریتی سلف در چت‌های گروهی/کانال عمومی اجرا نشوند (مگر دستورات ریپلای/ابزار مجاز)
-        _GROUP_SAFE_CMDS = {
-            "پینگ", "ping", "تایم", "time", "ایدی", "بلاک", "آنبلاک", "ذخیره",
-            "فوروارد", "مشخصات", "سنجاق", "دشمن روشن", "دشمن خاموش",
-            "سکوت پیوی روشن", "سکوت پیوی خاموش", "انتخاب تبچی",
-            *_DICE_MAP.keys(), *_PRICE_MAP.keys(), "طلا",
-        }
-        if (event.is_group or event.is_channel) and text not in _GROUP_SAFE_CMDS and not text.startswith(("حذف", "انتخاب تبچی")):
             return
 
         parts = text.split()
@@ -26960,7 +26644,47 @@ class SelfBot:
                 return
 
             if text == "سلف خاموش":
-                await self._power_off_full()
+                was_bio_enabled = self.bio_enabled
+                self.enabled = False
+                self.time_enabled = False
+                self.online_enabled = False
+                self.bio_enabled = False
+                self.auto_read_pv = False
+                self.auto_read_group = False
+                self.auto_read_channel = False
+                self.silence_all = False
+                self.silence_pv = {}
+                self.tracker_enabled = False
+                # فیکس: enemies قبلاً اینجا پاک نمی‌شد — یعنی حتی بعد از
+                # «سلف خاموش»، پاسخ خودکار به کاربران «دشمن»شده همچنان از
+                # طریق _on_incoming ادامه پیدا می‌کرد (چون آن تابع مستقیماً
+                # self.enemies را می‌خواند، نه یک فلگ enabled جدا). حالا
+                # صریحاً پاک می‌شود تا «سلف خاموش» واقعاً یعنی هیچ رفتار
+                # خودکاری روی این اکانت باقی نماند.
+                self.enemies = {}
+                self._persist_enemies()
+                await self._stop_time_loops()
+                # توجه: عمداً حلقه‌ی حضور (presence) اینجا stop نمی‌شود — چون
+                # باید ادامه بدهد تا صریحاً وضعیت را «آفلاین» نگه دارد.
+                await self._preserve_offline()
+                await self._stop_bio_loop()
+                await self._stop_tabchi()
+                await self._set_profile(self.base_name, "")
+                if was_bio_enabled:
+                    try:
+                        await self._set_bio(self.base_bio)
+                    except Exception:
+                        pass
+                self._clear_tracker_cache()
+                set_state(self.tag, "silence_pv", json.dumps({}))
+                self._persist(
+                    enabled=False, time_enabled=False, online_enabled=False,
+                    bio_enabled=False,
+                    auto_read_pv=False, auto_read_group=False, auto_read_channel=False,
+                    silence_all=False, tracker_enabled=False,
+                    tabchi_running=False, tabchi_chat=None, tabchi_text="", tabchi_media=None,
+                    tabchi_next_run_at=None,
+                )
                 await event.edit("✅ سلف‌بات **خاموش** — تمام قابلیت‌ها غیرفعال شدند")
                 return
 
@@ -27912,18 +27636,12 @@ class SelfBot:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    print(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی (توقف فوری): {e}")
-                    return
+                    print(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی: {e}")
+                    await asyncio.sleep(2)
+                    continue
 
                 valid = [m for m in results if not isinstance(m, Exception)]
                 flood_errors = [m for m in results if isinstance(m, errors.FloodWaitError)]
-                other_errors = [
-                    m for m in results
-                    if isinstance(m, Exception) and not isinstance(m, errors.FloodWaitError)
-                ]
-                if other_errors and not valid:
-                    print(f"⚠️ [{self.tag}] دایس {emoji} توقف فوری به دلیل خطا: {other_errors[0]}")
-                    return
 
                 winner = next(
                     (
@@ -27947,10 +27665,13 @@ class SelfBot:
                     break
 
                 if flood_errors:
+                    # اگر تلگرام FloodWait داد، به‌جای sleep ثابت، دقیقاً
+                    # به مدت خواسته‌شده صبر می‌کنیم تا اکانت گزارش/محدود
+                    # نشود.
                     wait_s = max(getattr(e, "seconds", 2) for e in flood_errors)
-                    await asyncio.sleep(wait_s + random.uniform(1.5, 3.5))
+                    await asyncio.sleep(wait_s + 2)
                 else:
-                    await asyncio.sleep(random.uniform(0.65, 1.85))
+                    await asyncio.sleep(0.5)
 
             # فورواردِ پیامِ برنده به چت اصلی. این عمداً فوروارد است نه
             # send_message: وقتی send_message یک Message دریافت می‌کند، تلتون

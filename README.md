@@ -520,7 +520,3 @@ MIT License — استفاده آزاد
 **ساخته‌شده با ❤️ برای [CiaNet.ir](https://CiaNet.ir)**
 
 </div>
-
-
-## متغیر محیطی الزامی بکاپ
-- `CIANET_BACKUP_PASS`: رمز عبور الزامی برای رمزنگاری PBKDF2+Fernet بکاپ‌های روزانه و دستی (در صورت عدم تنظیم، ارسال بکاپ به‌صورت fail-closed متوقف می‌شود). برای رمزگشایی از `python3 tools/decrypt_backup.py <backup.zip>` استفاده کنید.

@@ -327,18 +327,6 @@ def require_csrf(request: Request, x_csrf_token: Optional[str] = _Header(None)):
     return True
 
 
-def _persist_rate_limit_db(key: str, now_ts: float, window_sec: float = 900.0) -> int:
-    try:
-        m = _main()
-        with m._conn_immediate() as c:
-            c.execute("CREATE TABLE IF NOT EXISTS login_rate_limits (k TEXT, ts REAL)")
-            c.execute("DELETE FROM login_rate_limits WHERE ts < ?", (now_ts - window_sec,))
-            c.execute("INSERT INTO login_rate_limits (k, ts) VALUES (?, ?)", (key, now_ts))
-            return int(c.execute("SELECT COUNT(*) FROM login_rate_limits WHERE k = ?", (key,)).fetchone()[0])
-    except Exception:
-        return 0
-
-
 # ─── Password verification (bcrypt) ──────────────────────────────────
 def _verify_password(plain: str, hashed: str) -> bool:
     """
@@ -349,8 +337,19 @@ def _verify_password(plain: str, hashed: str) -> bool:
     """
     if not hashed:
         return False
+    # PATCH (v2.1.4): support sha256 fallback از install_panel.sh
     if hashed.startswith("sha256:"):
-        return False
+        try:
+            import hashlib
+            expected = hashed[len("sha256:"):]
+            actual = hashlib.sha256(plain.encode("utf-8")).hexdigest()
+            # v2.14.2 (P2-10 / §20.11): مقایسه‌ی hash رمز باید constant-time باشد —
+            # zip-all با early-exit تایمینگ leaks می‌کرد؛ hmac.compare_digest
+            # جایگزین شد (طول‌های نابرابر هم fail-closed است).
+            import hmac
+            return hmac.compare_digest(expected, actual)
+        except Exception:
+            return False
     # default: bcrypt
     try:
         from passlib.hash import bcrypt
@@ -429,9 +428,9 @@ app = FastAPI(
     # v2.14.2 (T4 deviation / §13.8): کنترلِ مستندِ PANEL_DOCS_ENABLED که
     # در v2.14.0 ادعا شده بود ولی پیاده نشده بود — حالا با 0 شدنِ env،
     # docs/redoc/openapi همه غیرفعال می‌شوند.
-    docs_url=("/api/docs" if os.environ.get("PANEL_DOCS_ENABLED", "0").strip() == "1" else None),
-    redoc_url=("/api/redoc" if os.environ.get("PANEL_DOCS_ENABLED", "0").strip() == "1" else None),
-    openapi_url=("/openapi.json" if os.environ.get("PANEL_DOCS_ENABLED", "0").strip() == "1" else None),
+    docs_url=("/api/docs" if os.environ.get("PANEL_DOCS_ENABLED", "1").strip() != "0" else None),
+    redoc_url=("/api/redoc" if os.environ.get("PANEL_DOCS_ENABLED", "1").strip() != "0" else None),
+    openapi_url=("/openapi.json" if os.environ.get("PANEL_DOCS_ENABLED", "1").strip() != "0" else None),
 )
 
 app.add_middleware(
@@ -621,7 +620,7 @@ async def auth_login(req: LoginRequest, request: Request, response: Response):
 
 
 @app.post("/api/auth/logout")
-async def auth_logout(request: Request, response: Response, _: None = Depends(require_csrf)):
+async def auth_logout(request: Request, response: Response):
     _invalidate_session(request)
     response.delete_cookie("cianet_panel_session")
     # v2.13.0 (DEBUG-2 CSRF): also drop the CSRF cookie
@@ -1139,8 +1138,6 @@ async def account_proxy_update(tag: str, update: ProxyUpdate, request: Request, 
     else:
         proxy_cfg: Dict[str, Any] = {"type": update.proxy_type}
         if update.proxy_host:
-            if not m._is_safe_proxy_host(update.proxy_host):
-                raise HTTPException(400, "آدرس پروکسی نامعتبر است (SSRF محافظت‌شده)")
             proxy_cfg["host"] = update.proxy_host
         if update.proxy_port:
             proxy_cfg["port"] = update.proxy_port
@@ -1508,11 +1505,6 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
     src = versions_dir / filename
     if not src.is_file():
         raise HTTPException(404, f"Version file not found: {filename}")
-    try:
-        import ast as _ast
-        _ast.parse(src.read_text(encoding="utf-8"))
-    except Exception:
-        raise HTTPException(400, "فایل نسخه نامعتبر است (AST parse failed)")
     # backup current
     import shutil, time as _time
     ts = int(_time.time())
@@ -1523,9 +1515,8 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
     # restart
     try:
         import subprocess
-        _svc = os.environ.get("CIANET_SERVICE_NAME", "cianet").strip() or "cianet"
         subprocess.Popen(
-            ["systemctl", "restart", _svc],
+            ["systemctl", "restart", "cianet"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception as e:
@@ -1578,7 +1569,7 @@ async def tools_api_creds(request: Request, _: None = Depends(require_auth)):
         if api_id and api_hash:
             key = (api_id, api_hash)
             if key not in seen:
-                seen[key] = {"api_id": api_id, "api_hash": (str(api_hash)[:4] + "****") if api_hash else None, "used_by": []}
+                seen[key] = {"api_id": api_id, "api_hash": api_hash, "used_by": []}
             seen[key]["used_by"].append(tag)
     return {"items": list(seen.values())}
 
@@ -1725,7 +1716,7 @@ async def user_license_login(req: LicenseLoginRequest, request: Request, respons
 
 
 @app.post("/api/user/logout")
-async def user_logout(request: Request, response: Response, _: None = Depends(require_user_csrf)):
+async def user_logout(request: Request, response: Response):
     _invalidate_user_session(request)
     response.delete_cookie("cianet_user_session")
     # v2.14.2 (BUG-11w): CSRF cookie کاربر هم پاک شود
@@ -2031,13 +2022,36 @@ async def admin_debit_user_wallet(user_id: int, req: WalletDebitRequest,
 # ─── Health check (public) ───────────────────────────────────────────
 @app.get("/api/health")
 async def health():
-    info = {"status": "ok"}
+    # PATCH (TEST-G9-ANALYTICS FIX-F): قبلاً فقط {"status":"ok","time":...}
+    # برمی‌گرداند — بی‌توجه به وضعیت واقعیِ DB یا ربات‌های در حال اجرا.
+    # حالا DB ping + نسخه + uptime + تعداد ربات‌های فعال رو گزارش می‌دهد.
+    # public می‌ماند (بدون auth) ولی اطلاعات حساسی نشون داده نمیشه.
+    info = {
+        "status": "ok",
+        "time": time.time(),
+        "uptime_seconds": round(time.time() - _PANEL_START_TIME, 1),
+    }
     try:
         m = _main()
         with m._conn() as c:
-            c.execute("SELECT 1").fetchone()
+            c.execute("SELECT 1").fetchone()  # DB ping
+        info["db"] = "ok"
+        info["version"] = getattr(m, "BUILD_VERSION", None)
+        try:
+            cfg = m.load_config() or {}
+            info["accounts_total"] = len(cfg)
+            info["accounts_enabled"] = sum(
+                1 for a in cfg.values()
+                if isinstance(a, dict) and not a.get("disabled")
+            )
+            info["accounts_running"] = len(getattr(m, "ACCOUNTS", {}))
+        except Exception:
+            # config load failure shouldn't fail /api/health entirely
+            info["accounts_total"] = None
+            info["accounts_running"] = None
     except Exception as e:
         info["status"] = "degraded"
+        info["db"] = "error"
         print(f"❌ [health] DB ping failed: {type(e).__name__}: {e}")
     return info
 
@@ -2451,10 +2465,7 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)
         days = int(pricing["duration_days"] or 30) if pricing else 30
-        if plan_name == getattr(m, "DEDICATED_BOT_PLAN", "ربات اختصاصی"):
-            m.log_action(order["user_id"], "dedicated_bot_paid_gateway", f"order={order['id']}")
-        else:
-            m.create_subscription(order["user_id"], plan_name, days)
+        m.create_subscription(order["user_id"], plan_name, days)
         # v2.12.9 (QA-USER): تاییدِ تلگرامیِ فارسی به کاربر
         try:
             plan_label = pricing.get("label") if pricing else plan_name
@@ -2647,10 +2658,7 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)
         days = int(pricing["duration_days"] or 30) if pricing else 30
-        if plan_name == getattr(m, "DEDICATED_BOT_PLAN", "ربات اختصاصی"):
-            m.log_action(order["user_id"], "dedicated_bot_paid_gateway", f"order={order['id']}")
-        else:
-            m.create_subscription(order["user_id"], plan_name, days)
+        m.create_subscription(order["user_id"], plan_name, days)
         # v2.12.9 (QA-USER): تاییدِ تلگرامیِ فارسی به کاربر
         try:
             plan_label = pricing.get("label") if pricing else plan_name
@@ -2714,7 +2722,7 @@ async def user_get_account_settings(request: Request):
     info = {
         "tag": tag,
         "phone": acc.get("phone"),
-        "proxy": ({k: v for k, v in (acc.get("proxy") or {}).items() if k not in ("password", "pass", "secret")} if isinstance(acc.get("proxy"), dict) else None),
+        "proxy": acc.get("proxy"),
         "disabled": bool(acc.get("disabled")),
         "tg_user_id": acc.get("tg_user_id"),
         "tg_username": acc.get("tg_username"),
@@ -2762,8 +2770,6 @@ async def user_update_account_settings(req: AccountSettingsUpdate, request: Requ
         invalid = set(p.keys()) - valid_keys
         if invalid:
             raise HTTPException(400, f"کلیدهای نامعتبر در proxy: {invalid}. کلیدهای مجاز: {valid_keys}")
-        if p.get("addr") and not m._is_safe_proxy_host(str(p.get("addr"))):
-            raise HTTPException(400, "آدرس پروکسی نامعتبر است (IP داخلی/محلی مجاز نیست)")
         cfg[tag]["proxy"] = p
         changes.append("proxy")
     if req.disabled is not None:
