@@ -10871,7 +10871,7 @@ def _save_last_2fa_password(tag: str, password: str) -> None:
     v2.12.31 (DEBUG-1 MEDIUM-1): از argon2id با per-account salt استفاده
     می‌کنیم به‌جای unsalted SHA-256. قبلاً rainbow-table recoverable بود.
     حالا با argon2id (memory-hard, random salt) crack کردن عملاً غیرممکن.
-   向后-compatible: هش‌های قدیمی SHA-256 همچنان قابل verify هستند (با
+   Backward-compatible: هش‌های قدیمی SHA-256 همچنان قابل verify هستند (با
     `_verify_last_2fa_password`).
     """
     if not tag or not password:
