@@ -51,8 +51,31 @@ try:
 except Exception as _e:
     log.warning("initial safe.directory setup failed: %s", _e)
 LOCAL_COMMIT_FILE = Path(INSTALL_DIR) / ".last_seen_commit"
-LOCK_FILE = Path("/tmp/cianet-update.lock")
+LOCK_FILE = Path(INSTALL_DIR) / "data" / ".cianet-update.lock"
 STATE_FILE = Path(INSTALL_DIR) / "data" / ".updater_state.json"
+MIN_COMMIT_FLOOR_FILE = Path(INSTALL_DIR) / "data" / ".min_commit_floor"
+
+
+def _read_min_commit_floor() -> str:
+    try:
+        if MIN_COMMIT_FLOOR_FILE.exists():
+            return MIN_COMMIT_FLOOR_FILE.read_text().strip().lower()
+    except Exception:
+        pass
+    st = _read_state()
+    return str(st.get("min_commit_floor") or "").strip().lower()
+
+
+def _write_min_commit_floor(commit_sha: str) -> None:
+    if not commit_sha:
+        return
+    commit_sha = commit_sha.strip().lower()
+    try:
+        MIN_COMMIT_FLOOR_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MIN_COMMIT_FLOOR_FILE.write_text(commit_sha + "\n")
+        os.chmod(str(MIN_COMMIT_FLOOR_FILE), 0o600)
+    except Exception as e:
+        log.warning("min_commit_floor write failed: %s", e)
 
 
 def _read_state() -> dict:
@@ -131,7 +154,8 @@ def get_pending_commits(repo_dir: str = None) -> list:
             cwd=repo_dir, capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
-            return [l for l in result.stdout.strip().split("\n") if l]
+            import html as _html
+            return [_html.escape(l.replace("`", "'")) for l in result.stdout.strip().split("\n") if l]
     except Exception as e:
         log.warning("get_pending_commits failed: %s", e)
     return []
@@ -273,9 +297,46 @@ def _verify_min_commit(repo_dir: str, remote_commit: str) -> Tuple[bool, str]:
     Min commit hash از env var `CIANET_MIN_COMMIT` خوانده می‌شه.
     اگه تنظیم نشه (empty)، verification skip می‌شه (backward-compatible).
     """
-    min_commit = os.environ.get("CIANET_MIN_COMMIT", "").strip().lower()
-    if not min_commit:
-        return True, ""  # verification disabled
+    env_min = os.environ.get("CIANET_MIN_COMMIT", "").strip().lower()
+    state_min = _read_min_commit_floor()
+    floors = [c for c in (env_min, state_min) if c]
+    if not floors:
+        local_head = get_local_commit(repo_dir)
+        if local_head:
+            _write_min_commit_floor(local_head)
+            floors = [local_head.lower()]
+        else:
+            return False, "❌ CIANET_MIN_COMMIT و state floor تنظیم نشده‌اند (fail-closed)"
+    if not remote_commit or len(remote_commit) not in (40, 64) or not all(c in "0123456789abcdef" for c in remote_commit.lower()):
+        return False, f"❌ remote commit invalid: '{remote_commit}'"
+    for floor_sha in floors:
+        if not (len(floor_sha) in (40, 64) and all(c in "0123456789abcdef" for c in floor_sha)):
+            return False, f"❌ min-commit floor invalid: '{floor_sha[:8]}...'"
+        if remote_commit.lower() == floor_sha:
+            continue
+        try:
+            res_anc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", floor_sha, remote_commit],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10,
+            )
+            if res_anc.returncode != 0:
+                return False, (
+                    f"❌ Supply chain check failed: remote {remote_commit[:8]} "
+                    f"is older than or divergent from floor {floor_sha[:8]}"
+                )
+        except Exception as _anc_e:
+            return False, f"❌ Supply chain ancestor check failed (fail-closed): {_anc_e}"
+    if os.environ.get("CIANET_VERIFY_GPG", "0").strip() == "1":
+        try:
+            gpg_res = subprocess.run(
+                ["git", "verify-commit", remote_commit],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10,
+            )
+            if gpg_res.returncode != 0:
+                return False, f"❌ GPG signature verification failed for {remote_commit[:8]}"
+        except Exception as _gpg_e:
+            return False, f"❌ GPG verification error (fail-closed): {_gpg_e}"
+    min_commit = floors[0]
     # پذیرش SHA-1 (40 hex) و SHA-256 (64 hex) — برای آینده
     if not (len(min_commit) in (40, 64) and all(c in "0123456789abcdef" for c in min_commit)):
         return False, f"❌ CIANET_MIN_COMMIT invalid: '{min_commit[:8]}...' (must be 40 or 64 hex chars)"
@@ -611,21 +672,19 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                     [_sys.executable, "-m", "pip", "install", "-r", _req_path],
                     capture_output=True, text=True, timeout=300,
                 )
-                if _pip.returncode == 0:
-                    log.info("✅ نصب requirements.txt بعد از آپدیت انجام شد")
-                else:
-                    log.warning(
-                        "⚠️ نصب requirements.txt بعد از آپدیت ناموفق بود "
-                        "(ادامه می‌دهیم — اگر dependency جدیدی لازم باشد سرویس "
-                        "بعد از restart ممکن است بالا نیاید؛ دستی اجرا کنید: "
-                        "%s -m pip install -r requirements.txt): %s",
-                        _sys.executable, _pip.stderr.strip()[-300:]
-                    )
+                if _pip.returncode != 0:
+                    raise RuntimeError(f"pip install failed (rc={_pip.returncode}): {_pip.stderr.strip()[-200:]}")
+                log.info("✅ نصب requirements.txt بعد از آپدیت انجام شد")
         except Exception as _pip_e:
-            log.warning(
-                "⚠️ نصب requirements.txt بعد از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
-                _pip_e
-            )
+            log.error("⛔ نصب requirements.txt ناموفق بود — اجرای rollback خودکار (fail-closed): %s", _pip_e)
+            if old_commit:
+                subprocess.run(
+                    ["git", "reset", "--hard", old_commit],
+                    cwd=repo_dir, capture_output=True, text=True, timeout=30,
+                )
+            if backup_path and os.path.exists(backup_path):
+                shutil.copy2(backup_path, os.path.join(repo_dir, "main.py"))
+            return False, f"❌ نصب وابستگی‌های pip ناموفق بود و سیستم به کامیت قبلی بازگردانی شد: {_pip_e}"
 
         new_commit = get_local_commit(repo_dir)
         try:
@@ -636,11 +695,14 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
 
         state = _read_state()
         state["last_commit"] = new_commit
+        state["min_commit_floor"] = new_commit
         state["last_update_at"] = time.time()
         state["pending_propagation"] = True  # وقتی restart شد propagate می‌کنه
         state["rolled_back"] = False  # v2.8.1: بعد از آپدیت موفق، flag rollback پاک می‌شه
         state["rolled_back_at"] = 0
         _write_state(state)
+        if new_commit:
+            _write_min_commit_floor(new_commit)
 
         msg = f"✅ آپدیت شد به {new_commit[:8]}"
         if backup_path:
@@ -711,6 +773,14 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 except Exception:
                     msg += f"\n❌ SIGTERM هم ناموفق — دستی بزن: sudo systemctl restart {svc_name}"
 
+            # M-22: ری‌استارت سرویس پنل وب (cianet-panel) در صورت فعال بودن
+            try:
+                subprocess.run(
+                    ["systemctl", "restart", "cianet-panel"],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                pass
             return True, msg
 
     except Exception as e:
