@@ -219,6 +219,13 @@ def _acquire_lock(timeout: int = 30) -> bool:
     start = time.time()
     while time.time() - start < timeout:
         try:
+            # v2.16.1 (E2E update-test finding): اگر پوشه‌ی data/ هنوز ساخته
+            # نشده باشد (نصبِ تازه‌ای که هیچ‌وقت state ننوشته — نه پنل چکِ
+            # آپدیت زده نه آپدیتی اجرا شده)، os.open روی مسیرِ والدِ
+            # غیرموجود با FileNotFoundError کرش می‌کرد و apply_update قبل
+            # از هر اقدامی می‌مُرد. _write_state همین mkdir را برای state
+            # file انجام می‌دهد؛ اینجا هم همان رفتار اعمال شد.
+            LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
             # v2.13.4 (UP-MED-4): create lock with 0o600 instead of 0o644 to
             # prevent local users from rewriting the PID and staging a
             # permanent DoS of the auto-update path.
@@ -833,6 +840,15 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
             except Exception:
                 pass
             return True, msg
+
+        # v2.16.1 (E2E update-test finding): مسیر restart=False هیچ مقداری
+        # برنمی‌گرداند — apply_update مقدار None می‌داد و همه‌ی callerهایی
+        # که نتیجه را unpack می‌کنند (ابزارها/تست/اسکریپت‌های تعمیر) با
+        # «TypeError: cannot unpack non-iterable NoneType» کرش می‌کردند.
+        # مسیرهای تولیدی فعلی (auto_update_loop و web_panel) restart=True
+        # می‌دهند و تا امروز به این شاخه نرسیده‌اند؛ این return صریح
+        # هر دو مسیر را هم‌ارزش می‌کند.
+        return True, msg
 
     except Exception as e:
         log.exception("apply_update failed")

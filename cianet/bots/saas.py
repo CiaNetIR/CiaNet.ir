@@ -935,6 +935,12 @@ class SaaSBot:
         # ── ردیف ۵ (تکی): پشتیبانی
         buttons.append([UI.go("☎️ پشتیبانی", "user_support")])
 
+        # ── ردیف ۵.۵ (v2.16.1 USER-REQUEST): ریپورتر — برای همه‌ی کاربران.
+        # فعلاً صفحه‌ی «به‌زودی» نشان می‌دهد؛ route و دکمه از الان جداست تا
+        # فعال‌سازیِ نسخه‌های بعدی فقط منطق را به همین مسیر وصل کند و
+        # چیدمانِ منو دیگر دست نخورد.
+        buttons.append([UI.go("🎙 ریپورتر", "user_reporter")])
+
         # ── ردیف ۶ (شرطی): فقط برای privileged
         if privileged:
             todo = self._admin_pending_count(uid, role)
@@ -9557,6 +9563,18 @@ class SaaSBot:
                     return
                 if data == "user_support_end":
                     await self._user_support_end(event)
+                    return
+                if data == "user_reporter":
+                    # v2.16.1 (USER-REQUEST): بخش «ریپورتر» — فعلاً فقط
+                    # اعلانِ «به‌زودی». دکمه از الان در منوی همه‌ی کاربران
+                    # دیده می‌شود تا مسیرش شناخته‌شده باشد؛ منطق اصلیِ
+                    # گزارش‌گیری در نسخه‌های بعدی به همین route وصل می‌شود.
+                    await event.edit(
+                        "🎙 ریپورتر\n\n"
+                        "🚧 این بخش در حال ساخت است و به‌زودی فعال می‌شود.\n"
+                        "⏳ لطفاً منتظر خبرهای بعدی باشید.",
+                        buttons=[UI.nav_row()],
+                    )
                     return
                 if data.startswith("ticket_unit:"):  # v1.8.0
                     unit_id = data.split(":", 1)[1]
