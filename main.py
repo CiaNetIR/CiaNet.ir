@@ -6574,6 +6574,8 @@ WIZ_TAG = "awaiting_tag"
 WIZ_PHONE = "awaiting_phone"
 WIZ_CODE = "awaiting_code"
 WIZ_PASSWORD = "awaiting_password"
+# v2.15.3 (LOGIN-UX): منتظر تاییدِ «حذف سلف قبلی + لاگین مجدد» (دکمه‌ای)
+WIZ_CONFIRM_REPLACE = "awaiting_confirm_replace"
 # PATCH (v2.6.2): wizard states برای تغییر/حذف رمز 2FA و تغییر ایمیل
 WIZ_2FA_OLD_PASS = "awaiting_2fa_old_pass"
 WIZ_2FA_NEW_PASS = "awaiting_2fa_new_pass"
@@ -6666,6 +6668,8 @@ NAV_ACTION_PREFIXES = (
     "channel_retry", "channel_confirm_save", "owner_channel_clear",
     "owner_db_restore_go", "owner_db_restore_cancel", "owner_backup",
     "owner_db_backup", "admin_del:", "role_del:", "cancel_wizard",
+    # v2.15.3 (LOGIN-UX): دکمه‌های ویزارد لاگین «عمل» هستند نه «صفحه»
+    "wiz_resend_code", "confirm_replace:",
     "user_support_end", "proxy_skip_auth",
     "send_target_me", "owner_channel_check",
     # بستنِ نشست‌ها عمل است و خودش فهرست را دوباره رندر می‌کند
@@ -9300,6 +9304,57 @@ class AdminBot:
             buttons=[UI.nav_row()],
         )
 
+    async def _safe_replace_self(self, tag: str) -> bool:
+        """
+        v2.15.3 (LOGIN-UX-3/BUG-1): حذفِ امنِ سلف قبلی برای لاگین مجدد —
+        همان هسته‌ی امنِ _delete_account (journal → ensure_stopped → حذفِ
+        فایل‌های سشن → config → clear_state) ولی بدون تعامل با UI، برای
+        صدا زدن از داخل ویزارد لاگین. برمی‌گرداند True فقط اگر حذف کامل
+        موفق بود؛ در شکستِ میانی، Recovery استارتاپی ادامه می‌دهد.
+        """
+        cfg = self.sb.load_config()
+        if tag not in cfg:
+            return True  # دیگر وجود ندارد — همین کافی است
+        # ۱) ثبت Intent حذف — قبل از هر تغییر (Recovery-safe)
+        journal = _load_account_delete_journal()
+        journal[tag] = "DELETE_PENDING"
+        _save_account_delete_journal(journal)
+        try:
+            # ۲) توقف کامل Runtime — نه حذفِ خامِ فایل روی پروسه‌ی شاید زنده
+            stopped = await ensure_stopped(tag, "AdminBot._safe_replace_self")
+            if not stopped:
+                print(f"❌ [safe_replace] توقف کامل اکانت «{tag}» ممکن نشد — "
+                      f"سشن هنوز باز است؛ حذف لغو شد.")
+                journal = _load_account_delete_journal()
+                journal.pop(tag, None)
+                _save_account_delete_journal(journal)
+                return False
+            # ۳) پاک‌سازی session (فایل + sidecar) — نتیجه بررسی می‌شود
+            if not _remove_session_files(tag):
+                print(f"❌ [safe_replace] حذف فایل سشن «{tag}» ناقص ماند — "
+                      f"config حذف نشد؛ journal حفظ شد.")
+                return False
+            # ۴) به‌روزرسانی config
+            cfg = self.sb.load_config()
+            cfg.pop(tag, None)
+            self.sb.save_config(cfg)
+            # ۵) پاک‌سازی state — تا تنظیماتِ اکانت قبلی (مثل login_guard)
+            #    روی تگِ تکراری نچسبد و کدِ ویزاردِ بعدی را منقضی نکند
+            try:
+                self.sb.clear_state(tag)
+            except Exception as e:
+                print(f"⚠️ [safe_replace] پاک‌سازی state اکانت {tag} ناموفق: "
+                      f"{type(e).__name__}")
+        except Exception as e:
+            print(f"❌ [safe_replace] حذف «{tag}» نیمه‌تمام ماند (Recovery "
+                  f"استارتاپی ادامه می‌دهد): {type(e).__name__}: {str(e)[:120]}")
+            return False
+        # ۶) همه‌ی مراحل موفق → Mark Delete Completed
+        journal = _load_account_delete_journal()
+        journal.pop(tag, None)
+        _save_account_delete_journal(journal)
+        return True
+
     # ─────────────────────────────────────────────────────
     #  پروکسی — فقط برای اکانتِ موجود (تغییر/حذف پروکسی روی اکانتِ از‌قبل‌لاگین‌شده)
     # ─────────────────────────────────────────────────────
@@ -9611,14 +9666,16 @@ class AdminBot:
             # (که owner_user_id صریح می‌گذارد) اشتباه گرفته نشود و ادمین
             # بعد از ساخت، در منوی USER فرود نیاید.
             data["for_user_id"] = preset_owner_id
-        self.wizards[event.sender_id] = {"state": WIZ_TAG, "data": data,
+        # v2.15.3 (LOGIN-UX-2): مرحله‌ی «تگ دستی» حذف شد — مستقیم از شماره؛
+        # تگ نهایی بعد از لاگین موفق خودکار از اسم + آیدی تلگرام ساخته
+        # می‌شود (_finish_add_account → _auto_tag).
+        self.wizards[event.sender_id] = {"state": WIZ_PHONE, "data": data,
             "_ts": time.time(),
         }
         title = "➕ **افزودن SelfBot**" if preset_owner_id is not None else "➕ **افزودن اکانت جدید**"
         await event.edit(
             f"{title}\n\n"
-            "یه اسم (تگ) کوتاه برای این اکانت بفرست — فقط حروف انگلیسی/عدد/"
-            "خط‌تیره (مثلاً `account1`):",
+            "شماره تلفن رو با کد کشور بفرست (مثلاً `+989123456789`):",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
         )
 
@@ -9856,15 +9913,96 @@ class AdminBot:
 
         data["temp_client"] = temp_client
         data["phone_code_hash"] = sent.phone_code_hash
+        data["code_errors"] = 0
+        data["resends"] = data.get("resends", 0)
         self.wizards[event.sender_id] = {"state": WIZ_CODE, "data": data,
             "_ts": time.time(),
         }
+        # v2.15.3 (LOGIN-UX-1): متن قبلی می‌گفت «فاصله بین ارقام مهم نیست» —
+        # دقیقاً برعکسِ واقعیت. تلگرام کدِ خام را در متنِ پیام تشخیص می‌دهد و
+        # ممکن است سانسور/منقضی کند؛ فاصله بین ارقام الگو را می‌شکند تا کد
+        # سالم برسد (همان منطقِ spaced_code در تحویل کد به مالک). ویزارد از
+        # قبل فاصله را حذف می‌کند (re.sub در WIZ_CODE) پس ورودیِ فاصله‌دار
+        # کاملاً پذیرفته می‌شود.
         await self._respond_safe(
             event,
-            "📩 کد به تلگرام/پیامکِ این شماره ارسال شد. کد رو بفرست:\n"
-            "(فاصله بین ارقام مهم نیست، خودم پاکش می‌کنم)",
-            buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+            "📩 کد ورود به تلگرامِ این شماره ارسال شد.\n\n"
+            "⚠️ **مهم — حتماً بخون:**\n"
+            "وقتی کد رو برام می‌فرستی، بین حداقل یکی از ارقامش **فاصله** بذار.\n"
+            "✅ درست: `12 345` — ❌ غلط: `12345`\n"
+            "کدِ بدون فاصله ممکنه توسط تلگرام منقضی بشه و لاگینِ سلف انجام نشه.\n"
+            "فاصله رو خودم خودکار حذف می‌کنم — فقط برای اینه که کد سالم برسه.",
+            buttons=[
+                [UI.go("📤 ارسال مجدد کد", "wiz_resend_code")],
+                [UI.neutral(UI.L_CANCEL, "cancel_wizard")],
+            ],
         )
+
+    async def _wiz_resend_code(self, event):
+        """
+        v2.15.3 (LOGIN-UX-4): «📤 ارسال مجدد کد» — کلاینتِ موقتِ قبلی را تمیز
+        می‌بندد و کدِ تازه با phone_code_hash جدید می‌فرستد. سقف: ۳ بار در
+        هر ویزارد.
+        """
+        wiz = self.wizards.get(event.sender_id)
+        if not wiz or wiz.get("state") != WIZ_CODE or "phone" not in wiz.get("data", {}):
+            try:
+                await event.answer("ویزارد لاگین فعالی نیست.", alert=True)
+            except Exception:
+                pass
+            return
+        wdata = wiz["data"]
+        if wdata.get("resends", 0) >= 3:
+            try:
+                await event.answer(
+                    "محدودیت ارسال مجدد (۳ بار) — چند دقیقه بعد دوباره تلاش کن.",
+                    alert=True,
+                )
+            except Exception:
+                pass
+            return
+        wdata["resends"] = wdata.get("resends", 0) + 1
+        try:
+            await event.answer("📤 کد جدید ارسال می‌شه...")
+        except Exception:
+            pass
+        await self._cleanup_wizard_temp_client(wiz)
+        wdata.pop("temp_client", None)
+        wdata.pop("phone_code_hash", None)
+        await self._do_send_code(event, wdata)
+
+    async def _wiz_confirm_replace(self, event, tag: str):
+        """
+        v2.15.3 (LOGIN-UX-3): تاییدِ «حذف سلف قبلی + لاگین مجدد» — سلف قبلی
+        را با هسته‌ی امن (_safe_replace_self) حذف می‌کند و ویزارد را با
+        ارسالِ کدِ تازه ادامه می‌دهد. فقط با تگِ ذخیره‌شده در ویزاردِ فعالِ
+        همین کاربر کار می‌کند (جعلِ کالبک بی‌اثر است).
+        """
+        wiz = self.wizards.get(event.sender_id)
+        if (not wiz
+                or wiz.get("state") != WIZ_CONFIRM_REPLACE
+                or wiz.get("data", {}).get("replace_tag") != tag):
+            try:
+                await event.answer("این درخواست دیگر معتبر نیست.", alert=True)
+            except Exception:
+                pass
+            return
+        wdata = wiz["data"]
+        try:
+            await event.answer("🗑 در حال حذف سلف قبلی...")
+        except Exception:
+            pass
+        if not await self._safe_replace_self(tag):
+            await self._respond_safe(
+                event,
+                "⚠️ حذفِ سلف قبلی («" + tag + "») کامل نشد — لطفاً دوباره "
+                "دکمه‌ی تایید رو بزن یا با پشتیبانی تماس بگیر.",
+                buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+            )
+            return
+        wdata.pop("replace_tag", None)
+        wiz["state"] = "sending_code"
+        await self._do_send_code(event, wdata)
 
     async def _handle_wizard_input(self, event, wiz: dict):
         # v2.13.0 (DEBUG-2 WIZARD): stale-wizard cleanup at the very start.
@@ -10066,40 +10204,57 @@ class AdminBot:
                         and _existing_entry.bot.client.is_connected()
                     )
                     if _is_active:
-                        # اکانت قبلی فعاله — نگذار دو اکانت همزمان روی یک شماره
-                        await event.respond(
-                            f"❌ این شماره با تگِ `{existing_tag}` فعال است. "
-                            f"اگر می‌خواهی همان را دوباره استفاده کنی، اول اکانتِ قبلی رو "
-                            f"از پنل پاک کن. وگرنه یه شماره‌ی دیگه بفرست:",
-                            buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                        # v2.15.3 (LOGIN-UX-3/BUG-2): اکانت قبلی فعاله — به‌جای
+                        # ردِ خشک («اول از پنل پاک کن»)، دیالوگِ تایید نشان بده:
+                        # «سلف قبلی حذف و سلف جدید لاگین شه؟ تایید/انصراف».
+                        # این هم‌زمان ددلاکِ گاردِ ورود را هم حل می‌کند: سلفِ
+                        # زنده‌ی قبلی (با login_guard روشن) هر کدِ ویزارد را
+                        # خودکار منقضی می‌کرد و کاربر در حلقه‌ی «کد اشتباه»
+                        # می‌ماند. حذفِ امنِ سلفِ قبلی قبل از ارسال کد، این
+                        # تداخل را از ریشه برمی‌دارد.
+                        data["phone"] = text
+                        data["replace_tag"] = existing_tag
+                        wiz["state"] = WIZ_CONFIRM_REPLACE
+                        await self._respond_safe(
+                            event,
+                            f"⚠️ این شماره قبلاً لاگین شده و سلفِ «{existing_tag}» فعاله.\n\n"
+                            f"می‌خوای سلفِ قبلی حذف بشه و از نو لاگین بشی؟",
+                            buttons=[
+                                [UI.go("✅ تایید — حذف سلف قبلی و لاگین مجدد",
+                                       f"confirm_replace:{existing_tag}")],
+                                [UI.neutral("❌ انصراف", "cancel_wizard")],
+                            ],
                         )
                         return
                     else:
-                        # اکانت قبلی مرده یا disabled — auto-delete + اجازه لاگین مجدد
+                        # v2.15.3 (LOGIN-UX-6/BUG-1): اکانت قبلی مرده یا disabled —
+                        # پاکسازیِ «امن» (نه حذف خام): همان هسته‌ی _delete_account
+                        # با journal + ensure_stopped + clear_state تا سلفِ زامبی
+                        # یا state ناسازگار باقی نماند. کاربر هم خبردار می‌شود.
                         print(f"ℹ️ [login] اکانت قبلی «{existing_tag}» سشن مرده/غیرفعال "
-                              f"دارد — auto-delete + اجازه لاگین مجدد.")
-                        # پاک‌سازی session فایل‌های اکانت قبلی
-                        try:
-                            import os as _os
-                            for _ext in ("", "-wal", "-shm"):
-                                _path = os.path.join(self.sb.SESSIONS_DIR, f"{existing_tag}.session{_ext}")
-                                if _os.path.exists(_path):
-                                    _os.remove(_path)
-                                    print(f"   🗑️ removed {_path}")
-                        except Exception as _del_e:
-                            print(f"⚠️ failed to delete old session: {_del_e}")
-                        # پاک‌سازی از config.json
-                        try:
-                            cfg = self.sb.load_config()
-                            if existing_tag in cfg:
-                                cfg.pop(existing_tag, None)
-                                self.sb.save_config(cfg)
-                                print(f"   ✅ removed {existing_tag} from config.json")
-                        except Exception as _cfg_e:
-                            print(f"⚠️ failed to update config: {_cfg_e}")
+                              f"دارد — پاکسازی امن + اجازه لاگین مجدد.")
+                        await self._respond_safe(
+                            event,
+                            f"🧹 سلف قبلیِ «{existing_tag}» منقضی/غیرفعال شده بود — "
+                            f"پاکسازی امن شد و از نو لاگین می‌شه.",
+                        )
+                        if not await self._safe_replace_self(existing_tag):
+                            await self._respond_safe(
+                                event,
+                                "⚠️ توقفِ کامل سلف قبلی ممکن نشد — لطفاً چند لحظه "
+                                "بعد دوباره تلاش کن.",
+                                buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                            )
+                            return
                         # ادامه‌ی فرآیند لاگین با شماره‌ی جدید
                         break
             data["phone"] = text
+            # v2.15.3 (LOGIN-UX-2): تگِ موقت برای فایل سشن در طول لاگین —
+            # کاربر دیگر تگ دستی انتخاب نمی‌کند؛ تگ نهایی بعد از لاگین موفق
+            # خودکار از اسم + آیدی تلگرام ساخته می‌شود (_finish_add_account).
+            if not data.get("tag"):
+                _digits = re.sub(r"\D", "", text)
+                data["tag"] = f"wiz_{_digits[-8:]}_{secrets.token_hex(3)}"
             # v2.12.29 (DEEP-5 W-1): state رو None نذار — یه state
             # موقت بساز تا پیام‌های کاربر در این پنجره silent drop
             # نشن. بعد از _do_send_code یا WIZ_CODE یا None می‌شه.
@@ -10111,8 +10266,31 @@ class AdminBot:
             await self._do_send_code(event, data)
             return
 
+        if state == WIZ_CONFIRM_REPLACE:
+            # v2.15.3 (LOGIN-UX-3): منتظر دکمه‌ی تایید/انصراف است؛ ورودیِ متنی
+            # اینجا معتبر نیست — کاربر را به دکمه‌ها هدایت کن (نه لغوِ ویزارد).
+            _rtag = data.get("replace_tag", "")
+            await self._respond_safe(
+                event,
+                "لطفاً یکی از دکمه‌ها رو بزن: «✅ تایید» یا «❌ انصراف».",
+                buttons=[
+                    [UI.go("✅ تایید — حذف سلف قبلی و لاگین مجدد",
+                           f"confirm_replace:{_rtag}")],
+                    [UI.neutral("❌ انصراف", "cancel_wizard")],
+                ],
+            )
+            return
+
         if state == WIZ_CODE:
-            code = re.sub(r"\D", "", text) or text
+            # v2.15.3 (LOGIN-UX-7/BUG-4): ورودیِ خالی یا بدون هیچ رقمی
+            # (عکس/استیکر/ویس) نباید ویزارد را لغو کند — فقط دوباره بپرس.
+            if not text or not re.search(r"\d", text):
+                await self._respond_safe(
+                    event,
+                    "❌ فقط کد رو به‌صورت متن بفرست (مثلاً `12 345` — با فاصله):",
+                )
+                return
+            code = re.sub(r"\D", "", text)
             temp_client = data["temp_client"]
             # PATCH (v2.0.9 SECURITY): پیامِ حاوی کد لاگین رو بعد از
             # مصرف از chat history پاک کن — قبلاً کد لاگین در chat
@@ -10140,7 +10318,24 @@ class AdminBot:
             except errors.PhoneCodeInvalidError:
                 # PATCH (audit-5): کد اشتباه → اجازه‌ی retry با همین
                 # phone_code_hash. کاربر می‌تواند دوباره کد بفرستد.
-                await event.respond("❌ کد اشتباه است. دوباره بفرست:")
+                # v2.15.3 (LOGIN-UX-4): سقف ۳ خطا — بعد از آن کدِ تازه
+                # خودکار ارسال می‌شود تا کاربر در حلقه‌ی «کد اشتباه»
+                # نماند (مثلاً وقتی گاردِ سلف قبلی کد را باطل کرده باشد).
+                data["code_errors"] = data.get("code_errors", 0) + 1
+                if data["code_errors"] >= 3:
+                    data["code_errors"] = 0
+                    await event.respond(
+                        "❌ ۳ بار کد اشتباه بود — کدِ تازه ارسال می‌شه. "
+                        "یادت باشه: بین حداقل یکی از ارقام فاصله بذار (مثلاً `12 345`)."
+                    )
+                    await self._cleanup_wizard_temp_client(wiz)
+                    data.pop("temp_client", None)
+                    data.pop("phone_code_hash", None)
+                    await self._do_send_code(event, data)
+                    return
+                await event.respond(
+                    "❌ کد اشتباه است. دوباره بفرست (با فاصله بین ارقام، مثل `12 345`):"
+                )
                 return
             except errors.PhoneCodeExpiredError:
                 # PATCH (audit-5): کد منقضی شده → phone_code_hash دیگر
@@ -10291,6 +10486,45 @@ class AdminBot:
                 )
                 self.wizards.pop(event.sender_id, None)
                 return
+        # ─── v2.15.3 (LOGIN-UX-2): تگِ نهایی خودکار — اسم + آیدی تلگرام ──
+        # tag فعلی ممکن است تگِ موقتِ ویزارد (wiz_...) باشد. تگ نهایی از اسمِ
+        # اکانت (پاک‌شده تا کاراکترهای مجاز تگ) + آیدی عددیِ تلگرام ساخته
+        # می‌شود — برای re-loginِ همان اکانت، تگ پایدار و قابل پیش‌بینی است.
+        for _old_tag, _old_acc in list(cfg.items()):
+            # hardening: همین اکانتِ تلگرامی (user_id یکسان) با شماره‌ی
+            # تغییر‌یافته دوباره لاگین شده و سلفِ قدیمی‌اش هنوز در config است —
+            # دو سلف روی یک اکانتِ تلگرامی یعنی تداخل. پاکسازی امن.
+            if (_old_tag != tag and isinstance(_old_acc, dict)
+                    and _old_acc.get("user_id") == me.id):
+                print(f"ℹ️ [login] سلف قدیمیِ همین اکانت ({_old_tag}) پیدا شد — "
+                      f"پاکسازی امن برای جلوگیری از تداخل.")
+                await self._safe_replace_self(_old_tag)
+                cfg = self.sb.load_config()
+        _base = re.sub(r"[^A-Za-z0-9_\-]", "", (me.first_name or me.username or ""))[:16]
+        _base = _base or "user"
+        final_tag = f"{_base}_{me.id}"
+        while final_tag in cfg or final_tag in RESERVED_TAGS:
+            final_tag = f"{_base}_{me.id}_{secrets.token_hex(2)}"
+        if final_tag != tag:
+            try:
+                for _ext in ("", "-wal", "-shm"):
+                    _src = os.path.join(self.sb.SESSIONS_DIR, f"{tag}.session{_ext}")
+                    _dst = os.path.join(self.sb.SESSIONS_DIR, f"{final_tag}.session{_ext}")
+                    if os.path.exists(_src):
+                        os.replace(_src, _dst)
+            except Exception as _e:
+                await event.respond(_friendly_error(_e, "finish_login"))
+                self.wizards.pop(event.sender_id, None)
+                return
+            tag = final_tag
+            data["tag"] = tag
+            # chmod روی inode قبلی اعمال شده و با rename حفظ می‌شود؛ برای
+            # اطمینان، روی مسیر نهایی هم صریحاً تکرار می‌کنیم.
+            try:
+                _chmod_private(os.path.join(self.sb.SESSIONS_DIR, f"{tag}.session"))
+            except Exception:
+                pass
+
         new_entry = {
             "type": "user",
             "api_id": api_id,
@@ -10322,6 +10556,11 @@ class AdminBot:
         self.wizards.pop(event.sender_id, None)
         display_name = me.first_name or ""
         proxy_note = " (با همون پروکسی ادامه پیدا می‌کنه)" if data.get("proxy") else ""
+
+        # v2.15.3 (LOGIN-UX-5): بازخورد فوری — قبلاً تا ۴۰ ثانیه سکوتِ مطلق
+        # بود و کاربر فکر می‌کرد یخ زده و دوباره کد می‌فرستاد؛ حالا پیامِ
+        # «در حال روشن‌شدن» می‌گیرد.
+        await self._respond_safe(event, "⏳ سلف در حال روشن‌شدنه — چند ثانیه صبر کن...")
 
         # حداکثر ۴۰ ثانیه صبر (اتصال + احراز هویت + get_me + ثبت هندلرها)
         # — ویزارد دیگر هرگز قبل از روشن‌شدن واقعی، پیام موفقیت نمی‌دهد.
@@ -10373,7 +10612,8 @@ class AdminBot:
 
         if ready:
             await event.respond(
-                f"✅ اکانت «{tag}» ({display_name}) با موفقیت اضافه شد و سلف روشن است.{proxy_note}"
+                f"✅ اکانت «{display_name}» با موفقیت اضافه شد و سلف روشن است.{proxy_note}\n"
+                f"(شناسه: `{tag}`)"
             )
         else:
             await event.respond(
@@ -10427,8 +10667,11 @@ class AdminBot:
         فرستنده‌ی پیام، هرچند این دو معمولاً یکی هستند) نسبت می‌دهد.
         """
         await self._cleanup_wizard_temp_client(self.wizards.pop(event.sender_id, None))
+        # v2.15.3 (LOGIN-UX-2): مرحله‌ی «تگ دستی» حذف شد — مستقیم شماره؛
+        # تگ نهایی بعد از لاگین موفق خودکار از اسم + آیدی تلگرام ساخته
+        # می‌شود (_finish_add_account).
         self.wizards[event.sender_id] = {
-            "state": WIZ_TAG,
+            "state": WIZ_PHONE,
             "data": {"owner_user_id": owner_user_id},
             "_ts": time.time(),
         }
@@ -10436,8 +10679,8 @@ class AdminBot:
         await event.respond(
             "🔐 **لاگین اکانت تلگرام شما**\n\n"
             "برای فعال‌سازی سلف روی اکانتت، اول باید اکانتت رو اینجا لاگین کنی.\n\n"
-            "یه اسم (تگ) کوتاه برای این اکانت بفرست — فقط حروف انگلیسی/عدد/"
-            "خط‌تیره (مثلاً `myaccount`):",
+            "شماره‌ی اکانت تلگرامت رو با کد کشور بفرست\n"
+            "(مثلاً `+989123456789`):",
             buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
         )
 
@@ -10519,6 +10762,7 @@ class AdminBot:
             "acc:", "toggle:", "font_menu:", "font_set:", "edit_name:",
             "send_msg:", "proxy_start:", "disable:", "enable:",
             "del_confirm:", "del_go:",
+            "confirm_replace:",  # v2.15.3 (LOGIN-UX): حذف سلف قبلی — هدفش tag است
             # بخش‌های دسته‌بندی‌شده‌ی UI — همان گارد مالکیت برای این‌ها هم
             "feat:", "appear:", "conn:", "status:",
             # مدیریت نشست‌ها و دریافت کد — هدفشان یک tag است، پس باید گارد
@@ -10588,6 +10832,11 @@ class AdminBot:
                 await self._show_main_menu(event.chat_id, edit_event=event)
             elif data == "cancel_wizard":
                 await self._cancel_wizard(event.sender_id, notify_event=event)
+            # v2.15.3 (LOGIN-UX): دکمه‌های ویزارد لاگین
+            elif data == "wiz_resend_code":
+                await self._wiz_resend_code(event)
+            elif data.startswith("confirm_replace:"):
+                await self._wiz_confirm_replace(event, data.split(":", 1)[1])
             elif data.startswith("acc:"):
                 tag = data.split(":", 1)[1]
                 await self._show_account_detail(event, tag)
@@ -10883,6 +11132,8 @@ ACTIVATION_HELP_TEXT = (
     "**مرحله ۲: لاگین اکانت**\n"
     "بعد از فعال شدن اشتراک، دکمه‌ی «📱 لاگین کردن سلف» "
     "در منوی اصلی نمایش داده می‌شه. روش بزن.\n\n"
+    "اگه قبلاً لاگین کرده بودی، موقع وارد کردن شماره ازت می‌پرسه سلفِ "
+    "قبلی حذف بشه و از نو لاگین بشی (تایید/انصراف).\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "**مرحله ۳: وارد کردن شماره**\n"
     "شماره‌ی اکانت تلگرامت رو بفرست:\n"
@@ -10890,7 +11141,10 @@ ACTIVATION_HELP_TEXT = (
     "• خارج: `+1234567890` (بدون صفر اول)\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "**مرحله ۴: کد تأیید**\n"
-    "تلگرام یه کد ۵ رقمی به اکانتت می‌فرسته. اون رو همینجا بفرست.\n\n"
+    "تلگرام یه کد به اکانتت می‌فرسته.\n"
+    "⚠️ موقع فرستادنِ کد، بین حداقل یکی از ارقامش فاصله بذار:\n"
+    "✅ `12 345` — ❌ `12345`\n"
+    "(کدِ بدون فاصله ممکنه منقضی بشه و لاگین انجام نشه)\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "**مرحله ۵: رمز دو مرحله‌ای (اختیاری)**\n"
     "اگه اکانتت رمز ۲FA داره، ازت می‌پرسه. وگرنه نیازی نیست.\n\n"
@@ -11335,15 +11589,12 @@ class SaaSBot:
 
     def _user_has_logged_in_account(self, user_id: int) -> bool:
         """
-        آیا این کاربر حداقل یک اکانت سلف دارد که خودش لاگین کرده؟ برای
-        تعیین اینکه دکمه‌ی «🔐 لاگین به اکانت» در منوی کاربر عادی نمایش
-        داده شود یا نه: طبق اسپک، این گزینه فقط *تا قبل از اولین لاگین
-        موفق* باید در منو باشد و بعد از آن دیگر نیاید. یک اکانت «لاگین‌شده»
-        یعنی اکانتی در config.json که owner_user_id آن برابر همین کاربر
-        است (چه الان روشن باشد چه خاموش/غیرفعال — لاگین موفق انجام شده).
-        اگر کاربری اکانتش بعداً از config حذف شود (مثلاً توسط پشتیبانی)،
-        این تابع دوباره False برمی‌گرداند و گزینه برای لاگین مجدد ظاهر
-        می‌شود.
+        آیا این کاربر حداقل یک اکانت سلف دارد که خودش لاگین کرده؟
+        v2.15.3 (LOGIN-UX-3): این تابع دیگر «دروازه‌ی لاگین مجدد» نیست (هارد‌بلاک
+        حذف شد و کاربر می‌تواند دوباره ویزارد لاگین را شروع کند). کاربرد فعلی:
+        نمایش/آمار منوی کاربر (مثلاً نمایش دکمه‌ی «لاگین کردن سلف»). یک اکانت
+        «لاگین‌شده» یعنی اکانتی در config.json که owner_user_id آن برابر همین
+        کاربر است (چه الان روشن باشد چه خاموش/غیرفعال).
         """
         cfg = self.sb.load_config()
         return any(account_belongs_to(acc, tag, user_id)
@@ -20549,22 +20800,12 @@ class SaaSBot:
                                 alert=True,
                             )
                             return
-                    # فیکس تکمیل اسپک: گزینه‌ی «لاگین به اکانت» فقط تا قبل از
-                    # اولین لاگین موفق باید وجود داشته باشد. شرط نمایش در منو
-                    # این را اعمال می‌کند، ولی یک دکمه‌ی کهنه/فورواردشده یا
-                    # کالبکِ دست‌ساز می‌تواند بعد از لاگین موفق دوباره این مسیر
-                    # را صدا بزند — اینجا لایه‌ی دوم دفاع است: اگر کاربر قبلاً
-                    # موفق لاگین کرده (اکانتی در config با owner_user_id او)،
-                    # مسیر لاگین مجدد بسته است و ویزارد جدیدی شروع نمی‌شود.
-                    # (اگر اکانتش بعداً توسط پشتیبانی از config حذف شده باشد،
-                    # این تابع دوباره False می‌دهد و لاگین مجدد مجاز است.)
-                    if self._user_has_logged_in_account(event.sender_id):
-                        await event.answer(
-                            "اکانت تو قبلاً با موفقیت لاگین شده — از پنل "
-                            "«مدیریت اکانت‌های سلف» می‌تونی سلفت رو مدیریت کنی.",
-                            alert=True,
-                        )
-                        return
+                    # v2.15.3 (LOGIN-UX-3): هارد‌بلاکِ لاگین مجدد حذف شد —
+                    # کاربری که قبلاً لاگین کرده می‌تواند دوباره وارد ویزارد شود؛
+                    # اگر شماره‌اش سلفِ زنده‌ی قبلی داشته باشد، در WIZ_PHONE
+                    # دیالوگِ «حذف سلف قبلی و لاگین مجدد؟ تایید/انصراف» نشان
+                    # داده می‌شود (جریان self-service بدون دخالت پشتیبانی).
+                    # گیتِ اشتراکِ بالا (get_active_subscription) همچنان برقرار است.
                     self.wizards.pop(event.sender_id, None)
                     # قبل از شروع ویزارد لاگین، scope پنل را روی همین کاربر
                     # تنظیم می‌کنیم (owner_filter={user_id}) تا اگر لاگین
