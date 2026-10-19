@@ -9946,8 +9946,13 @@ class AdminBot:
         """
         wiz = self.wizards.get(event.sender_id)
         if not wiz or wiz.get("state") != WIZ_CODE or "phone" not in wiz.get("data", {}):
+            _busy = bool(wiz) and wiz.get("state") == "sending_code"
             try:
-                await event.answer("ویزارد لاگین فعالی نیست.", alert=True)
+                await event.answer(
+                    "⏳ کد در حال ارسال است — لطفاً صبر کن."
+                    if _busy else "ویزارد لاگین فعالی نیست.",
+                    alert=True,
+                )
             except Exception:
                 pass
             return
@@ -9966,6 +9971,12 @@ class AdminBot:
             await event.answer("📤 کد جدید ارسال می‌شه...")
         except Exception:
             pass
+        # v2.15.4 (HOTFIX): state موقت قبل از await — تا در پنجره‌ی ارسالِ
+        # کد (شبکه تا ۶۰ ثانیه)، کلیکِ دوباره‌ی «ارسال مجدد» re-entry نکند
+        # (دو temp_client هم‌زمان و رقابت روی wizards) و متنِ کدِ کاربر
+        # به KeyError در شاخه‌ی WIZ_CODE نرسد؛ _do_send_code در پایانِ
+        # موفق خودش state را به WIZ_CODE برمی‌گرداند.
+        wiz["state"] = "sending_code"
         await self._cleanup_wizard_temp_client(wiz)
         wdata.pop("temp_client", None)
         wdata.pop("phone_code_hash", None)
@@ -10001,6 +10012,14 @@ class AdminBot:
             )
             return
         wdata.pop("replace_tag", None)
+        # v2.15.4 (HOTFIX): شاخه‌ی فعالِ WIZ_PHONE قبل از دیالوگِ تایید
+        # return می‌کند و تگِ موقت نمی‌سازد (تخصیصِ tag بعد از حلقه‌ی اسکن
+        # است) → بدون این خط، _do_send_code روی data["tag"] کرش می‌کرد —
+        # آن هم بعد از حذفِ موفقِ سلفِ قبلی؛ یعنی جریانِ پرچم‌دارِ «لاگین
+        # مجدد» نیمه‌کاره می‌ماند و ویزارد در state مرده گیر می‌کرد.
+        if not wdata.get("tag"):
+            _digits = re.sub(r"\D", "", wdata.get("phone", ""))
+            wdata["tag"] = f"wiz_{_digits[-8:]}_{secrets.token_hex(3)}"
         wiz["state"] = "sending_code"
         await self._do_send_code(event, wdata)
 
@@ -10195,6 +10214,16 @@ class AdminBot:
             cfg = self.sb.load_config()
             for existing_tag, existing_acc in cfg.items():
                 if isinstance(existing_acc, dict) and existing_acc.get("phone") == text:
+                    # v2.15.4 (SEC-HOTFIX): مالکیت — فقط اکانت‌های قابل‌مشاهده
+                    # برای همین پنل واردِ این اسکن شوند. بدون این چک، کاربرِ
+                    # scoped با واردکردنِ شماره‌ی اکانتِ کاربرِ دیگر می‌توانست
+                    # سلفِ متوقف‌شده‌ی او را حذف کند (شاخه‌ی مرده: حذفِ فوری
+                    # از مسیر متنی، بدون هیچ دیالوگی) یا دیالوگِ حذفِ سلفِ
+                    # زنده‌ی او را بگیرد. همان گاردی که callbackها را محدود
+                    # می‌کند (_TAG_PREFIXES در handle_callback)، حالا روی مسیر
+                    # متنیِ ویزارد هم اعمال می‌شود.
+                    if not self._account_visible(existing_acc):
+                        continue
                     # v2.14.6: چک کن آیا اکانت قبلی فعال و سشن زنده است؟
                     _existing_entry = self.sb.ACCOUNTS.get(existing_tag)
                     _is_active = (
@@ -10281,6 +10310,21 @@ class AdminBot:
             )
             return
 
+        if state == "sending_code":
+            # v2.15.4 (HOTFIX): پنجره‌ی ارسالِ کد (شبکه تا ۶۰ ثانیه).
+            # قبلاً متنِ کاربر در این پنجره به هیچ شاخه‌ای نمی‌رسید و اگر
+            # temp_client همین حالا pop شده باشد (ارسالِ مجدد/کدِ تازه)،
+            # به KeyError در شاخه‌ی WIZ_CODE می‌خورد و ویزارد به‌هم می‌ریخت.
+            # حالا پاسخِ روشن می‌گیرد؛ بعد از پایانِ ارسال، state خودش به
+            # WIZ_CODE می‌رود.
+            await self._respond_safe(
+                event,
+                "⏳ کد هنوز در حال ارسال است — چند لحظه صبر کن و بعد از "
+                "رسیدنِ پیامِ «📩 کد ورود»، کد را با فاصله بین ارقام بفرست "
+                "(مثلاً `12 345`).",
+            )
+            return
+
         if state == WIZ_CODE:
             # v2.15.3 (LOGIN-UX-7/BUG-4): ورودیِ خالی یا بدون هیچ رقمی
             # (عکس/استیکر/ویس) نباید ویزارد را لغو کند — فقط دوباره بپرس.
@@ -10323,11 +10367,27 @@ class AdminBot:
                 # نماند (مثلاً وقتی گاردِ سلف قبلی کد را باطل کرده باشد).
                 data["code_errors"] = data.get("code_errors", 0) + 1
                 if data["code_errors"] >= 3:
+                    # v2.15.4 (HOTFIX): کدِ تازه‌ی خودکار هم باید در سقفِ
+                    # resend بشمارد — وگرنه چرخه‌ی «۳ خطا → کد تازه → ۳ خطا»
+                    # بی‌نهایت ادامه می‌یافت و سقفِ ۳تایی فقط با کلیکِ دستی
+                    # روی دکمه‌ی ارسال مجدد پر می‌شد (bypass).
+                    if data.get("resends", 0) >= 3:
+                        await event.respond(
+                            "❌ چند بار کد اشتباه وارد شده و سقفِ ارسالِ کدِ"
+                            " تازه (۳ بار) هم پر شده. ویزارد لغو شد — چند دقیقه"
+                            " بعد دوباره تلاش کن."
+                        )
+                        await self._cancel_wizard(event.sender_id)
+                        return
                     data["code_errors"] = 0
+                    data["resends"] = data.get("resends", 0) + 1
                     await event.respond(
                         "❌ ۳ بار کد اشتباه بود — کدِ تازه ارسال می‌شه. "
                         "یادت باشه: بین حداقل یکی از ارقام فاصله بذار (مثلاً `12 345`)."
                     )
+                    # v2.15.4 (HOTFIX): state موقت در طول ارسال — جلوگیری از
+                    # re-entry و KeyError (همان _wiz_resend_code).
+                    wiz["state"] = "sending_code"
                     await self._cleanup_wizard_temp_client(wiz)
                     data.pop("temp_client", None)
                     data.pop("phone_code_hash", None)
