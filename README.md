@@ -196,10 +196,15 @@ sudo rm -rf __pycache__ && sudo systemctl restart selfbot
 │           VPS (Server)                            │
 │                │                                   │
 │  ┌─────────────┴─────────────┐                    │
-│  │     main.py (25K lines)    │                    │
-│  │  ┌─────┐  ┌─────┐  ┌─────┐│                    │
-│  │  │SaaSBot│  │SelfBot│  │AdminBot││              │
-│  │  └─────┘  └─────┘  └─────┘│                    │
+│  │  main.py (نقطه ورود)       │                    │
+│  │  └─ cianet/ (پکیج اصلی)    │                    │
+│  │     ├─ core.py  (هسته)     │                    │
+│  │     └─ bots/              │                    │
+│  │        ├─ saas.py  (SaaSBot)│                   │
+│  │        ├─ self.py  (SelfBot)│                   │
+│  │        ├─ admin.py (AdminBot)│                  │
+│  │        ├─ ui.py    (UI/Nav) │                   │
+│  │        └─ helper.py(Helper) │                   │
 │  │       web_panel.py         │                    │
 │  │  (embed uvicorn port 8000) │                    │
 │  │       cianet_updater.py    │                    │

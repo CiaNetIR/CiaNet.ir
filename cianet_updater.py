@@ -173,7 +173,7 @@ def has_local_modifications(repo_dir: str = None) -> bool:
         repo_dir = INSTALL_DIR
     try:
         result = subprocess.run(
-            ["git", "diff", "HEAD", "--", "main.py", "web_panel.py"],
+            ["git", "diff", "HEAD", "--", "main.py", "web_panel.py", "cianet"],
             cwd=repo_dir, capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
@@ -520,6 +520,12 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 ["git", "checkout", "--", "main.py"],
                 cwd=repo_dir, capture_output=True, text=True, timeout=10,
             )
+            # v2.16.0 (SPLIT): فایل‌های پکیج هم اگر تغییر محلی دارند برگردند —
+            # best-effort (در نصب‌های قدیمی cianet/ وجود ندارد و خطا بی‌اثر است).
+            subprocess.run(
+                ["git", "checkout", "--", "cianet"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=10,
+            )
         except Exception as e:
             log.warning("git checkout before pull failed (continuing): %s", e)
 
@@ -590,10 +596,21 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
         # web_panel.py با SyntaxError از این چک رد می‌شد و بعد از restart
         # پنل وب روی کد خراب بالا می‌آمد. (cianet_updater.py خودش در حال
         # replace شدن است — چک کردنش ممکن نیست و لازم هم نیست.)
+        # v2.16.0 (SPLIT): کل پکیج cianet/ هم به چک اضافه شد — بدون این،
+        # یک فایل خراب داخل پکیج از این گار رد می‌شد و بعد از restart
+        # سرویس روی ImportError چرخه‌ی crash می‌افتاد.
         new_main_path = os.path.join(repo_dir, "main.py")
         try:
             import ast as _ast
-            for _sanity_name in ("main.py", "web_panel.py"):
+            _sanity_names = ["main.py", "web_panel.py"]
+            _pkg_dir = os.path.join(repo_dir, "cianet")
+            if os.path.isdir(_pkg_dir):
+                for _root, _dirs, _files in os.walk(_pkg_dir):
+                    for _f in sorted(_files):
+                        if _f.endswith(".py"):
+                            _sanity_names.append(
+                                os.path.relpath(os.path.join(_root, _f), repo_dir))
+            for _sanity_name in _sanity_names:
                 _sanity_path = os.path.join(repo_dir, _sanity_name)
                 if not os.path.isfile(_sanity_path):
                     continue  # فایل در این نصب موجود نیست (نصب قدیمی) — skip
@@ -622,6 +639,27 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                     log.warning(
                         "⚠️ بازگردانی web_panel.py به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
                         _wp_e
+                    )
+            # v2.16.0 (SPLIT): فایل‌های پکیج cianet/ هم (best-effort از git)
+            # به نسخه‌ی قبل از reset برگردانده می‌شوند. اگر pre_reset_commit
+            # هنوز cianet/ نداشته باشد (اولین آپدیتِ پس از تفکیک)، این
+            # checkout بی‌اثر است و rollbackِ خودِ main.py (مونولیتِ بکاپ)
+            # کفایت می‌کند — main.py قدیمی cianet/ را اصلا import نمی‌کند.
+            if pre_reset_commit and _bad_file != "main.py":
+                try:
+                    _pkg_rb = subprocess.run(
+                        ["git", "checkout", pre_reset_commit, "--", "cianet"],
+                        cwd=repo_dir, capture_output=True, text=True, timeout=15,
+                    )
+                    if _pkg_rb.returncode != 0:
+                        log.warning(
+                            "⚠️ بازگردانی cianet/ به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                            _pkg_rb.stderr.strip()[:200]
+                        )
+                except Exception as _pkg_e:
+                    log.warning(
+                        "⚠️ بازگردانی cianet/ به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                        _pkg_e
                     )
             # rollback: backup رو برگردون
             if backup_path and os.path.exists(backup_path):
@@ -652,13 +690,23 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 )
 
         # حذف __pycache__ تا کد قدیمی cached اجرا نشه
+        # v2.16.0 (SPLIT): علاوه بر ریشه، کلِ زیردرختِ cianet/ هم پاک می‌شود
+        # (فایل‌های .pyc قدیمیِ پکیج = اجرای کد قبلی بعد از آپدیت).
         import shutil as _shutil
-        pycache = os.path.join(repo_dir, "__pycache__")
-        if os.path.isdir(pycache):
-            try:
-                _shutil.rmtree(pycache)
-            except Exception:
-                pass
+        for _pc_base, _pc_descend in ((repo_dir, False),
+                                      (os.path.join(repo_dir, "cianet"), True)):
+            if not os.path.isdir(_pc_base):
+                continue
+            for _root, _dirs, _files in os.walk(_pc_base):
+                if "__pycache__" in _dirs:
+                    _pc = os.path.join(_root, "__pycache__")
+                    _dirs.remove("__pycache__")
+                    try:
+                        _shutil.rmtree(_pc)
+                    except Exception:
+                        pass
+                if not _pc_descend:
+                    _dirs[:] = []
 
         # v2.14.2 (BUG-18a): بعد از reset و قبل از restart،
         # dependencyهای جدیدِ requirements.txt رو نصب کن (best-effort).
