@@ -687,6 +687,21 @@ USDT_TOMAN_FALLBACK = 60000
 DEDICATED_BOT_PLAN = "ربات اختصاصی"
 DEDICATED_BOT_PRICE_DEFAULT = 2000000
 
+# v2.17.0: اشتراک آزمایشی ۷ روزه برای کاربران جدید (قابل روشن/خاموش توسط مالک)
+TRIAL_PLAN = "آزمایشی ۷ روزه"
+TRIAL_DAYS = 7
+TRIAL_SETTING_KEY = "trial_enabled"  # "1" = روشن (پیش‌فرض)
+
+# v2.17.0: اشتراک دسته‌جمعی — یک پرداخت، چند صندلی با تخفیف برای گروه
+# پلنِ دسته‌جمعی با همین پیشوند در جدول pricing ثبت می‌شود تا همه‌ی مسیرهای
+# پرداخت (کیف پول/کارت/تتر/درگاه) مدت را درست بخوانند؛ از فهرست‌های
+# کاربری با is_group_plan() فیلتر می‌شود.
+GROUP_PLAN_PREFIX = "👥 گروهی"
+GROUP_SEATS_CHOICES = (2, 3, 5)
+GROUP_SUB_SETTING_KEY = "group_sub_enabled"               # "1" = روشن (پیش‌فرض)
+GROUP_DISCOUNT_SETTING_KEY = "group_sub_discount_percent"  # پیش‌فرض ۱۵٪
+GROUP_DISCOUNT_DEFAULT = 15
+
 TICKET_STATUS_OPEN = "open"
 TICKET_STATUS_CLOSED = "closed"
 
@@ -1636,6 +1651,11 @@ def init_db() -> None:
         ensure_wallet_schema()
     except Exception as _e:
         print(f"⚠️ [init_db] ensure_wallet_schema failed: {type(_e).__name__}: {_e}")
+    # v2.17.0: ستون‌های بلاک کاربر
+    try:
+        ensure_block_schema()
+    except Exception as _e:
+        print(f"⚠️ [init_db] ensure_block_schema failed: {type(_e).__name__}: {_e}")
 
 
 def log_action(actor_id, action: str, details: str = "") -> None:
@@ -1856,6 +1876,270 @@ def get_user(user_id: int):
     with _conn() as c:
         row = c.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     return dict(row) if row else None
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  v2.17.0: بلاک کاربر (SaaS) — قطع دسترسی کامل به ربات
+#  (جدا از banned_users دیتابیسِ خودِ سلف‌بات که مال چت‌های اکانت است)
+# ══════════════════════════════════════════════════════════════════════
+
+def ensure_block_schema() -> None:
+    """ستون‌های بلاک روی users — همان الگوی ensure_wallet_schema:
+    ALTER TABLE فقط وقتی ستون نباشد، تا دیتابیس‌های قدیمی بدون dump/restore
+    هم مهاجرت شوند."""
+    with _conn() as c:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+        for col, ddl in (
+            ("is_blocked", "ALTER TABLE users ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0"),
+            ("blocked_at", "ALTER TABLE users ADD COLUMN blocked_at TEXT"),
+            ("blocked_by", "ALTER TABLE users ADD COLUMN blocked_by INTEGER"),
+            ("block_reason", "ALTER TABLE users ADD COLUMN block_reason TEXT"),
+        ):
+            if col not in cols:
+                c.execute(ddl)
+                print(f"✅ [block] ستون {col} به users اضافه شد")
+
+
+def is_user_blocked(user_id: int) -> bool:
+    """آیا این کاربر توسط مدیریت بلاک شده؟ یک SELECT روی کلید اصلی —
+    ارزان‌تر از کارهایی که هر پیام از قبل انجام می‌دهد (مثل گیت کانال)."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT is_blocked FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    return bool(row and row["is_blocked"])
+
+
+def block_saas_user(target_id: int, blocked_by: int, reason: str = "") -> dict:
+    """بلاک کاربر — ماتریس دسترسی در Backend (مستقل از UI):
+      • فقط OWNER/ADMIN می‌توانند بلاک کنند
+      • OWNER هرگز بلاک نمی‌شود
+      • ADMIN فقط توسط OWNER بلاک می‌شود
+    داده‌ها/کیف پول/تاریخچه حفظ می‌شوند (بلاک قابل برگشت است)؛ توقفِ
+    سلف‌بات‌ها جداگانه در لایه‌ی ربات انجام می‌شود. خروجی:
+    {"ok": True} یا {"ok": False, "error": "..."}."""
+    actor_role = get_role(blocked_by, OWNER_ID)
+    if actor_role not in (ROLE_OWNER, ROLE_ADMIN):
+        return {"ok": False, "error": "permission_denied"}
+    target_role = get_role(target_id, ROLE_USER)
+    if target_role == ROLE_OWNER:
+        return {"ok": False, "error": "cannot_block_owner"}
+    if target_role == ROLE_ADMIN and actor_role != ROLE_OWNER:
+        return {"ok": False, "error": "admin_needs_owner"}
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE users SET is_blocked = 1, blocked_at = ?, blocked_by = ?, block_reason = ? "
+            "WHERE user_id = ?",
+            (_now(), blocked_by, (reason or "").strip()[:200] or None, target_id),
+        )
+        if cur.rowcount == 0:
+            return {"ok": False, "error": "user_not_found"}
+    log_action(blocked_by, "user_blocked",
+               f"target={target_id}" + (f" reason={reason[:80]}" if reason else ""))
+    return {"ok": True}
+
+
+def unblock_saas_user(target_id: int, unblocked_by: int) -> dict:
+    """رفع بلاک — همان ماتریس دسترسیِ بلاک. ادامه‌ی سلف‌ها (در صورت فعال
+    بودن اشتراک) در لایه‌ی ربات انجام می‌شود."""
+    actor_role = get_role(unblocked_by, OWNER_ID)
+    if actor_role not in (ROLE_OWNER, ROLE_ADMIN):
+        return {"ok": False, "error": "permission_denied"}
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE users SET is_blocked = 0, blocked_at = NULL, blocked_by = NULL, "
+            "block_reason = NULL WHERE user_id = ?",
+            (target_id,),
+        )
+        if cur.rowcount == 0:
+            return {"ok": False, "error": "user_not_found"}
+    log_action(unblocked_by, "user_unblocked", f"target={target_id}")
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  v2.17.0: اشتراک آزمایشی ۷ روزه — فقط کاربرانِ تازه‌وارد
+# ══════════════════════════════════════════════════════════════════════
+
+def trial_enabled() -> bool:
+    """گزینه‌ی مالک: اعطای اشتراک آزمایشی به کاربران جدید (پیش‌فرض روشن)."""
+    return str(get_setting(TRIAL_SETTING_KEY, "1")).strip() == "1"
+
+
+def grant_trial_if_eligible(user_id: int) -> bool:
+    """اعطای اشتراک آزمایشی ۷ روزه — صرفاً یک‌بار در طول عمرِ هر کاربر.
+    شرط‌ها: آزمایشی روشن باشد؛ کاربر نقش مدیریتی نداشته باشد؛ اشتراک
+    فعالی نداشته باشد؛ قبلاً آزمایشی نگرفته باشد (حتی منقضی‌شده).
+    True یعنی اعطا شد. فراخوانی‌اش فقط از مسیرِ ثبتِ کاربرِ تازه (/start
+    با is_new) است — کاربرانِ قدیمی که از قبل users دارند هرگز شامل
+    نمی‌شوند."""
+    if not trial_enabled():
+        return False
+    if get_role(user_id, ROLE_USER) in (ROLE_OWNER, ROLE_ADMIN):
+        return False
+    with _conn() as c:
+        active = c.execute(
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if active:
+            return False
+        prior_trial = c.execute(
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND plan = ? LIMIT 1",
+            (user_id, TRIAL_PLAN),
+        ).fetchone()
+        if prior_trial:
+            return False
+    create_subscription(user_id, TRIAL_PLAN, TRIAL_DAYS)
+    log_action(user_id, "trial_granted", f"days={TRIAL_DAYS}")
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  v2.17.0: اشتراک دسته‌جمعی — یک پرداخت، چند صندلی با تخفیف
+# ══════════════════════════════════════════════════════════════════════
+
+def is_group_plan(plan_name: str) -> bool:
+    """آیا این نام پلن، پلنِ دسته‌جمعیِ ثبت‌شده در pricing است؟"""
+    return bool(plan_name) and str(plan_name).startswith(GROUP_PLAN_PREFIX)
+
+
+def group_sub_enabled() -> bool:
+    """گزینه‌ی فعال‌بودن خرید دسته‌جمعی (پیش‌فرض روشن)."""
+    return str(get_setting(GROUP_SUB_SETTING_KEY, "1")).strip() == "1"
+
+
+def group_sub_discount_percent() -> int:
+    """درصد تخفیف دسته‌جمعی — همیشه بین ۰ و ۵۰ clamp می‌شود."""
+    try:
+        val = int(get_setting(GROUP_DISCOUNT_SETTING_KEY, str(GROUP_DISCOUNT_DEFAULT)))
+    except (TypeError, ValueError):
+        val = GROUP_DISCOUNT_DEFAULT
+    return max(0, min(50, val))
+
+
+def group_plan_label(base_plan: str, seats: int) -> str:
+    """نامِ یکتای پلن دسته‌جمعی — تعداد نفرات و پلن پایه داخل خودش است."""
+    return f"{GROUP_PLAN_PREFIX} {seats} نفره · {base_plan}"
+
+
+def register_group_plan(base_plan_row: dict, seats: int) -> dict:
+    """پلنِ دسته‌جمعی را با قیمتِ تخفیف‌دار در pricing ثبت/به‌روز می‌کند و
+    ردیفِ نهایی را برمی‌گرداند. ثبت در pricing لازم است تا همه‌ی مسیرهای
+    پرداخت، مدتِ درست را از همان‌جا بخوانند (همان مکانیزمِ پلن‌های عادی).
+    قیمت به‌صورت مجموعِ تخفیف‌دار و رُند‌شده به هزار تومان محاسبه می‌شود."""
+    base_price = int(base_plan_row["price_toman"])
+    base_days = int(base_plan_row["duration_days"])
+    discount = group_sub_discount_percent()
+    total = int(round(base_price * seats * (100 - discount) / 100 / 1000.0)) * 1000
+    total = max(1000, total)
+    label = group_plan_label(base_plan_row["plan"], seats)
+    set_pricing(label, total, base_days)
+    return {"plan": label, "price_toman": total, "duration_days": base_days,
+            "seats": seats, "base_plan": base_plan_row["plan"],
+            "discount_percent": discount}
+
+
+def _create_group_licenses_internal(buyer_id: int, count: int,
+                                    duration_days: int, order_id: int) -> list:
+    """ساخت لایسنس‌های اشتراک برای اعضای گروه — مسیر سیستمی. create_license()
+    عادی، خریدارِ USER را رد می‌کند (ماتریس دسترسی‌اش فقط به مدیران اجازه
+    می‌دهد)؛ اینجا همان INSERT با همان retry یکتایی انجام می‌شود و
+    created_by = خریدار (برای ردیابی در لیست لایسنس‌های مالک)."""
+    codes = []
+    with _conn() as c:
+        for _seat in range(max(0, count)):
+            code = _generate_license_code()
+            unique = False
+            for _try in range(10):
+                exists = c.execute(
+                    "SELECT 1 FROM licenses WHERE code = ?", (code,)
+                ).fetchone()
+                if not exists:
+                    unique = True
+                    break
+                code = _generate_license_code()
+            if not unique:
+                break
+            c.execute(
+                "INSERT INTO licenses (code, license_type, duration_days, max_uses, used_count, "
+                "reseller_user_limit, created_by, created_at, is_active) "
+                "VALUES (?, ?, ?, 1, 0, NULL, ?, ?, 1)",
+                (code, LICENSE_TYPE_ACCOUNT, duration_days, buyer_id, _now()),
+            )
+            codes.append(code)
+    if codes:
+        log_action(buyer_id, "group_licenses_created",
+                   f"order={order_id}, count={len(codes)}, days={duration_days}")
+    return codes
+
+
+def maybe_fulfill_group_order(order_id: int = None, payment_id: int = None) -> None:
+    """پس از paid شدن فاکتورِ دسته‌جمعی: صندلی‌های باقی‌مانده را به‌صورت
+    لایسنس می‌سازد و کدها را برای خریدار می‌فرستد. خریدار خودش اشتراکش
+    را از همان مسیر عادیِ فاکتور می‌گیرد؛ کدها مالِ بقیه‌ی اعضاست.
+
+    • idempotent — نشانگرِ settings با تراکنشِ اتمیک قفل می‌شود؛
+      دوباره صدا زدن (مثلاً double-callback درگاه) کد تکراری نمی‌سازد.
+    • best-effort — هر خطی فقط لاگ می‌شود؛ پرداختِ تأییدشده هرگز
+      نمی‌شکند. شناسه‌ی فاکتور یا payment_id (مسیر کارت) داده می‌شود."""
+    try:
+        with _conn_immediate() as c:
+            if order_id is None and payment_id is not None:
+                row = c.execute(
+                    "SELECT * FROM orders WHERE payment_id = ? AND status = ?",
+                    (payment_id, ORDER_STATUS_PAID),
+                ).fetchone()
+            else:
+                row = c.execute(
+                    "SELECT * FROM orders WHERE id = ?", (order_id,)
+                ).fetchone()
+            if row is None or row["status"] != ORDER_STATUS_PAID \
+                    or not is_group_plan(row["plan"]):
+                return
+            marker = f"groupsub_done:{row['id']}"
+            cur = c.execute(
+                "INSERT INTO settings (key, value) VALUES (?, '1') "
+                "ON CONFLICT(key) DO NOTHING",
+                (marker,),
+            )
+            if cur.rowcount == 0:
+                return  # قبلاً انجام شده
+            order = dict(row)
+        # تعداد نفرات و پلنِ پایه از نام پلن خوانده می‌شود:
+        # «👥 گروهی ۳ نفره · ۱ ماهه» → seats=3, base=۱ ماهه
+        seats, base_plan = 0, ""
+        try:
+            rest = order["plan"][len(GROUP_PLAN_PREFIX):]
+            head, _, tail = rest.partition("·")
+            m = re.match(r"\s*(\d+)", head)
+            seats = int(m.group(1)) if m else 0
+            base_plan = tail.strip()
+        except Exception:
+            seats, base_plan = 0, ""
+        if seats < 2 or not base_plan:
+            print(f"⚠️ [group_sub] نام پلن قابل تجزیه نیست: {order['plan']}")
+            return
+        base_row = get_pricing(base_plan)
+        duration = int(base_row["duration_days"]) if base_row else 30
+        codes = _create_group_licenses_internal(
+            order["user_id"], seats - 1, duration, order["id"])
+        if codes:
+            codes_block = "\n".join(f"`{cd}`" for cd in codes)
+            _spawn_bg(_notify_user_async(
+                int(order["user_id"]),
+                f"👥 **اشتراک دسته‌جمعی فعال شد**\n\n"
+                f"🧾 فاکتور: `{order['order_no']}`\n"
+                f"👥 نفرات: {seats}\n"
+                f"📅 مدت هر صندلی: {duration} روز\n\n"
+                f"اشتراکِ خودت همین حالا فعال شد. کدهای زیر مالِ "
+                f"{len(codes)} عضو دیگر گروه‌تان است — هر کد، یک اشتراک "
+                f"کامل برای یک نفر است:\n\n{codes_block}\n\n"
+                f"هر عضو در ربات «🔑 فعال‌سازی با لایسنس» را بزند و کد خودش را "
+                f"وارد کند.",
+            ), "groupsub_codes")
+    except Exception as e:
+        print(f"⚠️ [group_sub] fulfillment ناموفق: {type(e).__name__}: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2384,6 +2668,8 @@ def pay_order_wallet_atomic(user_id: int, order_id: int) -> dict:
                 (user_id, plan_name, _format_date(now_utc), _format_date(base + timedelta(days=days)), _now()),
             )
     log_action(user_id, "wallet_payment_atomic", f"order={order_id}, amount={amount}, new_balance={new_balance}")
+    # v2.17.0: اگر این فاکتور دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
+    maybe_fulfill_group_order(order_id=order_id)
     return {"ok": True, "balance": new_balance, "plan": plan_name, "days": days, "amount": amount, "order_no": order["order_no"]}
 
 def list_wallet_transactions(user_id: int, limit: int = 20) -> list:
@@ -4201,6 +4487,8 @@ def approve_card_payment_atomic(payment_id: int, reviewed_by: int) -> dict:
             (payment_id, _now(), payment_id),
         )
     log_action(reviewed_by, "approve_card_payment", f"payment={payment_id}, plan={pay['plan']}")
+    # v2.17.0: اگر فاکتورِ متصل دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
+    maybe_fulfill_group_order(payment_id=payment_id)
     return {"applied": True, "plan": pay["plan"], "user_id": user_id,
             "duration": duration, "dedicated": False}
 
@@ -4536,6 +4824,8 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
     except Exception:
         pass
     log_action(user_id, "order_paid_trc20", f"order={order_id}, plan={order['plan']}")
+    # v2.17.0: اگر این فاکتور دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
+    maybe_fulfill_group_order(order_id=order_id)
     return {"ok": True, "plan": order["plan"], "duration": duration}
 
 
@@ -7493,7 +7783,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-19-v2.16.1"
+BUILD_VERSION = "2026-10-20-v2.17.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -11517,12 +11807,32 @@ __all__ = [
     'sys',
     'tempfile',
     'threading',
+    'grant_trial_if_eligible',
+    'group_plan_label',
+    'group_sub_discount_percent',
+    'group_sub_enabled',
+    'is_group_plan',
+    'is_user_blocked',
+    'block_saas_user',
+    'unblock_saas_user',
+    'ensure_block_schema',
+    'maybe_fulfill_group_order',
+    'register_group_plan',
+    'trial_enabled',
     'ticket_message_count',
     'time',
     'timedelta',
     'timezone',
     'to_jalali',
     'toggle_discount_code',
+    'TRIAL_DAYS',
+    'TRIAL_PLAN',
+    'TRIAL_SETTING_KEY',
+    'GROUP_PLAN_PREFIX',
+    'GROUP_SEATS_CHOICES',
+    'GROUP_SUB_SETTING_KEY',
+    'GROUP_DISCOUNT_SETTING_KEY',
+    'GROUP_DISCOUNT_DEFAULT',
     'unban_user',
     'unlink_customer',
     'unregister_account',

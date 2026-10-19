@@ -1939,6 +1939,11 @@ async def user_pay_order_with_wallet(order_id: int, request: Request,
                 raise HTTPException(400, "این فاکتور قبلاً پرداخت شده یا لغو شده")
 
         m.create_subscription(uid, plan_name, days)
+        # v2.17.0: اگر فاکتورِ دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
+        try:
+            m.maybe_fulfill_group_order(order_id=order_id)
+        except Exception as _ge:
+            print(f"⚠️ [invoice_confirm] group fulfill failed: {_ge}")
         return {"ok": True, "balance": pay_result["balance"], "subscription_days": days}
     except Exception as e:
         # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
@@ -2486,6 +2491,11 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
             m.log_action(order["user_id"], "dedicated_bot_paid_gateway", f"order={order['id']}")
         else:
             m.create_subscription(order["user_id"], plan_name, days)
+        # v2.17.0: اگر فاکتورِ دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
+        try:
+            m.maybe_fulfill_group_order(order_id=order["id"])
+        except Exception as _ge:
+            print(f"⚠️ [zarinpal_callback] group fulfill failed: {_ge}")
         # v2.12.9 (QA-USER): تاییدِ تلگرامیِ فارسی به کاربر
         try:
             plan_label = pricing.get("label") if pricing else plan_name
@@ -2682,6 +2692,11 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
             m.log_action(order["user_id"], "dedicated_bot_paid_gateway", f"order={order['id']}")
         else:
             m.create_subscription(order["user_id"], plan_name, days)
+        # v2.17.0: اگر فاکتورِ دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
+        try:
+            m.maybe_fulfill_group_order(order_id=order["id"])
+        except Exception as _ge:
+            print(f"⚠️ [zibal_callback] group fulfill failed: {_ge}")
         # v2.12.9 (QA-USER): تاییدِ تلگرامیِ فارسی به کاربر
         try:
             plan_label = pricing.get("label") if pricing else plan_name

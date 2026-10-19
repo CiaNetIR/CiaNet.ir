@@ -37,6 +37,8 @@ from cianet.core import (
     DEFAULT_CARD_HOLDER,
     DEFAULT_CARD_NUMBER,
     FEATURE_LABELS,
+    GROUP_SEATS_CHOICES,
+    GROUP_SUB_SETTING_KEY,
     LICENSE_TYPE_ACCOUNT,
     LICENSE_TYPE_ADMIN,
     LICENSE_TYPE_RESELLER,
@@ -63,6 +65,7 @@ from cianet.core import (
     SELF_FEATURE_LIST,
     SESSIONS_DIR,
     SUPPORT_UNITS,
+    TRIAL_SETTING_KEY,
     USDT_TOMAN_FALLBACK,
     WHAT_IS_SELFBOT_TEXT,
     WIZ_CAP_USER_ID,
@@ -142,6 +145,7 @@ from cianet.core import (
     approve_card_payment_atomic,
     attach_referrer,
     auto_renew_subscription,
+    block_saas_user,
     build_backup_zip,
     cancel_order,
     capability_grant_exists,
@@ -186,9 +190,14 @@ from cianet.core import (
     get_user,
     get_wallet_balance,
     grant_capability,
+    grant_trial_if_eligible,
+    group_sub_discount_percent,
+    group_sub_enabled,
     inc_setting,
     init_db,
     iran_now,
+    is_group_plan,
+    is_user_blocked,
     jalali_date,
     jalali_long,
     list_active_dedicated_bots,
@@ -218,6 +227,7 @@ from cianet.core import (
     pay_order_wallet_atomic,
     referral_link,
     referral_stats,
+    register_group_plan,
     remove_admin_or_reseller,
     reseller_user_count,
     restore_backup_from_zip_async,
@@ -230,7 +240,9 @@ from cianet.core import (
     set_pricing,
     set_setting,
     ticket_message_count,
+    trial_enabled,
     toggle_discount_code,
+    unblock_saas_user,
     unlink_customer,
     update_dedicated_bot_status,
     upsert_user,
@@ -243,6 +255,8 @@ from cianet.core import (
 # کلاس‌های هم‌خانواده / توابعِ جابه‌جا‌شده
 from cianet.bots.ui import NavStack, UI
 from cianet.bots.admin import AdminBot
+# v2.17.0: اسکلتِ بخش «ریپورتر» — نقطه‌ی اتصالِ آینده (فعلاً غیرفعال)
+from cianet.bots import reporter as reporter_module
 
 
 async def _deliver_via_bot(owner_id: int, text: str) -> bool:
@@ -876,22 +890,23 @@ class SaaSBot:
         # نویز است. نماینده مثل کاربر عادی اشتراکِ خودش را دارد.
         needs_sub = role not in (ROLE_OWNER, ROLE_ADMIN)
 
-        # ── منوی کاربر (طبق درخواست): ۶ ردیف با چیدمان دقیق ──
-        # ردیف ۱ (دوتایی): [راهنمای فعال‌سازی] | [سلف چیست؟]
-        # ردیف ۲ (تکی):    [انقضای سلف: {days} روز]
-        # ردیف ۳ (شرطی):   اگه اشتراک فعال/ادمین بود: [لاگین] | [خرید سلف]
+        # ── منوی کاربر (v2.17.0 MENU-CLEANUP): فشرده و کوتاه ──
+        # ردیف ۱ (تکی):    [انقضای سلف: {days} روز]
+        # ردیف ۲ (شرطی):   اگه اشتراک فعال/ادمین بود: [لاگین] | [خرید سلف]
         #                  در غیر این صورت: [خرید سلف]
-        # ردیف ۴ (تکی):    [خرید با لایسنس]
+        # ردیف ۳ (تکی):    [حساب کاربری] — حالا شامل کیف پول/سفارش‌ها/
+        #                  لایسنس/راهنماها هم هست (از سطح اول منتقل شدند)
+        # ردیف ۴ (شرطی):   [ریپورتر] — فقط اگر کاربر اکانتِ خودش را لاگین
+        #                  کرده باشد (v2.17.0)
         # ردیف ۵ (تکی):    [پشتیبانی]
         # ردیف ۶ (شرطی):   فقط برای admin/owner: [پنل مدیریت / ادمین]
+        # ردیف ۷ (شرطی):   فقط USER: [نمایندگی سلف]
+        #
+        # v2.17.0: «📖 راهنمای فعال‌سازی»، «ℹ️ سلف چیست؟» و «🔑 خرید با
+        # لایسنس» از سطح اول حذف و به «👤 حساب کاربری» منتقل شدند — همه‌ی
+        # routeها زنده‌اند و ساختار منوها سالم است؛ فقط سطح اول کوتاه‌تر شد.
 
         buttons = []
-
-        # ── ردیف ۱ (دوتایی): راهنمای فعال‌سازی + سلف چیست
-        buttons.append([
-            UI.go("📖 راهنمای فعال‌سازی", "user_help"),
-            UI.go("ℹ️ سلف چیست؟", "user_what_is"),
-        ])
 
         # ── ردیف ۲ (تکی): انقضای سلف با نمایش روز
         if needs_sub:
@@ -929,17 +944,15 @@ class SaaSBot:
         # پنل مدیریتِ ادمین می‌افتاد (باگ UX). v2.12.15 برای USER پنهان
         # شد ولی الان OWNER/ADMIN/RESELLER هم نمی‌خوان. کلاً حذف می‌شه.
 
-        # ── ردیف ۴ (تکی): خرید با لایسنس
-        buttons.append([UI.go("🔑 خرید با لایسنس", "user_activate_license")])
-
         # ── ردیف ۵ (تکی): پشتیبانی
         buttons.append([UI.go("☎️ پشتیبانی", "user_support")])
 
-        # ── ردیف ۵.۵ (v2.16.1 USER-REQUEST): ریپورتر — برای همه‌ی کاربران.
-        # فعلاً صفحه‌ی «به‌زودی» نشان می‌دهد؛ route و دکمه از الان جداست تا
-        # فعال‌سازیِ نسخه‌های بعدی فقط منطق را به همین مسیر وصل کند و
-        # چیدمانِ منو دیگر دست نخورد.
-        buttons.append([UI.go("🎙 ریپورتر", "user_reporter")])
+        # ── ردیف ۵.۵ (v2.16.1 USER-REQUEST · v2.17.0 GATING): ریپورتر —
+        # فقط برای کاربرانی که اکانتِ خودشان را در ربات لاگین کرده‌اند
+        # (خواسته‌ی مالک). فعلاً صفحه‌ی «به‌زودی» نشان می‌دهد؛ منطق اصلی به
+        # cianet/bots/reporter.py وصل می‌شود (نقطه‌ی اتصال: user_reporter).
+        if has_account:
+            buttons.append([UI.go("🎙 ریپورتر", "user_reporter")])
 
         # ── ردیف ۶ (شرطی): فقط برای privileged
         if privileged:
@@ -1121,6 +1134,11 @@ class SaaSBot:
             UI.go("🧾 سفارش‌ها", "user_orders"),
             UI.go("❤️ دعوت دوستان", "user_referral"),
         ]
+        # v2.17.0 (MENU-CLEANUP): راهنماها و لایسنس از سطح اولِ منو به
+        # اینجا منتقل شدند — routeها بدون تغییر، فقط یک لایه عمیق‌تر.
+        items.append(UI.go("🔑 فعال‌سازی با لایسنس", "user_activate_license"))
+        items.append(UI.go("📖 راهنمای فعال‌سازی", "user_help"))
+        items.append(UI.go("ℹ️ سلف چیست؟", "user_what_is"))
         if self._role(uid) == ROLE_USER:
             items.append(UI.go("👥 نمایندگی", "user_reseller_info"))
         buttons = self._pair_buttons(items)
@@ -2286,8 +2304,16 @@ class SaaSBot:
         ch = get_setting("required_channel")
         # PATCH (v2.4.0): language toggle button
         lang_label = "🌐 زبان: فارسی" if CIANET_LANG == "fa" else "🌐 Language: English"
+        # v2.17.0: گزینه‌های مالک — آزمایشی ۷ روزه + اشتراک دسته‌جمعی
+        trial_on = trial_enabled()
+        group_on = group_sub_enabled()
+        group_discount = group_sub_discount_percent()
         buttons = [
             [UI.item("📢 کانال اجباری عضویت", "active" if ch else "none", "owner_channel")],
+            [UI.item("🎁 اشتراک آزمایشی ۷ روزه (کاربران جدید)",
+                     "active" if trial_on else "off", "owner_toggle_trial")],
+            [UI.item("👥 اشتراک دسته‌جمعی", "active" if group_on else "off",
+                     "owner_toggle_group_sub")],
             [UI.go(lang_label, "owner_toggle_lang")],
             UI.nav_row(),
         ]
@@ -2296,7 +2322,12 @@ class SaaSBot:
                 "⚙️ تنظیمات سیستم",
                 body=[f"{UI.dot(bool(ch))} کانال اجباری: "
                       + (f"`{ch}`" if ch else "غیرفعال (همه می‌توانند وارد شوند)"),
-                      f"🌐 زبان فعلی: {'فارسی' if CIANET_LANG == 'fa' else 'English'}"],
+                      f"🌐 زبان فعلی: {'فارسی' if CIANET_LANG == 'fa' else 'English'}",
+                      f"{UI.dot(trial_on)} اشتراک آزمایشی ۷ روزه برای کاربران جدید: "
+                      + ("روشن" if trial_on else "خاموش"),
+                      f"{UI.dot(group_on)} اشتراک دسته‌جمعی: "
+                      + ("روشن" if group_on else "خاموش")
+                      + f" (تخفیف گروهی: {fa_digits(group_discount)}٪)"],
                 subtitle="تنظیمات غیرمالی — کارت/تتر/قیمت‌ها در «💰 مالی» هستند.",
             ),
             buttons=buttons,
@@ -2619,6 +2650,14 @@ class SaaSBot:
         ]
         if u.get("reseller_id"):
             body.append(f"👥 زیرمجموعه‌ی نماینده: `{u['reseller_id']}`")
+        # v2.17.0: وضعیت بلاک — اگر بلاک شده باشد مشخص و پررنگ باشد
+        if u.get("is_blocked"):
+            reason_txt = f" — {u['block_reason']}" if u.get("block_reason") else ""
+            body.append(f"⛔ وضعیت: **بلاک شده**{reason_txt}")
+        # v2.17.0: وضعیت بلاک — اگر بلاک شده باشد مشخص و پررنگ باشد
+        if u.get("is_blocked"):
+            reason_txt = f" — {u['block_reason']}" if u.get("block_reason") else ""
+            body.append(f"⛔ وضعیت: **بلاک شده**{reason_txt}")
         body.append(UI.SEP)
         if total:
             body.append(f"🤖 **SelfBotها** — {fa_digits(active)} فعال"
@@ -2650,6 +2689,21 @@ class SaaSBot:
                                 f"user_sub_admin:{target_user_id}")])
         buttons.append([UI.go("💰 کیف پول", f"user_wallet_admin:{target_user_id}", tone="success")])
         buttons.append([UI.go("🧾 سفارش‌ها", f"user_orders_admin:{target_user_id}")])
+        # v2.17.0: بلاک/رفع بلاک — فقط OWNER/ADMIN (نه RESELLER)؛ OWNER
+        # هرگز بلاک نمی‌شود و بلاکِ ADMIN فقط توسط OWNER. گاردها در
+        # Backend (block_saas_user) هم دوباره چک می‌شوند.
+        vrole = viewer_role or ROLE_USER
+        if vrole in (ROLE_OWNER, ROLE_ADMIN):
+            target_role = self._role(target_user_id)
+            if target_role != ROLE_OWNER and (
+                    target_role != ROLE_ADMIN or vrole == ROLE_OWNER):
+                if u.get("is_blocked"):
+                    buttons.append([UI.go("✅ رفع بلاک کاربر",
+                                          f"user_unblock:{target_user_id}",
+                                          tone="success")])
+                else:
+                    buttons.append([UI.danger("⛔ بلاک کاربر",
+                                              f"user_block:{target_user_id}")])
         if viewer_role == ROLE_RESELLER:
             # نماینده هرگز «حذف کامل» ندارد — فقط جداسازی مشتری از نمایندگی
             buttons.append([UI.neutral("حذف از نمایندگی", f"user_unlink_confirm:{target_user_id}")])
@@ -2721,6 +2775,290 @@ class SaaSBot:
         # می‌رفت.
         self.nav.push(event.sender_id, f"user_manage:{target_user_id}")
         await event.respond(text, buttons=buttons)
+
+    # ══════════════════════════════════════════════════════════════
+    #  v2.17.0: بلاک کاربر — گیتِ اجرا + UI مدیریتی
+    # ══════════════════════════════════════════════════════════════
+
+    async def _enforce_block(self, user_id: int, event, role: str = None) -> bool:
+        """گیت بلاک — اگر کاربر بلاک شده باشد، پیامِ مناسب می‌دهد و True
+        برمی‌گرداند تا فراخواننده همان‌جا return کند. مدیران عملاً بلاک
+        نمی‌شوند (گارد در block_saas_user)، ولی نقش هم اینجا دوباره چک
+        می‌شود تا حتی ویرایشِ دستیِ DB نتواند مدیریت را قفل کند."""
+        try:
+            r = role if role is not None else self._role(user_id)
+            if r in (ROLE_OWNER, ROLE_ADMIN):
+                return False
+            if not is_user_blocked(user_id):
+                return False
+        except Exception:
+            # خطای DB نباید ربات را برای بقیه خراب کند — fail-open فقط برای
+            # همین چکِ اضافی؛ بقیه‌ی مسیر همچنان گاردهای خودش را دارد.
+            return False
+        try:
+            if getattr(event, "query", None) is not None:
+                await event.answer("⛔ حساب شما توسط مدیریت مسدود شده است.",
+                                   alert=True)
+            else:
+                await event.respond(
+                    "⛔ **دسترسی شما به این ربات مسدود شده است.**\n\n"
+                    "در صورت نیاز، از طریق پشتیبانی پیگیری کنید.")
+        except Exception:
+            pass
+        return True
+
+    async def _show_user_block_confirm(self, event, target_user_id: int,
+                                        back_data: bytes = b"owner_users"):
+        """صفحه‌ی تأییدِ بلاک — کار خطرناک، پس یک قدمِ اضافه دارد."""
+        viewer_role = self._role(event.sender_id)
+        target_role = self._role(target_user_id)
+        if viewer_role not in (ROLE_OWNER, ROLE_ADMIN) \
+                or target_role == ROLE_OWNER \
+                or (target_role == ROLE_ADMIN and viewer_role != ROLE_OWNER) \
+                or not get_user(target_user_id):
+            await event.answer("⛔ اجازه‌ی این کار را نداری.", alert=True)
+            return
+        u = get_user(target_user_id)
+        name = u.get("username") or f"کاربر {target_user_id}"
+        n_bots, n_active, _ = self._user_selfbot_stats(target_user_id)
+        buttons = [
+            [UI.danger("⛔ تأیید بلاک", f"user_block_go:{target_user_id}:{back_data.decode()}")],
+            [UI.go("↩️ انصراف", f"user_manage:{target_user_id}:{back_data.decode()}")],
+        ]
+        await event.edit(
+            UI.screen(
+                "⛔ بلاک کاربر",
+                body=[
+                    f"👤 {name} — `{target_user_id}`",
+                    f"🤖 سلف‌ها: {fa_digits(n_active)} فعال از {fa_digits(n_bots)}",
+                    "",
+                    "با تأیید، دسترسیِ کاملِ این کاربر به ربات قطع و همه‌ی",
+                    "سلف‌هایش متوقف می‌شود. داده‌ها/کیف پول/تاریخچه حفظ",
+                    "می‌شوند و با «رفع بلاک» همه‌چیز برگردد.",
+                ],
+                hint="این عمل در لاگ حسابرسی ثبت می‌شود.",
+            ),
+            buttons=buttons,
+        )
+
+    async def _do_block_user(self, event, target_user_id: int,
+                             back_data: bytes = b"owner_users"):
+        """اجرای بلاک — چک دسترسی دوباره در Backend (block_saas_user) +
+        توقف سلف‌های کاربر + رندر دوباره‌ی پنل مدیریت."""
+        res = block_saas_user(target_user_id, event.sender_id)
+        if not res.get("ok"):
+            err_map = {
+                "permission_denied": "⛔ اجازه‌ی این کار را نداری.",
+                "cannot_block_owner": "⛔ مالک قابل بلاک‌کردن نیست.",
+                "admin_needs_owner": "⛔ بلاکِ ادمین فقط توسط مالک ممکن است.",
+                "user_not_found": "❌ این کاربر پیدا نشد.",
+            }
+            await event.answer(
+                err_map.get(res.get("error"), "❌ خطای نامشخص."), alert=True)
+            return
+        try:
+            await self._stop_user_selfbots_for_block(target_user_id)
+        except Exception as e:
+            print(f"⚠️ [block] توقف سلف‌های {target_user_id} ناموفق: {e}")
+        try:
+            await self.client.send_message(
+                target_user_id,
+                "⛔ حساب شما توسط مدیریت مسدود شد و سلف‌های شما متوقف شد.",
+            )
+        except Exception:
+            pass
+        try:
+            await event.answer("✅ کاربر بلاک شد.")
+        except Exception:
+            pass
+        await self._show_user_management_panel(event, target_user_id,
+                                                back_data=back_data)
+
+    async def _do_unblock_user(self, event, target_user_id: int,
+                               back_data: bytes = b"owner_users"):
+        """رفع بلاک — اگر اشتراکِ فعال داشته باشد، سلف‌هایش که فقط به‌خاطر
+        بلاک خاموش شده بودند دوباره روشن می‌شوند."""
+        res = unblock_saas_user(target_user_id, event.sender_id)
+        if not res.get("ok"):
+            await event.answer("⛔ رفع بلاک انجام نشد (دسترسی/کاربر).", alert=True)
+            return
+        try:
+            await self._resume_user_selfbots(
+                target_user_id, reason="user_blocked", require_active_sub=True)
+        except Exception as e:
+            print(f"⚠️ [unblock] روشن‌کردن سلف‌های {target_user_id} ناموفق: {e}")
+        try:
+            await self.client.send_message(
+                target_user_id,
+                "✅ حساب شما بازگردانده شد. اگر اشتراک فعال داشته باشی، "
+                "سلف‌هایت به‌زودی دوباره روشن می‌شوند.",
+            )
+        except Exception:
+            pass
+        try:
+            await event.answer("✅ بلاک برداشته شد.")
+        except Exception:
+            pass
+        await self._show_user_management_panel(event, target_user_id,
+                                                back_data=back_data)
+
+    async def _stop_user_selfbots_for_block(self, user_id: int):
+        """توقفِ همه‌ی سلف‌های یک کاربرِ بلاک‌شده — بدون حذف چیزی. دلیلِ قطع
+        'user_blocked' ثبت می‌شود تا رفعِ بلاک فقط همین‌ها را روشن کند.
+        برخلاف انقضای اشتراک، اینجا همه‌ی اکانت‌های خودِ کاربر (حتی manual)
+        متوقف می‌شوند چون دسترسیِ او به سرویس به‌طور کامل قطع شده؛ ولی
+        scope با account_belongs_to به همین کاربر محدود است و config خراب
+        هرگز overwrite نمی‌شود."""
+        cfg = self.sb.load_config()
+        if config_state() != CONFIG_VALID:
+            print("⛔ [block] توقف سلف‌های کاربر بلاک‌شده رد شد — config.json خراب است.")
+            return
+        changed = False
+        for tag, acc in cfg.items():
+            if not account_belongs_to(acc, tag, user_id):
+                continue
+            stopped_ok = await ensure_stopped(tag, "block._stop_user_selfbots_for_block")
+            if not stopped_ok:
+                print(f"⚠️ [block] ensure_stopped({tag}) failed — بعداً دوباره تلاش می‌شود")
+                continue
+            if not acc.get("disabled"):
+                acc["disabled"] = True
+                acc["disabled_reason"] = "user_blocked"
+                changed = True
+        if changed:
+            self.sb.save_config(cfg)
+
+    # ══════════════════════════════════════════════════════════════
+    #  v2.17.0: اشتراک دسته‌جمعی — ویزارد خرید (فقط کاربرِ بدون اشتراک)
+    # ══════════════════════════════════════════════════════════════
+
+    def _group_sub_gate_ok(self, event) -> bool:
+        """گیتِ مشترکِ صفحاتِ خریدِ دسته‌جمعی: فعال باشد + خریدار نقش مدیریتی
+        نداشته باشد + اشتراکِ فعالی نداشته باشد (خواسته‌ی مالک: فقط برای
+        کاربرانی که اشتراک ندارند)."""
+        if not group_sub_enabled():
+            return False
+        if self._role(event.sender_id) in (ROLE_OWNER, ROLE_ADMIN):
+            return False
+        if get_active_subscription(event.sender_id):
+            return False
+        return True
+
+    async def _user_start_group_sub(self, event):
+        """👥 ورود به خریدِ دسته‌جمعی — انتخاب پلنِ پایه."""
+        if not self._group_sub_gate_ok(event):
+            await event.answer(
+                "👥 خرید دسته‌جمعی فقط برای کاربرانِ بدونِ اشتراکِ فعال است "
+                "(و اگر مالک آن را خاموش کرده باشد، غیرفعال).",
+                alert=True)
+            return
+        plans = [p for p in list_pricing() if not is_group_plan(p["plan"])]
+        if not plans:
+            await event.answer("هنوز پلنی ثبت نشده است.", alert=True)
+            return
+        discount = group_sub_discount_percent()
+        buttons = [
+            [UI.go(f"{p['plan']} — {p['price_toman']:,} تومان",
+                   f"group_plan:{p['plan']}".encode())]
+            for p in plans
+        ]
+        buttons.append(UI.nav_row())
+        await event.edit(
+            "👥 **اشتراک دسته‌جمعی**\n\n"
+            "یک فاکتور برای کلِ گروه می‌دی؛ اشتراکِ خودت همان‌جا فعال "
+            "می‌شه و برای بقیه‌ی اعضا کدِ لایسنس می‌گیری (هر کد = یک "
+            "اشتراک کامل).\n\n"
+            f"🎁 تخفیف گروهی: {fa_digits(discount)}٪ روی مجموع\n"
+            "👇 پلنِ پایه رو انتخاب کن:",
+            buttons=buttons,
+        )
+
+    async def _user_group_seats(self, event, base_plan: str):
+        """انتخاب تعداد نفرات (شامل خودِ خریدار)."""
+        if not self._group_sub_gate_ok(event):
+            await event.answer("این گزینه فعلاً در دسترس نیست.", alert=True)
+            return
+        base = next((p for p in list_pricing()
+                     if p["plan"] == base_plan and not is_group_plan(p["plan"])), None)
+        if not base:
+            await event.answer("پلن نامعتبر است.", alert=True)
+            return
+        discount = group_sub_discount_percent()
+        buttons = []
+        for seats in GROUP_SEATS_CHOICES:
+            total = int(round(base["price_toman"] * seats * (100 - discount)
+                             / 100 / 1000.0)) * 1000
+            total = max(1000, total)
+            per = total // seats
+            buttons.append([UI.go(
+                f"👥 {fa_digits(seats)} نفره — مجموع {fa_digits(total)} تومان "
+                f"(~{fa_digits(per)} به‌ازای هر نفر)",
+                f"group_seats:{base_plan}:{seats}".encode())])
+        buttons.append(UI.nav_row())
+        await event.edit(
+            f"👥 **دسته‌جمعی — {base_plan}**\n\n"
+            "چند نفره؟ (شامل خودت)\n"
+            f"🎁 تخفیف {fa_digits(discount)}٪ روی کلِ مبلغ",
+            buttons=buttons,
+        )
+
+    async def _user_group_chosen(self, event, base_plan: str, seats: int):
+        """ساختِ فاکتورِ دسته‌جمعی — پلنِ گروهی در pricing ثبت می‌شود و بعد
+        سفارش از همان مسیر عادی می‌رود؛ یعنی همه‌ی روش‌های پرداخت (کیف
+        پول/کارت/تتر/درگاه) بدون هیچ تغییری کار می‌کنند."""
+        if not self._group_sub_gate_ok(event):
+            await event.answer("این گزینه فعلاً در دسترس نیست.", alert=True)
+            return
+        if seats not in GROUP_SEATS_CHOICES:
+            await event.answer("تعداد نفرات نامعتبر است.", alert=True)
+            return
+        base = next((p for p in list_pricing()
+                     if p["plan"] == base_plan and not is_group_plan(p["plan"])), None)
+        if not base:
+            await event.answer("پلن نامعتبر است.", alert=True)
+            return
+        ginfo = register_group_plan(base, seats)
+        usdt, rate = await self._compute_order_amounts(ginfo["price_toman"])
+        order = create_order(event.sender_id, ginfo["plan"],
+                             ginfo["price_toman"], usdt)
+        # بقیه‌اش مثل هر فاکتور دیگری است؛ بعد از پرداخت، مسیرِ عادی
+        # اشتراکِ خریدار را فعال می‌کند و maybe_fulfill_group_order
+        # (core) کدهای بقیه‌ی اعضا را می‌سازد و می‌فرستد.
+        await self._show_invoice(event, order, rate)
+
+    # ══════════════════════════════════════════════════════════════
+    #  v2.17.0: گزینه‌های مالک — آزمایشی/دسته‌جمعی
+    # ══════════════════════════════════════════════════════════════
+
+    async def _owner_toggle_trial(self, event):
+        """🎁 روشن/خاموش‌کردن اشتراک آزمایشی ۷ روزه برای کاربران جدید."""
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط مالک.", alert=True)
+            return
+        new_val = "0" if trial_enabled() else "1"
+        set_setting(TRIAL_SETTING_KEY, new_val, actor_id=event.sender_id)
+        log_action(event.sender_id, "trial_toggled", f"new={new_val}")
+        try:
+            await event.answer(
+                "🎁 اشتراک آزمایشی: " + ("روشن" if new_val == "1" else "خاموش"))
+        except Exception:
+            pass
+        await self._admin_show_settings_hub(event)
+
+    async def _owner_toggle_group_sub(self, event):
+        """👥 روشن/خاموش‌کردن خرید اشتراک دسته‌جمعی."""
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط مالک.", alert=True)
+            return
+        new_val = "0" if group_sub_enabled() else "1"
+        set_setting(GROUP_SUB_SETTING_KEY, new_val, actor_id=event.sender_id)
+        log_action(event.sender_id, "group_sub_toggled", f"new={new_val}")
+        try:
+            await event.answer(
+                "👥 اشتراک دسته‌جمعی: " + ("روشن" if new_val == "1" else "خاموش"))
+        except Exception:
+            pass
+        await self._admin_show_settings_hub(event)
 
     def _build_user_accounts_view(self, target_user_id: int, back_data: bytes):
         """
@@ -3082,14 +3420,23 @@ class SaaSBot:
         buttons.append(UI.nav_row())
         await event.edit("\n".join(lines), buttons=buttons)
 
-    async def _resume_user_selfbots(self, user_id: int):
+    async def _resume_user_selfbots(self, user_id: int,
+                                    reason: str = "subscription_expired",
+                                    require_active_sub: bool = False):
         """
         بعد از تمدید/پرداخت موفق: سلف‌بات‌هایی که سرِ انقضای اشتراک متوقف و
         disabled شده بودند دوباره فعال می‌شوند — هم در config (تا در استارت
         بعدی هم روشن بمانند) و هم زنده (run_bot برای تگ‌های متوقف‌شده).
         Idempotent: فقط تگ‌هایی را لمس می‌کند که disabled هستند و هنوز در
         ACCOUNTS ثبت نشده‌اند.
+
+        v2.17.0: پارامتر reason — دلیلِ قطعِ موردِ نظر (پیش‌فرض همان
+        انقضای اشتراک؛ رفع بلاک با 'user_blocked' صدا می‌زند).
+        require_active_sub=True یعنی فقط اگر اشتراکِ فعالی باشد ادامه بده
+        (برای رفعِ بلاک — کاربرِ بدون اشتراک نباید سلفِ روشن داشته باشد).
         """
+        if require_active_sub and not get_active_subscription(user_id):
+            return
         cfg = self.sb.load_config()
         to_start = []
         changed = False
@@ -3098,12 +3445,13 @@ class SaaSBot:
                 continue
             if not acc.get("disabled"):
                 continue
-            # فقط سلف‌بات‌هایی که دلیلِ قطعیِ خاموش‌شدنشان subscription_expired
-            # است دوباره روشن می‌شوند. disabled_reason=None (legacy — معلوم نیست
-            # چرا خاموش شده، شاید ادمین دستی) هرگز AUTO RESUME نمی‌شود؛ باید
+            # فقط سلف‌بات‌هایی که دلیلِ قطعیِ خاموش‌شدنشان با reasonِ درخواستی
+            # یکی است دوباره روشن می‌شوند (مثلاً subscription_expired یا
+            # user_blocked). disabled_reason=None (legacy — معلوم نیست چرا
+            # خاموش شده، شاید ادمین دستی) هرگز AUTO RESUME نمی‌شود؛ باید
             # دستی/توسط ادمین روشن شود.
-            reason = acc.get("disabled_reason")
-            if reason != "subscription_expired":
+            acc_reason = acc.get("disabled_reason")
+            if acc_reason != reason:
                 continue
             acc["disabled"] = False
             acc.pop("disabled_reason", None)
@@ -6329,11 +6677,19 @@ class SaaSBot:
         )
 
     async def _user_start_renew(self, event):
-        plans = list_pricing()
+        # v2.17.0: پلن‌های دسته‌جمعی از فهرستِ عادی حذف می‌شوند (مالِ مسیر
+        # خودشان‌اند) و اگر خریدارِ فاقدِ اشتراک باشد، گزینه‌ی دسته‌جمعی
+        # با تخفیف گروهی هم پایینِ فهرست پیشنهاد می‌شود.
+        plans = [p for p in list_pricing() if not is_group_plan(p["plan"])]
         buttons = [
             [UI.go(f"{p['plan']} — {p['price_toman']:,} تومان", f"renew_plan:{p['plan']}".encode())]
             for p in plans
         ]
+        if group_sub_enabled() \
+                and self._role(event.sender_id) not in (ROLE_OWNER, ROLE_ADMIN) \
+                and not get_active_subscription(event.sender_id):
+            buttons.append([UI.go("👥 اشتراک دسته‌جمعی (تخفیف گروهی)",
+                                  "user_group_sub", tone="success")])
         buttons.append(UI.nav_row())
         await event.edit("💳 یکی از پلن‌ها رو انتخاب کن:", buttons=buttons)
 
@@ -8131,6 +8487,10 @@ class SaaSBot:
             is_new = get_user(event.sender_id) is None
             upsert_user(event.sender_id, event.sender.username if event.sender else None,
                             event.sender.first_name if event.sender else None)
+            # v2.17.0 (BLOCK): کاربرِ بلاک‌شده اصلاً وارد نمی‌شود — قبل از
+            # دعوت، آزمایشی، گیت کانال و هر منطق دیگری.
+            if await self._enforce_block(event.sender_id, event):
+                return
             # دعوت: «/start ref_<id>» فقط برای کاربرِ تازه ثبت می‌شود — تا
             # کسی نتواند با /startِ دوباره امتیازِ تکراری بسازد.
             if is_new:
@@ -8141,6 +8501,14 @@ class SaaSBot:
                             _spawn_bg(self._notify_referrer(ref), "referral")
                     except Exception as e:
                         print(f"⚠️ [referral] ثبت دعوت ناموفق: {type(e).__name__}")
+                # v2.17.0 (TRIAL): کاربرِ تازه → اشتراک آزمایشی ۷ روزه
+                # (روشن/خاموش از «⚙️ تنظیمات» → «🎁 اشتراک آزمایشی»؛ فقط
+                # مالک). اعطا فقط یک‌بار در طول عمرِ کاربر است و منو
+                # وضعیتش را خودش نشان می‌دهد.
+                try:
+                    grant_trial_if_eligible(event.sender_id)
+                except Exception as e:
+                    print(f"⚠️ [trial] اعطای اشتراک آزمایشی ناموفق: {type(e).__name__}: {e}")
             # گیت عضویت کانال: همه به‌جز ادمین اصلی باید عضو کانالِ تنظیم‌شده
             # توسط مالک باشند تا بتوانند از ربات استفاده کنند. اگر عضو نباشد،
             # پیام /start او حذف و پیام گیت (کادر شیشه‌ای کانال + بررسی عضویت)
@@ -8163,6 +8531,10 @@ class SaaSBot:
         @self.client.on(events.NewMessage)
         async def message_h(event):
             if event.raw_text and event.raw_text.startswith("/"):
+                return
+
+            # v2.17.0 (BLOCK): کاربرِ بلاک‌شده هیچ پیامی پردازش نمی‌شود
+            if await self._enforce_block(event.sender_id, event):
                 return
 
             # v2.15.0: announce feature — بدون wizard
@@ -8254,6 +8626,9 @@ class SaaSBot:
             data = _route if _route is not None else event.data.decode()
             uid = event.sender_id
             role = self._role(uid)
+            # v2.17.0 (BLOCK): هیچ دکمه‌ای برای کاربرِ بلاک‌شده کار نمی‌کند
+            if await self._enforce_block(uid, event, role=role):
+                return
             # گیت همیشگی: هر تعاملِ بعد از خروج از کانال بسته می‌شود. دکمه‌ی
             # «بررسی عضویت» خودش استثناست (تا کاربرِ تازه‌عضو‌شده بتواند
             # وارد شود).
@@ -9565,16 +9940,16 @@ class SaaSBot:
                     await self._user_support_end(event)
                     return
                 if data == "user_reporter":
-                    # v2.16.1 (USER-REQUEST): بخش «ریپورتر» — فعلاً فقط
-                    # اعلانِ «به‌زودی». دکمه از الان در منوی همه‌ی کاربران
-                    # دیده می‌شود تا مسیرش شناخته‌شده باشد؛ منطق اصلیِ
-                    # گزارش‌گیری در نسخه‌های بعدی به همین route وصل می‌شود.
-                    await event.edit(
-                        "🎙 ریپورتر\n\n"
-                        "🚧 این بخش در حال ساخت است و به‌زودی فعال می‌شود.\n"
-                        "⏳ لطفاً منتظر خبرهای بعدی باشید.",
-                        buttons=[UI.nav_row()],
-                    )
+                    # v2.17.0: بخش «ریپورتر» — فقط برای کاربرانی که اکانتِ
+                    # خودشان را لاگین کرده‌اند (دکمه هم فقط برای آن‌هاست).
+                    # کل منطق به cianet/bots/reporter.py منتقل شده — نقطه‌ی
+                    # اتصالِ آینده همین‌جاست (REPORTER_ENABLED در آن ماژول).
+                    if not self._user_has_logged_in_account(event.sender_id):
+                        await event.answer(
+                            "🎙 ریپورتر فقط برای کاربرانی است که اکانت خودشان "
+                            "را در ربات لاگین کرده‌اند.", alert=True)
+                        return
+                    await reporter_module.render_reporter_page(event, self)
                     return
                 if data.startswith("ticket_unit:"):  # v1.8.0
                     unit_id = data.split(":", 1)[1]
@@ -9588,6 +9963,20 @@ class SaaSBot:
                     return
                 if data == "user_renew":
                     await self._user_start_renew(event)
+                    return
+                # v2.17.0: اشتراک دسته‌جمعی (فقط کاربرِ بدون اشتراکِ فعال)
+                if data == "user_group_sub":
+                    await self._user_start_group_sub(event)
+                    return
+                if data.startswith("group_plan:"):
+                    await self._user_group_seats(event, data.split(":", 1)[1])
+                    return
+                if data.startswith("group_seats:"):
+                    parts_g = data.split(":", 2)
+                    if len(parts_g) == 3 and parts_g[2].isdigit():
+                        await self._user_group_chosen(event, parts_g[1], int(parts_g[2]))
+                    else:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
                     return
                 if data.startswith("renew_plan:"):
                     await self._user_plan_chosen(event, data.split(":", 1)[1])
