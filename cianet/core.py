@@ -2020,8 +2020,17 @@ REPORTER_ENABLED_SETTING = "reporter_enabled"       # "1" = روشن (پیش‌�
 REPORTER_CAP_SETTING = "reporter_daily_cap"         # سقف گزارش هر کاربر در روز
 REPORTER_CAP_DEFAULT = 10
 REPORTER_CAP_MIN = 1
-REPORTER_CAP_MAX = 30
+# v2.19.2 (OWNER-REQUEST): سقف تا ۱۰۰ بالا رفت — مالک می‌خواهد محدودیتِ
+# ریپورتر را خودش تنظیم کند؛ این سقفِ «هر کاربر در روز، با اکانتِ خودش»
+# است و ریسکش متوجهِ همان اکانتِ کاربر است.
+REPORTER_CAP_MAX = 100
 REPORTER_DUP_HOURS = 24                              # فاصله‌ی حداقلی گزارشِ مجددِ همان هدف
+# v2.19.2 (OWNER-REQUEST): پنجره‌ی «گزارشِ مجددِ همان هدف» هم قابلِ تنظیمِ
+# مالک شد (پیش‌فرض همان ۲۴ ساعتِ قبلی — بدون تغییرِ رفتار تا وقتی مالک
+# دست نزند).
+REPORTER_DUP_SETTING = "reporter_dup_hours"
+REPORTER_DUP_MIN = 1
+REPORTER_DUP_MAX = 72
 
 
 def ensure_reporter_schema() -> None:
@@ -2130,12 +2139,25 @@ def reporter_quota_left(user_id: int) -> int:
     return max(0, reporter_daily_cap() - reporter_today_count(user_id))
 
 
-def reporter_recently_reported(user_id: int, target_id, hours: int = REPORTER_DUP_HOURS) -> bool:
+def reporter_dup_hours() -> int:
+    """v2.19.2: پنجره‌ی گزارشِ مجددِ همان هدف (ساعت) — قابلِ تنظیمِ مالک.
+    پیش‌فرض ۲۴ (رفتارِ v2.18.0) و همیشه در بازه‌ی مجاز clamp می‌شود."""
+    try:
+        val = int(get_setting(REPORTER_DUP_SETTING, str(REPORTER_DUP_HOURS)))
+    except (TypeError, ValueError):
+        val = REPORTER_DUP_HOURS
+    return max(REPORTER_DUP_MIN, min(REPORTER_DUP_MAX, val))
+
+
+def reporter_recently_reported(user_id: int, target_id, hours: int = None) -> bool:
     """آیا همین کاربر همین هدف را در INTERVAL ساعتِ اخیر گزارش داده؟
     target_id ممکن است None باشد (هدفِ حل‌نشده) — در آن حالت مقایسه با
-    رشته‌ی هدف انجام می‌شود تا دورزدنِ سهمیه با یوزرنیم/آیدیِ متناوب سخت بماند."""
+    رشته‌ی هدف انجام می‌شود تا دورزدنِ سهمیه با یوزرنیم/آیدیِ متناوب سخت بماند.
+    v2.19.2: hours=None یعنی مقدارِ تنظیم‌شده‌ی مالک (reporter_dup_hours)."""
     if target_id is None:
         return False
+    if hours is None:
+        hours = reporter_dup_hours()
     if not _ensure_reporter_ready():
         return False  # جدول نیست → «قبلاً گزارش داده» فرض نکن (fail-open امن)
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(_DATETIME_FMT)
@@ -7474,6 +7496,7 @@ WIZ_WALLET_DEBIT_REASON = "wallet_debit_reason"
 WIZ_REPORTER_TARGET = "reporter_target"
 WIZ_REPORTER_FLOW = "reporter_flow"
 WIZ_REPORTER_CAP = "reporter_cap"
+WIZ_REPORTER_DUP = "reporter_dup"  # v2.19.2: پنجره‌ی گزارشِ مجددِ همان هدف (مالک)
 WIZ_OWNER_TICKET_REPLY = "owner_ticket_reply"
 WIZ_SET_CARD = "awaiting_card_info"
 WIZ_SET_CHANNEL = "awaiting_channel"
@@ -8040,7 +8063,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-21-v2.19.1"
+BUILD_VERSION = "2026-10-21-v2.19.2"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -12082,6 +12105,7 @@ __all__ = [
     'reporter_daily_cap',
     'reporter_today_count',
     'reporter_quota_left',
+    'reporter_dup_hours',
     'reporter_recently_reported',
     'add_reporter_log',
     'list_reporter_logs',
@@ -12092,9 +12116,13 @@ __all__ = [
     'REPORTER_CAP_MIN',
     'REPORTER_CAP_MAX',
     'REPORTER_DUP_HOURS',
+    'REPORTER_DUP_SETTING',
+    'REPORTER_DUP_MIN',
+    'REPORTER_DUP_MAX',
     'WIZ_REPORTER_TARGET',
     'WIZ_REPORTER_FLOW',
     'WIZ_REPORTER_CAP',
+    'WIZ_REPORTER_DUP',
     'time',
     'timedelta',
     'timezone',

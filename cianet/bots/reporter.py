@@ -570,12 +570,35 @@ def _flow(saas_bot, uid: int) -> dict:
     return {}
 
 
-def _back_row(route: str = "reporter:home"):
-    """ردیف بازگشتِ داخلیِ ریپورتر + خروجِ همیشه-امن به منوی اصلی."""
+def _back_row(route: str = "reporter:home") -> list:
+    """ردیف بازگشتِ داخلیِ ریپورتر + خروجِ همیشه-امن به منوی اصلی.
+
+    v2.19.2 (PROD-BUGFIX): خروجی از «ردیفِ تخت» [b, b] به «لیستِ ردیف‌ها»
+    [[b, b]] تغییر کرد. علت: call siteها یا `rows + _back_row()` بودند یا
+    `buttons=_back_row()`؛ شکلِ قبلی در حالتِ اول ساختارِ مخلوط
+    [[b,b],[b],b,b] می‌ساخت و telethon در build_reply_markup روی دکمه‌ی
+    تکی «'KeyboardInlineButton' object is not iterable» می‌گرفت — همان
+    خطای production که مالک در v2.19.1 با دیاگنوستیک دید. با شکلِ جدید
+    هر دو الگوی call site ساختارِ معتبر می‌سازند.
+    """
     from cianet.bots.ui import UI
     from cianet.core import NAV_HOME
-    return [UI.btn(f"{UI.BACK} {UI.L_BACK}", route, style="primary"),
-            UI.btn(f"{UI.HOME} {UI.L_HOME}", NAV_HOME, style="primary")]
+    return [[UI.btn(f"{UI.BACK} {UI.L_BACK}", route, style="primary"),
+             UI.btn(f"{UI.HOME} {UI.L_HOME}", NAV_HOME, style="primary")]]
+
+
+def _quota_bar(left: int, cap: int) -> str:
+    """نوارِ پیشرفتِ سهمیه — ▰ مصرف‌شده · ▱ باقی‌مانده (۱۰ خانه).
+
+    v2.19.2 (OWNER-REQUEST «جذابش کن»): سهمیه فقط عددِ خشک نباشد؛ یک نوارِ
+    کوچکِ بصری کنارش باشد که با هر گزارش پر می‌شود — کاربر در یک نگاه
+    می‌بیند چقدر از سهمیه‌ی امروزش مانده.
+    """
+    cap = max(1, int(cap or 1))
+    left = max(0, min(cap, int(left or 0)))
+    used = cap - left
+    filled = round(used * 10 / cap)
+    return "▰" * filled + "▱" * (10 - filled)
 
 
 async def _render_coming_soon(event) -> None:
@@ -612,9 +635,15 @@ def _user_client(saas_bot, uid: int):
 
 
 async def render_reporter_page(event, saas_bot) -> None:
-    """صفحه‌ی اصلیِ ریپورتر — تنها نقطه‌ی ورود (route: user_reporter)."""
+    """صفحه‌ی اصلیِ ریپورتر — تنها نقطه‌ی ورود (route: user_reporter).
+
+    v2.19.2 (OWNER-REQUEST «جذابش کن»): بازنویسیِ صفحه — زیرعنوانِ
+    دعوت‌کننده، قانون‌ها با نشانگرِ تصویری، نوارِ پیشرفتِ سهمیه و پنجره‌ی
+    گزارشِ مجدد به‌صورتِ زنده از تنظیماتِ مالک.
+    """
     from cianet.bots.ui import UI
-    from cianet.core import reporter_daily_cap, reporter_quota_left
+    from cianet.core import (fa_digits, reporter_daily_cap,
+                             reporter_dup_hours, reporter_quota_left)
 
     uid = event.sender_id
 
@@ -638,27 +667,30 @@ async def render_reporter_page(event, saas_bot) -> None:
 
     cap = reporter_daily_cap()
     left = reporter_quota_left(uid)
+    dup_h = reporter_dup_hours()
     rows = [
-        [UI.go("🎯 گزارش جدید", "reporter:new")],
+        [UI.go("🎯 گزارش جدید", "reporter:new", tone="success")],
         [UI.go("📜 تاریخچه گزارش‌ها", "reporter:history")],
     ]
     if _is_owner(saas_bot, uid):
         rows.insert(2, [UI.go("⚙️ تنظیمات ریپورتر (مالک)", "reporter:owner")])
 
     body = [
-        "گزارشِ **کانال / گروه / اکانتِ جعلی یا کلاهبردار** — دقیقاً مثل دکمه‌ی"
-        " Report خودِ تلگرام، ولی مرتب و با رسید و تاریخچه.",
+        "🛡 **سپرِ جامعه‌ی تلگرامِ فارسی** — کانال، گروه یا اکانتی که",
+        "جعلی است یا کلاهبرداری می‌کند را همان‌طور که خودِ تلگرام می‌خواهد",
+        "گزارش کن؛ با رسید، تاریخچه و سهمیه‌ی شفاف.",
         "",
-        "**قوانین:**",
-        f"• هر گزارش با **اکانتِ خودِ شما** ارسال می‌شود",
-        f"• برای هر هدف، یک گزارش در ۲۴ ساعت",
-        f"• سقفِ روزانه: {cap} گزارش",
+        "**📋 قوانینِ ساده:**",
+        f"👤 هر گزارش فقط با **اکانتِ خودِ تو** ارسال می‌شود",
+        f"⏳ هر هدف تا **{fa_digits(dup_h)} ساعت** فقط یک‌بار قابل گزارشِ مجدد است",
+        f"📅 سقفِ روزانه: **{fa_digits(cap)} گزارش** برای هر کاربر",
         "",
-        f"🧮 سهمیه‌ی باقی‌مانده‌ی امروز: **{left} از {cap}**",
+        f"🧮 سهمیه‌ی امروز: **{_quota_bar(left, cap)}**",
+        f"      **{fa_digits(left)} از {fa_digits(cap)}** گزارشِ باقی‌مانده",
     ]
     await event.edit(
         UI.screen("🎙 ریپورتر", body=body,
-                  subtitle="با اکانتِ خودتان، به تلگرام گزارش بدهید"),
+                  subtitle="با اکانتِ خودت، به تلگرام گزارش بده — تمیز و مؤثر"),
         buttons=rows + [UI.nav_row()],
     )
 
@@ -749,24 +781,27 @@ async def _page_cat(event, d: dict) -> None:
 
 async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
     from cianet.bots.ui import UI
+    from cianet.core import (fa_digits, reporter_dup_hours)
+    dup_h = reporter_dup_hours()
     scope_txt = ("همراه با حداکثر ۱۰ پیامِ اخیر (شواهد)"
                  if d.get("scope") == "msgs" else "فقط خودِ هدف")
     cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
     body = [
-        f"**هدف:** {_target_label(d)}",
-        f"**دسته:** {cat_txt}",
-        f"**دامنه:** {scope_txt}",
-        "**ارسال با:** اکانتِ خودِ شما — **یک گزارش**",
+        f"🎯 **هدف:** {_target_label(d)}",
+        f"🎭 **دسته:** {cat_txt}",
+        f"📨 **دامنه:** {scope_txt}",
+        "👤 **ارسال با:** اکانتِ خودِ شما — **یک گزارش**",
         "",
-        "⚠️ بعد از ارسال، همین هدف تا ۲۴ ساعت قابل گزارشِ مجدد توسط شما نیست"
-        " و از سهمیه‌ی امروزتان یک گزارش کم می‌شود.",
+        f"⚠️ بعد از ارسال، همین هدف تا **{fa_digits(dup_h)} ساعت** قابل گزارشِ مجدد",
+        " توسط شما نیست و از سهمیه‌ی امروزتان یک گزارش کم می‌شود.",
     ]
     rows = [
         [UI.confirm("✅ ارسال گزارش", "reporter:go")],
         _cancel_row(),
     ]
     await event.edit(UI.screen("⚠️ تأیید نهایی", body=body,
-                               subtitle="یک گزارش، با اکانتِ خودِ شما"),
+                               subtitle="یک گزارش، با اکانتِ خودِ شما",
+                               hint="مطمئن هستی؟ دکمه‌ی سبز را بزن"),
                      buttons=rows + _back_row())
 
 
@@ -798,18 +833,25 @@ async def _page_history(event, saas_bot, uid: int) -> None:
 async def _page_owner(event, saas_bot, uid: int) -> None:
     from cianet.bots.ui import UI
     from cianet.core import (REPORTER_CAP_MAX, REPORTER_CAP_MIN,
-                             reporter_daily_cap, reporter_enabled, reporter_stats)
+                             REPORTER_DUP_MAX, REPORTER_DUP_MIN,
+                             fa_digits, reporter_daily_cap, reporter_dup_hours,
+                             reporter_enabled, reporter_stats)
     on = reporter_enabled()
     cap = reporter_daily_cap()
+    dup_h = reporter_dup_hours()
     st = reporter_stats()
     cat_lines = [f"• {REPORTER_QUICK_CATEGORIES.get(k, k)}: {v}"
                  for k, v in sorted(st["by_category"].items())] or ["• هنوز گزارشی ثبت نشده"]
     body = [
         f"**وضعیت:** {'🟢 روشن' if on else '🔴 خاموش'} (پیش‌فرض: روشن)",
-        f"**سقفِ روزانه‌ی هر کاربر:** {cap} گزارش "
-        f"(بازه‌ی مجاز: {REPORTER_CAP_MIN} تا {REPORTER_CAP_MAX})",
         "",
-        "**آمار:**",
+        "**⚖️ محدودیت‌ها (قابلِ تنظیم):**",
+        f"• سقفِ روزانه‌ی هر کاربر: **{fa_digits(cap)}** گزارش "
+        f"(بازه‌ی مجاز: {fa_digits(REPORTER_CAP_MIN)} تا {fa_digits(REPORTER_CAP_MAX)})",
+        f"• فاصله‌ی گزارشِ مجددِ همان هدف: **{fa_digits(dup_h)} ساعت** "
+        f"(بازه‌ی مجاز: {fa_digits(REPORTER_DUP_MIN)} تا {fa_digits(REPORTER_DUP_MAX)})",
+        "",
+        "**📊 آمار:**",
         f"• امروز: {st['today']} گزارش · مجموع: {st['total']} "
         f"({st['ok']} موفق)",
         f"• کاربرانی که گزارش داده‌اند: {st['users']}",
@@ -818,11 +860,12 @@ async def _page_owner(event, saas_bot, uid: int) -> None:
     ]
     rows = [
         [UI.toggle("ریپورتر روشن/خاموش", on, "reporter:owner:toggle")],
-        [UI.go(f"± سقفِ روزانه (فعلاً {cap})", "reporter:owner:cap")],
+        [UI.go(f"± سقفِ روزانه (فعلاً {fa_digits(cap)})", "reporter:owner:cap")],
+        [UI.go(f"± فاصله‌ی گزارشِ مجدد (فعلاً {fa_digits(dup_h)} ساعت)", "reporter:owner:dup")],
         [UI.refresh("reporter:owner")],
     ]
     await event.edit(UI.screen("⚙️ تنظیمات ریپورتر", body=body,
-                               subtitle="پنل مالک — سوییچ، سقف و آمار"),
+                               subtitle="پنل مالک — سوییچ، محدودیت‌ها و آمار"),
                      buttons=rows + _back_row())
 
 
@@ -837,8 +880,8 @@ def list_reporter(uid: int):
 async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
     """اجرای یک گزارش — با اکانتِ خودِ کاربر، فقط یک گزارش."""
     from cianet.bots.ui import UI
-    from cianet.core import (add_reporter_log, reporter_quota_left,
-                             reporter_recently_reported)
+    from cianet.core import (add_reporter_log, fa_digits, reporter_dup_hours,
+                             reporter_quota_left, reporter_recently_reported)
 
     # گیت‌های لحظه‌ی ارسال (دوباره چک می‌شوند — وضعیت ممکن است عوض شده باشد)
     if not _eff_enabled():
@@ -850,8 +893,8 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
         return
     info = d.get("info", {})
     if info.get("id") is not None and reporter_recently_reported(uid, info.get("id")):
-        await event.answer("⛔ این هدف را در ۲۴ ساعتِ اخیر گزارش داده‌اید.",
-                           alert=True)
+        await event.answer(f"⛔ این هدف را در {fa_digits(reporter_dup_hours())} ساعتِ اخیر"
+                           " گزارش داده‌اید.", alert=True)
         return
 
     tag, client = _user_client(saas_bot, uid)
@@ -905,22 +948,29 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
 async def _render_receipt(event, d: dict, ok: bool, left: int,
                           error: str = "", n_msgs: int = 0) -> None:
     from cianet.bots.ui import UI
+    from cianet.core import fa_digits, reporter_daily_cap
     cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
     body = [
-        f"**{'✅ گزارش ارسال شد' if ok else '❌ ارسال ناموفق بود'}**",
+        ("🎉 **گزارش با موفقیت ارسال شد!**" if ok
+         else "❌ **ارسال ناموفق بود**"),
         "",
-        f"**هدف:** {_target_label(d)}",
-        f"**دسته:** {cat_txt}",
-        f"**شواهد:** {n_msgs} پیام" if n_msgs else "**شواهد:** بدون پیام",
+        f"🎯 **هدف:** {_target_label(d)}",
+        f"🎭 **دسته:** {cat_txt}",
+        f"📨 **شواهد:** {n_msgs} پیام" if n_msgs else "📨 **شواهد:** بدون پیام",
     ]
+    if ok:
+        body += ["", "🫡 کارت درست انجام شد — تلگرام گزارشِ تو را دریافت کرد."]
     if error:
         body += ["", f"**علت خطا:** {error}"]
-    body += ["", f"🧮 سهمیه‌ی باقی‌مانده‌ی امروز: **{left}**"]
+    body += ["", f"🧮 سهمیه‌ی امروز: **{_quota_bar(left, reporter_daily_cap())}**",
+             f"      **{fa_digits(left)} از {fa_digits(reporter_daily_cap())}** باقی‌مانده"]
     rows = [
-        [UI.go("🎯 گزارش جدید", "reporter:new")],
+        [UI.go("🎯 گزارش جدید", "reporter:new", tone="success")],
         [UI.go("📜 تاریخچه", "reporter:history")],
     ]
-    await event.edit(UI.screen("🧾 رسید گزارش", body=body), buttons=rows + _back_row())
+    await event.edit(UI.screen("🧾 رسید گزارش", body=body,
+                               hint="گزارشِ بعدی همین‌جا — چند ثانیه فاصله کافی است"),
+                     buttons=rows + _back_row())
 
 
 # ───────────────────── روترِ اکشن‌ها ─────────────────────
@@ -928,8 +978,9 @@ async def _render_receipt(event, d: dict, ok: bool, left: int,
 
 async def handle_reporter_action(event, saas_bot, action: str) -> None:
     """هندلرِ اکشن‌های داخل بخش ریپورتر (پیشوندِ «reporter:»)."""
-    from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_FLOW,
-                             WIZ_REPORTER_TARGET, log_action, reporter_daily_cap,
+    from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_DUP,
+                             WIZ_REPORTER_FLOW, WIZ_REPORTER_TARGET,
+                             log_action, reporter_daily_cap,
                              reporter_enabled, set_setting,
                              REPORTER_CAP_MAX, REPORTER_CAP_MIN,
                              REPORTER_CAP_SETTING, REPORTER_ENABLED_SETTING)
@@ -962,13 +1013,33 @@ async def handle_reporter_action(event, saas_bot, action: str) -> None:
             _park(saas_bot, uid, WIZ_REPORTER_CAP,
                   {"current": reporter_daily_cap()})
             from cianet.bots.ui import UI
+            from cianet.core import fa_digits
             await event.edit(
                 UI.screen("± سقفِ روزانه",
-                          body=[f"سقفِ فعلی: **{reporter_daily_cap()}**",
+                          body=[f"سقفِ فعلی: **{fa_digits(reporter_daily_cap())}**",
                                 "",
-                                f"عددِ جدید را بفرستید (بین {REPORTER_CAP_MIN} تا {REPORTER_CAP_MAX})."],
+                                f"عددِ جدید را بفرستید (بین {fa_digits(REPORTER_CAP_MIN)} تا {fa_digits(REPORTER_CAP_MAX)})."],
                           hint="سقفِ بالاتر یعنی ریسکِ بیشتر برای اکانتِ خودِ کاربر —"
                                " مقدارِ محافظه‌کارانه توصیه می‌شود."),
+                buttons=[_cancel_row()],
+            )
+            return
+        # v2.19.2 (OWNER-REQUEST): پنجره‌ی گزارشِ مجددِ همان هدف هم
+        # توسط مالک قابلِ تنظیم است — همان ویزاردِ سقف، با بازه‌ی ۱ تا ۷۲ ساعت.
+        if action == "reporter:owner:dup":
+            from cianet.core import (REPORTER_DUP_MAX, REPORTER_DUP_MIN,
+                                     fa_digits, reporter_dup_hours)
+            _park(saas_bot, uid, WIZ_REPORTER_DUP,
+                  {"current": reporter_dup_hours()})
+            from cianet.bots.ui import UI
+            await event.edit(
+                UI.screen("± فاصله‌ی گزارشِ مجدد",
+                          body=[f"مقدارِ فعلی: **{fa_digits(reporter_dup_hours())} ساعت**",
+                                "",
+                                f"عددِ جدید را به ساعت بفرستید (بین {fa_digits(REPORTER_DUP_MIN)} تا {fa_digits(REPORTER_DUP_MAX)})."],
+                          hint="پنجره‌ی کوچک‌تر یعنی کاربر زودتر می‌تواند همان"
+                               " هدف را دوباره گزارش کند — ریسکِ اسپم‌شدنِ"
+                               " گزارش به تلگرام بالاتر می‌رود."),
                 buttons=[_cancel_row()],
             )
             return
@@ -1044,11 +1115,14 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
     """ورودیِ متنیِ جریانِ ریپورتر — از SaaSBot._handle_text_wizard صدا زده
     می‌شود. True یعنی «این پیام مصرف شد»."""
     from cianet.bots.ui import UI
-    from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_FLOW,
-                             WIZ_REPORTER_TARGET, log_action, reporter_daily_cap,
-                             reporter_quota_left, reporter_recently_reported,
+    from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_DUP,
+                             WIZ_REPORTER_FLOW, WIZ_REPORTER_TARGET,
+                             log_action, reporter_daily_cap,
+                             reporter_dup_hours, reporter_quota_left,
+                             reporter_recently_reported,
                              set_setting, REPORTER_CAP_MAX, REPORTER_CAP_MIN,
-                             REPORTER_CAP_SETTING)
+                             REPORTER_CAP_SETTING, REPORTER_DUP_MAX,
+                             REPORTER_DUP_MIN, REPORTER_DUP_SETTING)
 
     state = wiz.get("state")
     uid = event.sender_id
@@ -1078,9 +1152,33 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
         val = max(REPORTER_CAP_MIN, min(REPORTER_CAP_MAX, val))
         set_setting(REPORTER_CAP_SETTING, str(val), actor_id=uid)
         log_action(uid, "reporter_cap_changed", f"cap={val}")
+        from cianet.core import fa_digits
         await event.respond(
             UI.screen("✅ سقف ثبت شد",
-                      body=[f"سقفِ روزانه‌ی هر کاربر: **{val}** گزارش"]),
+                      body=[f"سقفِ روزانه‌ی هر کاربر: **{fa_digits(val)} گزارش**"]),
+            buttons=_back_row(),
+        )
+        return True
+
+    # ── v2.19.2: پنجره‌ی جدیدِ گزارشِ مجدد از مالک ──
+    if state == WIZ_REPORTER_DUP:
+        saas_bot.wizards.pop(uid, None)
+        if saas_bot._role(uid) != ROLE_OWNER:
+            await event.respond("⛔ این عملیات فقط برای مالک است.")
+            return True
+        raw = text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+        try:
+            val = int(raw)
+        except ValueError:
+            await event.respond("❌ لطفاً فقط یک عدد (به ساعت) بفرستید.")
+            return True
+        val = max(REPORTER_DUP_MIN, min(REPORTER_DUP_MAX, val))
+        set_setting(REPORTER_DUP_SETTING, str(val), actor_id=uid)
+        log_action(uid, "reporter_dup_changed", f"dup_hours={val}")
+        from cianet.core import fa_digits
+        await event.respond(
+            UI.screen("✅ فاصله ثبت شد",
+                      body=[f"فاصله‌ی گزارشِ مجددِ هر هدف: **{fa_digits(val)} ساعت**"]),
             buttons=_back_row(),
         )
         return True
@@ -1147,11 +1245,13 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
 
     if info.get("id") is not None and reporter_recently_reported(uid, info.get("id")):
         saas_bot.wizards.pop(uid, None)
+        dup_h = reporter_dup_hours()
+        from cianet.core import fa_digits
         await event.respond(
             UI.screen("⏳ قبلاً گزارش داده‌اید",
-                      body=["این هدف را در ۲۴ ساعتِ اخیر گزارش کرده‌اید.",
+                      body=[f"این هدف را در **{fa_digits(dup_h)} ساعتِ اخیر** گزارش کرده‌اید.",
                             "گزارشِ دوباره از یک اکانت روی همان هدف اثری ندارد."],
-                      hint="گزارشِ بعدی: پس از گذشت ۲۴ ساعت."),
+                      hint=f"گزارشِ بعدی: پس از گذشتِ {fa_digits(dup_h)} ساعت."),
             buttons=_back_row(),
         )
         return True

@@ -91,6 +91,7 @@ from cianet.core import (
     WIZ_PRICING_NEW_NAME,
     WIZ_PRICING_PRICE,
     WIZ_REPORTER_CAP,
+    WIZ_REPORTER_DUP,
     WIZ_REPORTER_FLOW,
     WIZ_REPORTER_TARGET,
     WIZ_SET_CARD,
@@ -957,13 +958,15 @@ class SaaSBot:
         # ── ردیف ۵ (تکی): پشتیبانی
         buttons.append([UI.go("☎️ پشتیبانی", "user_support")])
 
-        # ── ردیف ۵.۵ (v2.16.1 USER-REQUEST · v2.17.0 GATING · v2.19.0):
-        # ریپورتر — فقط برای کاربرانی که اکانتِ خودشان را در ربات لاگین
-        # کرده‌اند (خواسته‌ی مالک). طبق درخواستِ مالک (v2.19.0) این دکمه
-        # در «منوی اصلی» است — نه در «حساب کاربری». منطق در
-        # cianet/bots/reporter.py (نقطه‌ی اتصال: user_reporter).
-        if has_account:
-            buttons.append([UI.go("🎙 ریپورتر", "user_reporter")])
+        # ── ردیف ۵.۵ (v2.16.1 · v2.17.0 · v2.19.2 OWNER-REQUEST):
+        # ریپورتر — از v2.19.2 برای **همه‌ی کاربران** نمایش داده می‌شود
+        # (خواسته‌ی مالک: گزینه برای تمام کاربرا باشد). الزامِ استفاده هنوز
+        # همان است: کاربر باید اکانتِ خودش را در ربات لاگین کرده باشد —
+        # گیتِ استفاده در route (user_reporter) و در خودِ ماژول چک می‌شود
+        # و کاربرِ لاگین‌نکرده صفحه‌ی راهنما با دکمه‌ی لاگین می‌بیند.
+        # طبق درخواستِ مالک (v2.19.0) این دکمه در «منوی اصلی» است.
+        # منطق در cianet/bots/reporter.py (نقطه‌ی اتصال: user_reporter).
+        buttons.append([UI.go("🎙 ریپورتر", "user_reporter")])
 
         # ── ردیف ۶ (شرطی): فقط برای privileged
         if privileged:
@@ -7039,8 +7042,10 @@ class SaaSBot:
             return True
 
         # v2.18.0: ورودی‌های متنیِ ریپورتر (هدف / سقف مالک / مرحله‌ی دکمه‌ای).
+        # v2.19.2: پنجره‌ی گزارشِ مجدد (WIZ_REPORTER_DUP) هم اضافه شد.
         # کل منطق در cianet/bots/reporter.py — اینجا فقط دیلگیت.
-        if state in (WIZ_REPORTER_TARGET, WIZ_REPORTER_FLOW, WIZ_REPORTER_CAP):
+        if state in (WIZ_REPORTER_TARGET, WIZ_REPORTER_FLOW, WIZ_REPORTER_CAP,
+                     WIZ_REPORTER_DUP):
             return await reporter_module.handle_reporter_text(event, self, wiz)
 
         if state == WIZ_TICKET_MSG:
@@ -9957,14 +9962,35 @@ class SaaSBot:
                     await self._user_support_end(event)
                     return
                 if data == "user_reporter":
-                    # v2.17.0: بخش «ریپورتر» — فقط برای کاربرانی که اکانتِ
-                    # خودشان را لاگین کرده‌اند (دکمه هم فقط برای آن‌هاست).
-                    # کل منطق به cianet/bots/reporter.py منتقل شده — نقطه‌ی
-                    # اتصالِ آینده همین‌جاست (REPORTER_ENABLED در آن ماژول).
+                    # v2.17.0: بخش «ریپورتر» — v2.19.2 (OWNER-REQUEST): دکمه
+                    # برای همه نمایش داده می‌شود؛ الزامِ استفاده همان لاگینِ
+                    # اکانتِ خودِ کاربر است. کاربرِ لاگین‌نکرده به‌جای alert،
+                    # صفحه‌ی راهنمایِ دوستانه با دکمه‌ی مستقیمِ لاگین می‌رود
+                    # (قیفِ فروش: ریپورتر ← لاگین ← اشتراک).
                     if not self._user_has_logged_in_account(event.sender_id):
-                        await event.answer(
-                            "🎙 ریپورتر فقط برای کاربرانی است که اکانت خودشان "
-                            "را در ربات لاگین کرده‌اند.", alert=True)
+                        from cianet.bots.ui import UI as _UI
+                        await event.edit(
+                            _UI.screen(
+                                "🎙 ریپورتر",
+                                body=[
+                                    "🎙 برای استفاده از ریپورتر، اول باید اکانتِ"
+                                    " **خودت** را در ربات لاگین کنی.",
+                                    "",
+                                    "چرا؟ چون هر گزارش فقط با اکانتِ خودِ"
+                                    " کاربر ارسال می‌شود — این قانونِ همیشگیِ"
+                                    " این بخش است.",
+                                    "",
+                                    "📱 با لاگین کردن، هم ریپورتر برایت باز"
+                                    " می‌شود هم سلف‌باتِ خودت فعال می‌شود.",
+                                ],
+                                subtitle="یک دقیقه بیشتر طول نمی‌کشد",
+                                hint="پس از لاگین، دوباره «🎙 ریپورتر» را بزن"),
+                            buttons=[
+                                [_UI.confirm("📱 لاگین اکانتِ من",
+                                             "user_login_account")],
+                                _UI.nav_row(),
+                            ],
+                        )
                         return
                     await reporter_module.render_reporter_page(event, self)
                     return
