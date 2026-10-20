@@ -29,6 +29,7 @@ from cianet.core import (
     ADMIN_ID,
     BACKUP_HOURS_IRAN,
     BATCH_LICENSE_MAX,
+    bot_error_alert_text,
     CAP_ACCOUNT_SECURITY,
     CIANET_LANG,
     CONFIG_VALID,
@@ -10170,8 +10171,18 @@ class SaaSBot:
                         pass
                     return
                 print(f"⚠️ [saas_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
+                # v2.19.1 (DIAG): متنِ alert خود-تشخیصی — FloodWait پیامِ
+                # آرام می‌گیرد (خطای گذرای تلگرام است، نه خطای ربات) و
+                # برای OWNER نامِ خطا + جزئیات کوتاهش هم داخل همان alert
+                # می‌آید تا اسکرین‌شاتِ بعدی بدون لاگِ سرور قابلِ تشخیص باشد.
                 try:
-                    await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
+                    _own = False
+                    try:
+                        _own = self._role(event.sender_id) == ROLE_OWNER
+                    except Exception:
+                        pass
+                    await event.answer(
+                        bot_error_alert_text(e, is_owner=_own), alert=True)
                 except Exception:
                     pass
                 return

@@ -31,6 +31,7 @@ from cianet.core import (
     ADMIN_LIST_FILE,
     BACKUP_HOURS_IRAN,
     BOT_STATUS,
+    bot_error_alert_text,
     CAP_ACCOUNT_SECURITY,
     FEATURE_LABELS,
     FONT_CHOICES,
@@ -3956,8 +3957,20 @@ class AdminBot:
                     pass
                 return True
             print(f"⚠️ [admin_bot] خطا در پردازش دکمه: {type(e).__name__}: {e}")
+            # v2.19.1 (DIAG): همان متنِ خود-تشخیصیِ saas — FloodWait پیامِ
+            # آرام می‌گیرد؛ برای OWNER نامِ خطا هم داخل alert می‌آید.
+            # (اگر SaaSBot وصل باشد از _role آن استفاده می‌کنیم؛ در حالتِ
+            # standalone فرض می‌کنیم بیننده مدیر است.)
             try:
-                await event.answer("❌ خطا در پردازش این دکمه. دوباره تلاش کن.", alert=True)
+                _own = True
+                try:
+                    _saas_ref = getattr(self, "saas", None)
+                    if _saas_ref is not None:
+                        _own = _saas_ref._role(event.sender_id) == ROLE_OWNER
+                except Exception:
+                    pass
+                await event.answer(
+                    bot_error_alert_text(e, is_owner=_own), alert=True)
             except Exception:
                 pass
         return True
