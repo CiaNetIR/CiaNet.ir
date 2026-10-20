@@ -1657,10 +1657,20 @@ def init_db() -> None:
     except Exception as _e:
         print(f"⚠️ [init_db] ensure_block_schema failed: {type(_e).__name__}: {_e}")
     # v2.18.0: جدول لاگ ریپورتر (متادیتا فقط — بدون محتوا)
-    try:
-        ensure_reporter_schema()
-    except Exception as _e:
-        print(f"⚠️ [init_db] ensure_reporter_schema failed: {type(_e).__name__}: {_e}")
+    # v2.19.0 (SELF-HEAL): سه تلاش با فاصله — قفلِ لحظه‌ایِ DB موقعِ بوت
+    # (تراکنشِ هم‌زمانِ web_panel) باعث شده بود جدول ساخته نشود و دکمه‌های
+    # ریپورتر روی سرورِ واقعی با «خطا در پردازش» بشکنند. لایه‌ی دومِ درمان،
+    # _ensure_reporter_ready در لحظه‌ی استفاده است.
+    for _attempt_r in range(3):
+        try:
+            ensure_reporter_schema()
+            break
+        except Exception as _e:
+            if _attempt_r == 2:
+                print(f"⚠️ [init_db] ensure_reporter_schema failed after retries: "
+                      f"{type(_e).__name__}: {_e}")
+            else:
+                time.sleep(1.0)
 
 
 def log_action(actor_id, action: str, details: str = "") -> None:
@@ -2045,6 +2055,45 @@ def ensure_reporter_schema() -> None:
         )
 
 
+def _ensure_reporter_ready() -> bool:
+    """v2.19.0 (SELF-HEAL): جدولِ reporter_logs واقعاً قابلِ پرس‌وجوست؟
+
+    ریشه‌یابیِ باگِ production (۲۰۲۶-۱۰-۲۱): مالک روی سرورِ واقعی با فشارِ
+    دکمه‌ی ریپورتر «❌ خطا در پردازش این دکمه» می‌گرفت. علت: init_db در
+    سطحِ ماژول اجرا می‌شود و اگر ensure_reporter_schema در همان لحظه‌ی بوت
+    به قفلِ لحظه‌ایِ DB (مثلاً تراکنشِ web_panel) بخورد، هشدار فقط در کنسول
+    چاپ می‌شود، ربات بوت می‌شود و از آن پس هر خواندنِ سهمیه
+    OperationalError("no such table: reporter_logs") می‌دهد — که در
+    dispatcher به پیامِ عمومیِ خطا ترجمه می‌شود.
+
+    درمان: قبل از هر خواندن/نوشتنِ جدول، یک SELECT ارزان (LIMIT 1)؛ اگر
+    جدول نبود همین‌جا ساخته می‌شود و دوباره چک می‌شود. اگر DB واقعاً
+    ناتوان بود (دیسک پر/فایل فقط‌خواندنی)، False برمی‌گردد تا caller
+    به‌جای exception با مقدارِ امن (0/False/[]) ادامه دهد — لاگِ ریپورتر
+    متادیتای غیرحیاتی است و نباید تعاملِ کاربر را بشکند.
+    """
+    try:
+        with _conn() as c:
+            c.execute("SELECT 1 FROM reporter_logs LIMIT 1")
+        return True
+    except sqlite3.OperationalError:
+        pass  # جدول نیست → ساخت (پایین)
+    except Exception as _e:
+        print(f"⚠️ [core] reporter readiness check failed: {type(_e).__name__}: {_e}")
+        return False
+    try:
+        ensure_reporter_schema()
+    except Exception as _e:
+        print(f"⚠️ [core] reporter self-heal failed: {type(_e).__name__}: {_e}")
+        return False
+    try:
+        with _conn() as c:
+            c.execute("SELECT 1 FROM reporter_logs LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
 def reporter_enabled() -> bool:
     """سوییچِ رانتایمِ مالک (پیش‌فرض روشن). جدا از REPORTER_ENABLEDِ
     کامپایل-تایم در cianet/bots/reporter.py که کیل‌سوییچِ اصلی است."""
@@ -2065,6 +2114,8 @@ def reporter_today_count(user_id: int) -> int:
     گزارش‌های ناموفق هم شمرده می‌شوند تا خطای سرور تبدیل به حلقه‌ی
     تلاشِ بی‌سقف نشود."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not _ensure_reporter_ready():
+        return 0  # جدول قابلِ ساخت/خواندن نیست — سهمیه را محدود نشان نده
     with _conn() as c:
         row = c.execute(
             "SELECT COUNT(*) AS n FROM reporter_logs "
@@ -2085,6 +2136,8 @@ def reporter_recently_reported(user_id: int, target_id, hours: int = REPORTER_DU
     رشته‌ی هدف انجام می‌شود تا دورزدنِ سهمیه با یوزرنیم/آیدیِ متناوب سخت بماند."""
     if target_id is None:
         return False
+    if not _ensure_reporter_ready():
+        return False  # جدول نیست → «قبلاً گزارش داده» فرض نکن (fail-open امن)
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(_DATETIME_FMT)
     with _conn() as c:
         row = c.execute(
@@ -2099,6 +2152,11 @@ def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
                      category: str, with_messages: bool = False,
                      status: str = "ok") -> None:
     """ثبتِ یک گزارش در تاریخچه‌ی scoped کاربر (متادیتا فقط)."""
+    if not _ensure_reporter_ready():
+        # گزارشِ واقعی ممکن است به تلگرام رسیده باشد — شکستِ لاگ نباید
+        # رسیدِ کاربر را خراب کند؛ فقط در کنسول هشدار می‌دهیم.
+        print("⚠️ [core] add_reporter_log skipped: reporter table unavailable")
+        return
     with _conn() as c:
         c.execute(
             "INSERT INTO reporter_logs "
@@ -2113,6 +2171,8 @@ def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
 
 def list_reporter_logs(user_id: int, limit: int = 10) -> list:
     """آخرین گزارش‌های همین کاربر — جدیدترین اول (الگوی scoped مالکیت)."""
+    if not _ensure_reporter_ready():
+        return []
     with _conn() as c:
         rows = c.execute(
             "SELECT target, target_id, target_type, category, with_messages, status, created_at "
@@ -2126,6 +2186,9 @@ def list_reporter_logs(user_id: int, limit: int = 10) -> list:
 def reporter_stats() -> dict:
     """آمار تجمعی برای پنل مالک — بدون محتوای شخصی کاربران."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not _ensure_reporter_ready():
+        # v2.19.0 SELF-HEAL: پنل مالک هم نباید روی جدولِ ناتواب بشکند
+        return {"total": 0, "users": 0, "today": 0, "by_category": {}, "ok": 0}
     with _conn() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM reporter_logs").fetchone()["n"]
         users = c.execute(
@@ -7940,7 +8003,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-20-v2.18.0"
+BUILD_VERSION = "2026-10-21-v2.19.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
