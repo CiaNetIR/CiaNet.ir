@@ -89,6 +89,9 @@ from cianet.core import (
     WIZ_PRICING_DAYS,
     WIZ_PRICING_NEW_NAME,
     WIZ_PRICING_PRICE,
+    WIZ_REPORTER_CAP,
+    WIZ_REPORTER_FLOW,
+    WIZ_REPORTER_TARGET,
     WIZ_SET_CARD,
     WIZ_SET_CHANNEL,
     WIZ_SET_WALLET,
@@ -7026,6 +7029,11 @@ class SaaSBot:
             )
             return True
 
+        # v2.18.0: ورودی‌های متنیِ ریپورتر (هدف / سقف مالک / مرحله‌ی دکمه‌ای).
+        # کل منطق در cianet/bots/reporter.py — اینجا فقط دیلگیت.
+        if state in (WIZ_REPORTER_TARGET, WIZ_REPORTER_FLOW, WIZ_REPORTER_CAP):
+            return await reporter_module.handle_reporter_text(event, self, wiz)
+
         if state == WIZ_TICKET_MSG:
             # v1.8.0: اگه تیکت هنوز ساخته نشده (اولین پیام بعد از انتخاب واحد)،
             # الان بساز. این کار از ساختن تیکت‌های الکی جلوگیری می‌کنه.
@@ -9950,6 +9958,17 @@ class SaaSBot:
                             "را در ربات لاگین کرده‌اند.", alert=True)
                         return
                     await reporter_module.render_reporter_page(event, self)
+                    return
+                # v2.18.0: اکشن‌های داخل بخش ریپورتر (پیشوندِ «reporter:»).
+                # همان گیتِ لاگین دوباره چک می‌شود (دفاع‌در‌عمق) و کل منطق
+                # در cianet/bots/reporter.py است.
+                if data.startswith("reporter:"):
+                    if not self._user_has_logged_in_account(event.sender_id):
+                        await event.answer(
+                            "🎙 ریپورتر فقط برای کاربرانی است که اکانت خودشان "
+                            "را در ربات لاگین کرده‌اند.", alert=True)
+                        return
+                    await reporter_module.handle_reporter_action(event, self, data)
                     return
                 if data.startswith("ticket_unit:"):  # v1.8.0
                     unit_id = data.split(":", 1)[1]

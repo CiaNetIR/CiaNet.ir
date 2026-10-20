@@ -1,10 +1,22 @@
 # -*- coding: utf-8 -*-
-"""🎙 Reporter — بخش «ریپورتر» (v2.17.1 · آماده‌سازی بر پایه‌ی ZIP واقعی «Reporter-V2»)
+"""🎙 Reporter — بخش «ریپورتر» (v2.18.0 · فعال روی مسیرِ «اصل طلایی»)
 
-این ماژول **اسکلتِ آماده** بخش ریپورتر است. طبق درخواست مالک، روشِ دقیقِ کار
-بعداً اعلام می‌شود؛ تا آن زمان `REPORTER_ENABLED = False` می‌ماند و دکمه‌ی
-«🎙 ریپورتر» صفحه‌ی «به‌زودی» نشان می‌دهد. فعال‌سازیِ آینده فقط با همین
-سوییچ و منطقِ همین فایل انجام می‌شود.
+گزارشِ کانال/گروه/اکانتِ **جعلی یا کلاهبردار** — با دو دسته‌ی درخواستی مالک:
+🎭 کلاهبرداری (Scam) · 🃏 جعلی (Fake)؛ و سه نوع هدف: کانال / گروه / اکانت.
+«ریپورت کل متن‌های کانال/گروه» به‌صورتِ پیوست‌کردنِ پیام‌های اخیر (تا ۱۰
+مورد) به‌عنوان شواهد به همان گزارش پیاده شده است — دقیقاً همان رفتارِ
+کلاینت رسمی تلگرام موقع گزارش.
+
+⛔ مرزِ این بخش (اصل طلایی — خواسته‌ی ثبت‌شده‌ی خود مالک):
+  هر گزارش فقط با **اکانتِ خودِ کاربرِ گزارش‌دهنده** ارسال می‌شود؛ یک گزارش
+  برای هر هدف در ۲۴ ساعت؛ سقفِ روزانه. استخر اکانت/ارسال خودکار از
+  سشن‌های دیگران هرگز به این ماژول اضافه نشود — سشنِ مشتری‌ها فقط برای
+  سلف‌بات روی اکانتِ خودشان داده شده و گزارشِ انبوهِ هماهنگ هم بنِ آبشاری
+  کل سرویس است (همان دلیلی که استخر ZIP در v2.17.1 حذف شد).
+
+دو لایه‌ی سوییچ:
+  • REPORTER_ENABLED (همین فایل، کامپایل-تایم) — کیل‌سوییچ اصلی.
+  • settings.reporter_enabled (رانتایم، پنل مالک) — پیش‌فرض روشن.
 
 ════════════════════════════════════════════════════════════════════
  بخش ۱ — آنالیز ZIP «Reporter-V2» (دریافت‌شده ۲۰۲۶-۱۰-۲۰ · سالم و کامل)
@@ -194,7 +206,7 @@
 
 import re
 
-REPORTER_ENABLED = False  # فلگِ فعال‌سازی — تا اعلامِ مشخصاتِ دقیق، خاموش
+REPORTER_ENABLED = True  # کیل‌سوییچِ کامپایل-تایم — v2.18.0: فعال‌سازی روی مسیرِ اصلِ طلایی
 
 # ════════════════════════════════════════════════════════════════════
 # بخش ۳ — بلوک‌های ساختیِ آماده (PORT ۱:۱ از Reporter-V2/bot.py)
@@ -213,6 +225,8 @@ from telethon.tl.types import (
     InputReportReasonIllegalDrugs,
     InputReportReasonPersonalDetails,
     InputReportReasonFake,
+    InputReportReasonOther,
+    InputReportReasonGeoIrrelevant,
 )
 
 # ── دسته‌بندی گزارش‌ها (کلیدها = عین Reporter-V2؛ برچسب‌ها فارسی برای UI) ──
@@ -251,8 +265,11 @@ REPORTER_SUBCATEGORIES = {
 # دسته‌هایی که توضیح متنی (comment) برایشان الزامی است — عین ZIP
 REPORTER_REQUIRE_COMMENT = ("personal_data", "copyright", "other")
 
-# نقشه‌ی دسته → شیء دلیل تلثونی — عین ZIP (۸ از ۹ دسته؛ «other» عمداً
-# غایب است و در send_reporter_action به Spam برمی‌گردد — رفتار حفظ شد)
+# نقشه‌ی دسته → شیء دلیل تلثونی — ۸ دسته‌ی ZIP + دو کلیدِ جریان v2.18.0.
+# نکته‌ی telethon 1.45: دلیلِ مستقلِ «Scam» در لایه‌ی عمومی وجود ندارد؛
+# دسته‌ی کلاهبرداری با InputReportReasonOther + پیامِ «Scam» ارسال می‌شود
+# (مسیر استاندارد انتقالِ این دسته در API عمومی) و در جریانِ گزینه‌محورِ
+# پیام‌ها، کلیدواژه‌های scam/fraud با گزینه‌ی سرور تطبیق داده می‌شوند.
 REPORTER_REASONS_MAP = {
     "spam": InputReportReasonSpam(),
     "violence": InputReportReasonViolence(),
@@ -262,7 +279,27 @@ REPORTER_REASONS_MAP = {
     "illegal_goods": InputReportReasonIllegalDrugs(),
     "personal_data": InputReportReasonPersonalDetails(),
     "scam_fraud": InputReportReasonFake(),
+    # ── v2.18.0: دو دسته‌ی جریانِ فعال ──
+    "fake": InputReportReasonFake(),
+    "scam": InputReportReasonOther(),
 }
+
+# دو دسته‌ی درخواستی مالک (v2.18.0) — برچسب‌های UI جریانِ فعال
+REPORTER_QUICK_CATEGORIES = {
+    "scam": "🎭 کلاهبرداری (Scam)",
+    "fake": "🃏 جعلی (Fake)",
+}
+
+# سه نوع هدف (v2.18.0) — برچسب‌های UI
+REPORTER_TARGET_TYPES = {
+    "channel": "📡 کانال",
+    "group": "👥 گروه",
+    "user": "👤 اکانت",
+}
+
+# دسته‌ی کلاهبرداری در گزارشِ سطح-peer با این متن ارسال می‌شود (فیلدِ
+# message گزارش — دلیلِ Other بدون متن بی‌معناست)
+_REPORT_SCAM_COMMENT = "Scam / fraud"
 
 # ── پارسرهای هدف (لینک/یوزرنیم/آیدی) — PORT ۱:۱ با همان رفتار ──
 
@@ -344,6 +381,9 @@ _REPORT_OPTION_KEYWORDS = {
     "scam_fraud": ("fake", "scam", "fraud", "جعل", "کلاهبرداری"),
     "copyright": ("copyright", "کپی"),
     "other": ("other", "سایر", "دیگر"),
+    # ── v2.18.0: دو دسته‌ی جریانِ فعال ──
+    "fake": ("fake", "جعل"),
+    "scam": ("scam", "fraud", "کلاهبرداری"),
 }
 
 
@@ -472,51 +512,655 @@ async def send_reporter_action(client, peer, message_ids, category,
 
 
 # ════════════════════════════════════════════════════════════════════
-# بخش ۴ — رابط عمومی (رفتار v2.17.0 حفظ شده؛ بدون تغییرِ معنایی)
+# بخش ۴ — رابط عمومی (v2.18.0 · فعال‌سازی روی مسیرِ اصلِ طلایی)
 # ════════════════════════════════════════════════════════════════════
+#
+# معماری فعال‌سازی:
+#   • هر گزارش فقط با اکانتِ خودِ کاربرِ گزارش‌دهنده ارسال می‌شود (SelfBotِ
+#     در حال اجرای او از رجیستری ACCOUNTS) — نه استخر اکانت، نه سشن دیگران.
+#   • یک گزارش برای هر هدف در ۲۴ ساعت (reporter_recently_reported) +
+#     سقفِ روزانه (reporter_daily_cap؛ پیش‌فرض ۱۰، مالک بین ۱ تا ۳۰).
+#   • «ریپورت کل متن‌های کانال/گروه» = پیوستِ تا ۱۰ پیامِ اخیر به همان
+#     گزارش به‌عنوان شواهد (فقط id عددی — محتوا ذخیره نمی‌شود).
+#   • تاریخچه و آمار فقط scoped به همان کاربر (الگوی _account_visible).
+#   • همه‌ی importهای cianet.core داخل توابع هستند تا خلوصِ importِ
+#     سطح-ماژول (تست T21) حفظ شود.
+#
+# نقشه‌ی مسیرها (callbackهایی که saas.callback_h با پیشوند «reporter:»
+# به handle_reporter_action می‌فرستد):
+#   reporter:home             صفحه‌ی اصلی (لغو هر جریان باز)
+#   reporter:new              انتخاب نوع هدف
+#   reporter:ttype:<t>        دریافت متنِ هدف (ویزارد WIZ_REPORTER_TARGET)
+#   reporter:scope:<s>        دامنه: فقط هدف | همراه با پیام‌های اخیر
+#   reporter:cat:<c>          دسته: scam | fake
+#   reporter:go               تأیید نهایی → اجرا با اکانت خودِ کاربر
+#   reporter:cancel           انصراف از جریان
+#   reporter:history          تاریخچه‌ی گزارش‌های خودِ کاربر
+#   reporter:owner            پنل مالک (روشن/خاموش + سقف + آمار)
+#   reporter:owner:toggle     سوییچ رانتایم مالک
+#   reporter:owner:cap        دریافت سقفِ جدید (ویزارد WIZ_REPORTER_CAP)
 
 
-async def render_reporter_page(event, saas_bot) -> None:
-    """صفحه‌ی اصلیِ ریپورتر — تنها نقطه‌ی ورودِ بخش ریپورتر به ربات.
-
-    فعلاً صفحه‌ی «به‌زودی» نشان می‌دهد. بعد از فعال‌سازی، این تابع
-    منوی اصلیِ گزارش‌دهی را render می‌کند (گزارش تکی/چند‌کاربر/استوری/
-    چند‌پیام + تاریخچه + سقف باقی‌مانده — طبق دستورکارِ داک‌استرینگ).
-    """
-    from cianet.bots.ui import UI  # import محلی — وابستگیِ زمانِ import صفر
-
+def _eff_enabled() -> bool:
+    """کیل‌سوییچِ کامپایل-تایم AND سوییچِ رانتایمِ مالک."""
     if not REPORTER_ENABLED:
-        await event.edit(
-            "🎙 **ریپورتر**\n\n"
-            "🚧 این بخش در حال ساخت است و به‌زودی فعال می‌شود.\n"
-            "⏳ لطفاً منتظر خبرهای بعدی باشید.",
-            buttons=[UI.nav_row()],
-        )
-        return
+        return False
+    from cianet.core import reporter_enabled
+    return reporter_enabled()
 
-    # ── منطق اصلی (آینده) — مشخصات از سمت مالک ──
-    # الگوی پیشنهادی (طبق نقشه‌ی ادغام):
-    #   uid = event.sender_id
-    #   کلاینت گزارش‌دهنده = SelfBot خودِ کاربر (اکانتِ لاگین‌شده)،
-    #   نه استخر اکانت. دسته‌بندی/پارسرها/ارسال از بخش ۳ همین فایل.
+
+def _is_owner(saas_bot, uid: int) -> bool:
+    from cianet.core import ROLE_OWNER
+    try:
+        return saas_bot._role(uid) == ROLE_OWNER
+    except Exception:
+        return False
+
+
+def _park(saas_bot, uid: int, state: str, data: dict) -> None:
+    """ثبتِ وضعیتِ جریان در ویزاردهای SaaSBot (با TTL و پاکسازی خودکار)."""
+    saas_bot._start_own_wizard(uid, state, data)
+
+
+def _flow(saas_bot, uid: int) -> dict:
+    """داده‌ی جریانِ بازِ همین کاربر (یا None اگر جریانی باز نیست)."""
+    wiz = saas_bot.wizards.get(uid)
+    if wiz and wiz.get("state") == "reporter_flow":
+        return wiz.get("data") or {}
+    return {}
+
+
+def _back_row(route: str = "reporter:home"):
+    """ردیف بازگشتِ داخلیِ ریپورتر + خروجِ همیشه-امن به منوی اصلی."""
+    from cianet.bots.ui import UI
+    from cianet.core import NAV_HOME
+    return [UI.btn(f"{UI.BACK} {UI.L_BACK}", route, style="primary"),
+            UI.btn(f"{UI.HOME} {UI.L_HOME}", NAV_HOME, style="primary")]
+
+
+async def _render_coming_soon(event) -> None:
+    from cianet.bots.ui import UI
     await event.edit(
-        "🎙 **ریپورتر**\n\n(منطق اصلی اینجا render می‌شود.)",
+        "🎙 **ریپورتر**\n\n"
+        "🚧 این بخش در حال ساخت است و به‌زودی فعال می‌شود.\n"
+        "⏳ لطفاً منتظر خبرهای بعدی باشید.",
         buttons=[UI.nav_row()],
     )
 
 
-async def handle_reporter_action(event, saas_bot, action: str) -> None:
-    """هندلرِ اکشن‌های داخل بخش ریپورتر (پیشوندِ «reporter:»).
+def _user_client(saas_bot, uid: int):
+    """کلاینتِ تلثونیِ «اکانتِ خودِ همین کاربر» که الان در حال اجراست.
 
-    فعلاً استفاده‌ای ندارد؛ بعد از فعال‌سازی، callback_h یک شاخه برای
-    `data.startswith("reporter:")` اضافه می‌کند و action را به همین‌جا
-    می‌فرستد (گام ۳ دستورکار در داک‌استرینگ).
+    فقط اولین اکانتِ در حال اجرای متعلق به خودِ او — هرگز اکانت دیگری.
+    خروجی: (tag, client) یا (None, None).
     """
-    from cianet.bots.ui import UI
+    from cianet.core import ACCOUNTS, accounts_of_user, is_running
+    try:
+        cfg = saas_bot.sb.load_config()
+    except Exception:
+        return None, None
+    for tag in accounts_of_user(cfg, uid):
+        if is_running(tag):
+            entry = ACCOUNTS.get(tag)
+            client = getattr(getattr(entry, "bot", None), "client", None) if entry else None
+            if client is not None:
+                return tag, client
+    return None, None
 
-    if not REPORTER_ENABLED:
-        await event.answer("🎙 ریپورتر هنوز فعال نشده است.", alert=True)
+
+# ─────────────────────────── صفحه‌ها ───────────────────────────
+
+
+async def render_reporter_page(event, saas_bot) -> None:
+    """صفحه‌ی اصلیِ ریپورتر — تنها نقطه‌ی ورود (route: user_reporter)."""
+    from cianet.bots.ui import UI
+    from cianet.core import reporter_daily_cap, reporter_quota_left
+
+    uid = event.sender_id
+
+    if not _eff_enabled():
+        # مالکِ خاموش‌شده باید بتواند دوباره روشن کند → دکمه‌ی تنظیمات
+        if _is_owner(saas_bot, uid):
+            await event.edit(
+                UI.screen("🎙 ریپورتر",
+                          body=["🚧 این بخش توسط مالک غیرفعال شده است.",
+                                "",
+                                "از «⚙️ تنظیمات ریپورتر» می‌توانید آن را دوباره روشن کنید."]),
+                buttons=[[UI.go("⚙️ تنظیمات ریپورتر (مالک)", "reporter:owner")],
+                         UI.nav_row()],
+            )
+        else:
+            await _render_coming_soon(event)
         return
-    # ── منطق اکشن‌ها (آینده) — مشخصات از سمت مالک ──
-    await event.edit("🎙 ریپورتر — اکشن: " + action,
-                     buttons=[UI.nav_row()])
+
+    # لغوِ هر جریانِ باز (ورودِ دوباره = شروعِ تمیز)
+    saas_bot.wizards.pop(uid, None)
+
+    cap = reporter_daily_cap()
+    left = reporter_quota_left(uid)
+    rows = [
+        [UI.go("🎯 گزارش جدید", "reporter:new")],
+        [UI.go("📜 تاریخچه گزارش‌ها", "reporter:history")],
+    ]
+    if _is_owner(saas_bot, uid):
+        rows.insert(2, [UI.go("⚙️ تنظیمات ریپورتر (مالک)", "reporter:owner")])
+
+    body = [
+        "گزارشِ **کانال / گروه / اکانتِ جعلی یا کلاهبردار** — دقیقاً مثل دکمه‌ی"
+        " Report خودِ تلگرام، ولی مرتب و با رسید و تاریخچه.",
+        "",
+        "**قوانین:**",
+        f"• هر گزارش با **اکانتِ خودِ شما** ارسال می‌شود",
+        f"• برای هر هدف، یک گزارش در ۲۴ ساعت",
+        f"• سقفِ روزانه: {cap} گزارش",
+        "",
+        f"🧮 سهمیه‌ی باقی‌مانده‌ی امروز: **{left} از {cap}**",
+    ]
+    await event.edit(
+        UI.screen("🎙 ریپورتر", body=body,
+                  subtitle="با اکانتِ خودتان، به تلگرام گزارش بدهید"),
+        buttons=rows + [UI.nav_row()],
+    )
+
+
+async def _page_ttype(event) -> None:
+    from cianet.bots.ui import UI
+    body = [
+        "چه چیزی را می‌خواهید گزارش کنید؟",
+        "",
+        "📡 کانال — کانالی که خودش را چیزی جا زده یا کلاهبرداری می‌کند",
+        "👥 گروه — گروهِ کلاهبرداری/جعلی",
+        "👤 اکانت — کاربری که جعلی است یا کلاهبرداری می‌کند",
+    ]
+    rows = [
+        [UI.go("📡 کانال", "reporter:ttype:channel"),
+         UI.go("👥 گروه", "reporter:ttype:group")],
+        [UI.go("👤 اکانت", "reporter:ttype:user")],
+    ]
+    await event.edit(UI.screen("🎯 نوع هدف", body=body), buttons=rows + _back_row())
+
+
+async def _page_target_prompt(event, ttype: str) -> None:
+    from cianet.bots.ui import UI
+    label = REPORTER_TARGET_TYPES.get(ttype, ttype)
+    body = [
+        f"هدفِ ({label}) را بفرستید — یکی از این سه شکل:",
+        "",
+        "• یوزرنیم: `@name`",
+        "• لینک: `https://t.me/name`",
+        "• آیدی عددی",
+        "",
+        "هر بار فقط **یک هدف**.",
+    ]
+    await event.edit(
+        UI.screen("🎯 هدف را بفرستید", body=body),
+        buttons=[_cancel_row()],
+    )
+
+
+def _cancel_row():
+    from cianet.bots.ui import UI
+    return [UI.neutral(UI.L_CANCEL, "reporter:cancel")]
+
+
+async def _page_scope(event, d: dict) -> None:
+    """دامنه‌ی گزارش برای کانال/گروه: فقط خودِ هدف یا همراه با شواهد."""
+    from cianet.bots.ui import UI
+    body = [
+        f"**هدف:** {_target_label(d)}",
+        "",
+        "دامنه‌ی گزارش را انتخاب کنید:",
+        "",
+        "🎯 **فقط خودِ هدف** — گزارش روی خودِ کانال/گروه ثبت می‌شود",
+        "📨 **همراه با پیام‌های اخیر** — تا ۱۰ پیامِ آخر به‌عنوان شواهد به"
+        " همان گزارش پیوست می‌شود (مثل Report خودِ تلگرام)",
+    ]
+    rows = [
+        [UI.go("🎯 فقط خودِ هدف", "reporter:scope:peer")],
+        [UI.go("📨 همراه با پیام‌های اخیر", "reporter:scope:msgs")],
+    ]
+    await event.edit(UI.screen("📨 دامنه‌ی گزارش", body=body),
+                     buttons=rows + _back_row())
+
+
+def _target_label(d: dict) -> str:
+    ttype = REPORTER_TARGET_TYPES.get(d.get("ttype", ""), d.get("ttype", "?"))
+    name = d.get("info", {}).get("title") or d.get("info", {}).get("name") or d.get("target", "?")
+    username = d.get("info", {}).get("username")
+    return f"{name} ({ttype}{(' · ' + username) if username else ''})"
+
+
+async def _page_cat(event, d: dict) -> None:
+    from cianet.bots.ui import UI
+    body = [
+        f"**هدف:** {_target_label(d)}",
+        "",
+        "این هدف چه مشکلی دارد؟",
+        "",
+        "🎭 **کلاهبرداری** — گرفتن پول/دارایی با فریب، سرمایه‌گذاریِ قلابی، فیشینگ",
+        "🃏 **جعلی** — جا زدنِ خودش به کانال/شخص/برندِ دیگری، هویتِ قلابی",
+    ]
+    rows = [
+        [UI.go("🎭 کلاهبرداری (Scam)", "reporter:cat:scam")],
+        [UI.go("🃏 جعلی (Fake)", "reporter:cat:fake")],
+    ]
+    await event.edit(UI.screen("🎭 نوع تخلف", body=body), buttons=rows + _back_row())
+
+
+async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
+    from cianet.bots.ui import UI
+    scope_txt = ("همراه با حداکثر ۱۰ پیامِ اخیر (شواهد)"
+                 if d.get("scope") == "msgs" else "فقط خودِ هدف")
+    cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
+    body = [
+        f"**هدف:** {_target_label(d)}",
+        f"**دسته:** {cat_txt}",
+        f"**دامنه:** {scope_txt}",
+        "**ارسال با:** اکانتِ خودِ شما — **یک گزارش**",
+        "",
+        "⚠️ بعد از ارسال، همین هدف تا ۲۴ ساعت قابل گزارشِ مجدد توسط شما نیست"
+        " و از سهمیه‌ی امروزتان یک گزارش کم می‌شود.",
+    ]
+    rows = [
+        [UI.confirm("✅ ارسال گزارش", "reporter:go")],
+        _cancel_row(),
+    ]
+    await event.edit(UI.screen("⚠️ تأیید نهایی", body=body,
+                               subtitle="یک گزارش، با اکانتِ خودِ شما"),
+                     buttons=rows + _back_row())
+
+
+async def _page_history(event, saas_bot, uid: int) -> None:
+    from cianet.bots.ui import UI
+    from cianet.core import jalali_date
+    from datetime import datetime
+    logs = list_reporter(uid)
+    if not logs:
+        body = ["هنوز گزارشی ثبت نشده است.",
+                "", "اولین گزارش را از «🎯 گزارش جدید» شروع کنید."]
+    else:
+        body = [f"آخرین {len(logs)} گزارشِ شما:"]
+        for r in logs:
+            try:
+                dt = datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M:%S")
+                when = f"{jalali_date(dt)} · {dt.strftime('%H:%M')}"
+            except Exception:
+                when = r["created_at"]
+            cat = REPORTER_QUICK_CATEGORIES.get(r["category"], r["category"])
+            ttype = REPORTER_TARGET_TYPES.get(r["target_type"],
+                                              r["target_type"] or "?")
+            icon = "✅" if r["status"] == "ok" else "❌"
+            body.append(f"{icon} `{r['target']}` · {ttype} · {cat} · {when}")
+    await event.edit(UI.screen("📜 تاریخچه گزارش‌ها", body=body),
+                     buttons=_back_row())
+
+
+async def _page_owner(event, saas_bot, uid: int) -> None:
+    from cianet.bots.ui import UI
+    from cianet.core import (REPORTER_CAP_MAX, REPORTER_CAP_MIN,
+                             reporter_daily_cap, reporter_enabled, reporter_stats)
+    on = reporter_enabled()
+    cap = reporter_daily_cap()
+    st = reporter_stats()
+    cat_lines = [f"• {REPORTER_QUICK_CATEGORIES.get(k, k)}: {v}"
+                 for k, v in sorted(st["by_category"].items())] or ["• هنوز گزارشی ثبت نشده"]
+    body = [
+        f"**وضعیت:** {'🟢 روشن' if on else '🔴 خاموش'} (پیش‌فرض: روشن)",
+        f"**سقفِ روزانه‌ی هر کاربر:** {cap} گزارش "
+        f"(بازه‌ی مجاز: {REPORTER_CAP_MIN} تا {REPORTER_CAP_MAX})",
+        "",
+        "**آمار:**",
+        f"• امروز: {st['today']} گزارش · مجموع: {st['total']} "
+        f"({st['ok']} موفق)",
+        f"• کاربرانی که گزارش داده‌اند: {st['users']}",
+        "• تفکیک دسته:",
+        *cat_lines,
+    ]
+    rows = [
+        [UI.toggle("ریپورتر روشن/خاموش", on, "reporter:owner:toggle")],
+        [UI.go(f"± سقفِ روزانه (فعلاً {cap})", "reporter:owner:cap")],
+        [UI.refresh("reporter:owner")],
+    ]
+    await event.edit(UI.screen("⚙️ تنظیمات ریپورتر", body=body,
+                               subtitle="پنل مالک — سوییچ، سقف و آمار"),
+                     buttons=rows + _back_row())
+
+
+def list_reporter(uid: int):
+    from cianet.core import list_reporter_logs
+    return list_reporter_logs(uid, limit=10)
+
+
+# ───────────────────── اجرای گزارش ─────────────────────
+
+
+async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
+    """اجرای یک گزارش — با اکانتِ خودِ کاربر، فقط یک گزارش."""
+    from cianet.bots.ui import UI
+    from cianet.core import (add_reporter_log, reporter_quota_left,
+                             reporter_recently_reported)
+
+    # گیت‌های لحظه‌ی ارسال (دوباره چک می‌شوند — وضعیت ممکن است عوض شده باشد)
+    if not _eff_enabled():
+        await event.answer("🎙 ریپورتر توسط مالک غیرفعال شده است.", alert=True)
+        return
+    if reporter_quota_left(uid) <= 0:
+        await event.answer("⛔ سهمیه‌ی گزارشِ امروزِ شما تمام شده است — فردا.",
+                           alert=True)
+        return
+    info = d.get("info", {})
+    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id")):
+        await event.answer("⛔ این هدف را در ۲۴ ساعتِ اخیر گزارش داده‌اید.",
+                           alert=True)
+        return
+
+    tag, client = _user_client(saas_bot, uid)
+    if client is None:
+        await event.edit(
+            UI.screen("❌ اکانتِ شما روشن نیست",
+                      body=["برای ارسال گزارش، اکانتِ خودِ شما باید در حال اجرا باشد.",
+                            "",
+                            "از «🔊 مدیریت اکانت‌ها» اکانت‌تان را روشن کنید و دوباره"
+                            " به این بخش بیایید."],
+                      hint="گزارش فقط با اکانتِ خودِ شما ارسال می‌شود — نه اکانت دیگران."),
+            buttons=_back_row(),
+        )
+        return
+
+    cat = d.get("cat", "")
+    scope = d.get("scope", "peer")
+    target = d.get("target", "")
+    await event.answer()  # بستنِ اسپینر قبل از کارِ شبکه‌ای
+
+    msg_ids = []
+    try:
+        entity = await client.get_entity(target)
+        if scope == "msgs" and info.get("type") in ("channel", "group"):
+            # «ریپورت کل متن‌ها»: تا ۱۰ پیامِ اخیر به‌عنوان شواهد — فقط id،
+            # محتوا خوانده/ذخیره نمی‌شود (حریم خصوصی + پهنای باند).
+            recent = await client.get_messages(entity, limit=10)
+            msg_ids = [m.id for m in recent if getattr(m, "id", None)
+                       and not getattr(m, "action", None)]
+    except Exception as e:
+        await _render_receipt(event, d, ok=False,
+                              error=f"حل کردنِ هدف ناموفق بود: {str(e)[:60]}",
+                              left=reporter_quota_left(uid))
+        return
+
+    comment = _REPORT_SCAM_COMMENT if cat == "scam" else ""
+    result = await send_reporter_action(client, entity, msg_ids or None, cat,
+                                        comment=comment)
+    ok = bool(result.get("success"))
+    err = result.get("error", "")
+    if not ok and result.get("needs_comment"):
+        err = "این دسته به توضیح متنی نیاز دارد — دوباره تلاش کنید"
+    add_reporter_log(uid, target, info.get("id"), info.get("type", ""),
+                     cat, with_messages=bool(msg_ids),
+                     status="ok" if ok else f"error")
+    saas_bot.wizards.pop(uid, None)
+    await _render_receipt(event, d, ok=ok, error=err,
+                          left=reporter_quota_left(uid), n_msgs=len(msg_ids))
+
+
+async def _render_receipt(event, d: dict, ok: bool, left: int,
+                          error: str = "", n_msgs: int = 0) -> None:
+    from cianet.bots.ui import UI
+    cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
+    body = [
+        f"**{'✅ گزارش ارسال شد' if ok else '❌ ارسال ناموفق بود'}**",
+        "",
+        f"**هدف:** {_target_label(d)}",
+        f"**دسته:** {cat_txt}",
+        f"**شواهد:** {n_msgs} پیام" if n_msgs else "**شواهد:** بدون پیام",
+    ]
+    if error:
+        body += ["", f"**علت خطا:** {error}"]
+    body += ["", f"🧮 سهمیه‌ی باقی‌مانده‌ی امروز: **{left}**"]
+    rows = [
+        [UI.go("🎯 گزارش جدید", "reporter:new")],
+        [UI.go("📜 تاریخچه", "reporter:history")],
+    ]
+    await event.edit(UI.screen("🧾 رسید گزارش", body=body), buttons=rows + _back_row())
+
+
+# ───────────────────── روترِ اکشن‌ها ─────────────────────
+
+
+async def handle_reporter_action(event, saas_bot, action: str) -> None:
+    """هندلرِ اکشن‌های داخل بخش ریپورتر (پیشوندِ «reporter:»)."""
+    from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_FLOW,
+                             WIZ_REPORTER_TARGET, log_action, reporter_daily_cap,
+                             reporter_enabled, set_setting,
+                             REPORTER_CAP_MAX, REPORTER_CAP_MIN,
+                             REPORTER_CAP_SETTING, REPORTER_ENABLED_SETTING)
+
+    uid = event.sender_id
+
+    # گیتِ لاگین (اول از همه — همان گیتِ route اصلی؛ دفاع‌در‌عمق)
+    if not saas_bot._user_has_logged_in_account(uid):
+        await event.answer(
+            "🎙 ریپورتر فقط برای کاربرانی است که اکانت خودشان "
+            "را در ربات لاگین کرده‌اند.", alert=True)
+        return
+
+    # ── پنل مالک — قبل از گیتِ فعال‌بودن، تا در حالتِ خاموش هم بتوان
+    #    دوباره روشن کرد (وگرنه سوییچ در حالتِ خاموش برای همیشه قفل می‌شد)
+    if action.startswith("reporter:owner"):
+        if saas_bot._role(uid) != ROLE_OWNER:
+            await event.answer("⛔ این بخش فقط برای مالک است.", alert=True)
+            return
+        if action == "reporter:owner":
+            await _page_owner(event, saas_bot, uid)
+            return
+        if action == "reporter:owner:toggle":
+            new_val = "0" if reporter_enabled() else "1"
+            set_setting(REPORTER_ENABLED_SETTING, new_val, actor_id=uid)
+            log_action(uid, "reporter_toggle", f"enabled={new_val}")
+            await _page_owner(event, saas_bot, uid)
+            return
+        if action == "reporter:owner:cap":
+            _park(saas_bot, uid, WIZ_REPORTER_CAP,
+                  {"current": reporter_daily_cap()})
+            from cianet.bots.ui import UI
+            await event.edit(
+                UI.screen("± سقفِ روزانه",
+                          body=[f"سقفِ فعلی: **{reporter_daily_cap()}**",
+                                "",
+                                f"عددِ جدید را بفرستید (بین {REPORTER_CAP_MIN} تا {REPORTER_CAP_MAX})."],
+                          hint="سقفِ بالاتر یعنی ریسکِ بیشتر برای اکانتِ خودِ کاربر —"
+                               " مقدارِ محافظه‌کارانه توصیه می‌شود."),
+                buttons=[_cancel_row()],
+            )
+            return
+        await event.answer("مسیر نامعتبر است.", alert=True)
+        return
+
+    if not _eff_enabled():
+        # کیل‌سوییچِ خاموش → همان صفحه‌ی «به‌زودی» + هشدارِ کوتاه
+        await _render_coming_soon(event)
+        await event.answer("🎙 ریپورتر فعال نیست.", alert=True)
+        return
+
+    # ── مسیرهای بدون جریان ──
+    if action == "reporter:home":
+        saas_bot.wizards.pop(uid, None)
+        await render_reporter_page(event, saas_bot)
+        return
+    if action == "reporter:new":
+        saas_bot.wizards.pop(uid, None)
+        await _page_ttype(event)
+        return
+    if action == "reporter:cancel":
+        saas_bot.wizards.pop(uid, None)
+        await render_reporter_page(event, saas_bot)
+        return
+    if action == "reporter:history":
+        saas_bot.wizards.pop(uid, None)
+        await _page_history(event, saas_bot, uid)
+        return
+
+    # ── جریانِ گزارشِ جدید ──
+    if action.startswith("reporter:ttype:"):
+        ttype = action.split(":", 2)[2]
+        if ttype not in ("channel", "group", "user"):
+            await event.answer("نوعِ هدف نامعتبر است.", alert=True)
+            return
+        _park(saas_bot, uid, WIZ_REPORTER_TARGET, {"ttype": ttype})
+        await _page_target_prompt(event, ttype)
+        return
+
+    d = _flow(saas_bot, uid)
+    if action.startswith("reporter:scope:"):
+        if not d:
+            await event.answer("جریان یافت نشد — از «گزارش جدید» شروع کنید.", alert=True)
+            return
+        d["scope"] = action.split(":", 2)[2]
+        await _page_cat(event, d)
+        return
+    if action.startswith("reporter:cat:"):
+        if not d:
+            await event.answer("جریان یافت نشد — از «گزارش جدید» شروع کنید.", alert=True)
+            return
+        d["cat"] = action.split(":", 2)[2]
+        if d["cat"] not in ("scam", "fake"):
+            await event.answer("دسته نامعتبر است.", alert=True)
+            return
+        await _page_confirm(event, saas_bot, uid, d)
+        return
+    if action == "reporter:go":
+        if not d or not d.get("cat") or not d.get("target"):
+            await event.answer("جریان ناقص است — از «گزارش جدید» شروع کنید.", alert=True)
+            return
+        await _exec_report(event, saas_bot, uid, d)
+        return
+
+    await event.answer("مسیر نامعتبر است.", alert=True)
+
+
+# ───────────────────── ورودیِ متنی (ویزارد) ─────────────────────
+
+
+async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
+    """ورودیِ متنیِ جریانِ ریپورتر — از SaaSBot._handle_text_wizard صدا زده
+    می‌شود. True یعنی «این پیام مصرف شد»."""
+    from cianet.bots.ui import UI
+    from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_FLOW,
+                             WIZ_REPORTER_TARGET, log_action, reporter_daily_cap,
+                             reporter_quota_left, reporter_recently_reported,
+                             set_setting, REPORTER_CAP_MAX, REPORTER_CAP_MIN,
+                             REPORTER_CAP_SETTING)
+
+    state = wiz.get("state")
+    uid = event.sender_id
+    text = (event.raw_text or "").strip()
+
+    # ── مرحله‌ی دکمه‌ایِ جریان: متن فرستاده شده → راهنمایی ──
+    if state == WIZ_REPORTER_FLOW:
+        await event.respond(
+            "🎙 در این مرحله فقط از دکمه‌ها استفاده کنید."
+            " برای لغو، «انصراف» را بزنید.",
+            buttons=[_cancel_row()],
+        )
+        return True
+
+    # ── سقفِ جدیدِ مالک ──
+    if state == WIZ_REPORTER_CAP:
+        saas_bot.wizards.pop(uid, None)
+        if saas_bot._role(uid) != ROLE_OWNER:
+            await event.respond("⛔ این عملیات فقط برای مالک است.")
+            return True
+        raw = text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+        try:
+            val = int(raw)
+        except ValueError:
+            await event.respond("❌ لطفاً فقط یک عدد بفرستید.")
+            return True
+        val = max(REPORTER_CAP_MIN, min(REPORTER_CAP_MAX, val))
+        set_setting(REPORTER_CAP_SETTING, str(val), actor_id=uid)
+        log_action(uid, "reporter_cap_changed", f"cap={val}")
+        await event.respond(
+            UI.screen("✅ سقف ثبت شد",
+                      body=[f"سقفِ روزانه‌ی هر کاربر: **{val}** گزارش"]),
+            buttons=_back_row(),
+        )
+        return True
+
+    # ── دریافتِ هدف ──
+    if state != WIZ_REPORTER_TARGET:
+        return False  # مربوط به ما نیست
+
+    data = wiz.get("data") or {}
+    ttype = data.get("ttype", "")
+
+    if not _eff_enabled():
+        saas_bot.wizards.pop(uid, None)
+        await event.respond("🎙 ریپورتر توسط مالک غیرفعال شده است.")
+        return True
+    if reporter_quota_left(uid) <= 0:
+        saas_bot.wizards.pop(uid, None)
+        await event.respond(
+            UI.screen("⛔ سهمیه‌ی امروز تمام شده",
+                      body=["سقفِ گزارشِ امروزِ شما پر شده است — فردا دوباره بیایید.",
+                            "", f"سهمیه‌ی باقی‌مانده: **0**"]),
+            buttons=_back_row(),
+        )
+        return True
+
+    targets = extract_reporter_targets(text)
+    if not targets:
+        await event.respond("❌ هدفی در پیام شما پیدا نشد — یوزرنیم/لینک/آیدی بفرستید.")
+        return True  # ویزارد باز می‌ماند تا دوباره بفرستد
+    if len(targets) > 1:
+        await event.respond("⛔ هر بار فقط **یک هدف** — اولین گزارش را برای اولین هدف کامل کنید.")
+        return True
+    target = targets[0]
+
+    tag, client = _user_client(saas_bot, uid)
+    if client is None:
+        saas_bot.wizards.pop(uid, None)
+        await event.respond(
+            UI.screen("❌ اکانتِ شما روشن نیست",
+                      body=["برای ارسال گزارش، اکانتِ خودِ شما باید در حال اجرا باشد.",
+                            "از «🔊 مدیریت اکانت‌ها» اکانت‌تان را روشن کنید و دوباره بیایید."],
+                      hint="گزارش فقط با اکانتِ خودِ شما ارسال می‌شود — نه اکانت دیگران."),
+            buttons=_back_row(),
+        )
+        return True
+
+    info = await check_reporter_target(client, target)
+    if not info.get("exists"):
+        err = info.get("error", "نامشخص")
+        await event.respond(
+            UI.screen("❌ هدف پیدا نشد",
+                      body=[f"**علت:** {err}",
+                            "",
+                            "یوزرنیم/لینک را دوباره چک کنید و دوباره بفرستید."],
+                      hint="اگر هدف خصوصی/غیرعمومی است، فقط آیدی عددی کار می‌کند."),
+            buttons=[_cancel_row()],
+        )
+        return True  # ویزارد باز می‌ماند
+
+    # تطبیقِ نوعِ انتخاب‌شده با نوعِ واقعی (قابل ادامه — با نوعِ واقعی)
+    actual = info.get("type", "unknown")
+    if ttype and ttype != actual and not (ttype == "user" and actual == "bot"):
+        ttype = actual  # نوعِ واقعی ملاک است؛ در صفحه‌ی بعد نمایش داده می‌شود
+
+    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id")):
+        saas_bot.wizards.pop(uid, None)
+        await event.respond(
+            UI.screen("⏳ قبلاً گزارش داده‌اید",
+                      body=["این هدف را در ۲۴ ساعتِ اخیر گزارش کرده‌اید.",
+                            "گزارشِ دوباره از یک اکانت روی همان هدف اثری ندارد."],
+                      hint="گزارشِ بعدی: پس از گذشت ۲۴ ساعت."),
+            buttons=_back_row(),
+        )
+        return True
+
+    # جریان را park کن و به انتخابِ دامنه/دسته برو
+    d = {"ttype": ttype, "target": target, "info": info, "scope": "peer"}
+    _park(saas_bot, uid, WIZ_REPORTER_FLOW, d)
+    if actual in ("channel", "group"):
+        await _page_scope(event, d)
+    else:
+        await _page_cat(event, d)
+    return True

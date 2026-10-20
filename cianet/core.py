@@ -1656,6 +1656,11 @@ def init_db() -> None:
         ensure_block_schema()
     except Exception as _e:
         print(f"⚠️ [init_db] ensure_block_schema failed: {type(_e).__name__}: {_e}")
+    # v2.18.0: جدول لاگ ریپورتر (متادیتا فقط — بدون محتوا)
+    try:
+        ensure_reporter_schema()
+    except Exception as _e:
+        print(f"⚠️ [init_db] ensure_reporter_schema failed: {type(_e).__name__}: {_e}")
 
 
 def log_action(actor_id, action: str, details: str = "") -> None:
@@ -1993,6 +1998,153 @@ def grant_trial_if_eligible(user_id: int) -> bool:
     create_subscription(user_id, TRIAL_PLAN, TRIAL_DAYS)
     log_action(user_id, "trial_granted", f"days={TRIAL_DAYS}")
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  v2.18.0: ریپورتر — گزارشِ کانال/گروه/اکانتِ جعلی یا کلاهبردار
+#  (هر گزارش فقط با اکانتِ خودِ کاربر، یک گزارش در ۲۴ ساعت برای هر هدف،
+#   سقفِ روزانه‌ی قابل‌تنظیم توسط مالک — «اصل طلایی» حفظ شده است)
+# ══════════════════════════════════════════════════════════════════════
+
+REPORTER_ENABLED_SETTING = "reporter_enabled"       # "1" = روشن (پیش‌فرض)
+REPORTER_CAP_SETTING = "reporter_daily_cap"         # سقف گزارش هر کاربر در روز
+REPORTER_CAP_DEFAULT = 10
+REPORTER_CAP_MIN = 1
+REPORTER_CAP_MAX = 30
+REPORTER_DUP_HOURS = 24                              # فاصله‌ی حداقلی گزارشِ مجددِ همان هدف
+
+
+def ensure_reporter_schema() -> None:
+    """جدول لاگ ریپورتر — الگوی ensure_block_schema (ایده‌مپوتنت، بدون dump/restore).
+
+    ⚠️ حریم خصوصی: فقط متادیتا ذخیره می‌شود (هدف، دسته، وضعیت، زمان).
+    متن پیام‌ها/محتوای هدف هرگز ذخیره نمی‌شود — پیام‌های اخیر صرفاً به‌عنوان
+    شناسه‌های عددی به API گزارش تلگرام پاس داده می‌شوند و در DB نمی‌مانند.
+    """
+    with _conn() as c:
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS reporter_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                target TEXT NOT NULL,
+                target_id INTEGER,
+                target_type TEXT,
+                category TEXT NOT NULL,
+                with_messages INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'ok',
+                created_at TEXT NOT NULL
+            )"""
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reporter_user_time "
+            "ON reporter_logs (user_id, created_at)"
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reporter_target "
+            "ON reporter_logs (user_id, target_id, created_at)"
+        )
+
+
+def reporter_enabled() -> bool:
+    """سوییچِ رانتایمِ مالک (پیش‌فرض روشن). جدا از REPORTER_ENABLEDِ
+    کامپایل-تایم در cianet/bots/reporter.py که کیل‌سوییچِ اصلی است."""
+    return str(get_setting(REPORTER_ENABLED_SETTING, "1")).strip() == "1"
+
+
+def reporter_daily_cap() -> int:
+    """سقفِ روزانه‌ی هر کاربر — همیشه بین REPORTER_CAP_MIN و MAX clamp می‌شود."""
+    try:
+        val = int(get_setting(REPORTER_CAP_SETTING, str(REPORTER_CAP_DEFAULT)))
+    except (TypeError, ValueError):
+        val = REPORTER_CAP_DEFAULT
+    return max(REPORTER_CAP_MIN, min(REPORTER_CAP_MAX, val))
+
+
+def reporter_today_count(user_id: int) -> int:
+    """تعداد گزارش‌های همین کاربر در امروزِ UTC — روزانه بودن سهمیه.
+    گزارش‌های ناموفق هم شمرده می‌شوند تا خطای سرور تبدیل به حلقه‌ی
+    تلاشِ بی‌سقف نشود."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COUNT(*) AS n FROM reporter_logs "
+            "WHERE user_id = ? AND created_at >= ?",
+            (user_id, today),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def reporter_quota_left(user_id: int) -> int:
+    """سهمیه‌ی باقی‌مانده‌ی امروز همین کاربر (هرگز منفی نمی‌شود)."""
+    return max(0, reporter_daily_cap() - reporter_today_count(user_id))
+
+
+def reporter_recently_reported(user_id: int, target_id, hours: int = REPORTER_DUP_HOURS) -> bool:
+    """آیا همین کاربر همین هدف را در INTERVAL ساعتِ اخیر گزارش داده؟
+    target_id ممکن است None باشد (هدفِ حل‌نشده) — در آن حالت مقایسه با
+    رشته‌ی هدف انجام می‌شود تا دورزدنِ سهمیه با یوزرنیم/آیدیِ متناوب سخت بماند."""
+    if target_id is None:
+        return False
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(_DATETIME_FMT)
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM reporter_logs "
+            "WHERE user_id = ? AND target_id = ? AND created_at >= ? LIMIT 1",
+            (user_id, int(target_id), cutoff),
+        ).fetchone()
+    return row is not None
+
+
+def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
+                     category: str, with_messages: bool = False,
+                     status: str = "ok") -> None:
+    """ثبتِ یک گزارش در تاریخچه‌ی scoped کاربر (متادیتا فقط)."""
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO reporter_logs "
+            "(user_id, target, target_id, target_type, category, with_messages, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, str(target)[:120],
+             int(target_id) if target_id is not None else None,
+             str(target_type or "")[:20], str(category)[:40],
+             1 if with_messages else 0, str(status)[:20], _now()),
+        )
+
+
+def list_reporter_logs(user_id: int, limit: int = 10) -> list:
+    """آخرین گزارش‌های همین کاربر — جدیدترین اول (الگوی scoped مالکیت)."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT target, target_id, target_type, category, with_messages, status, created_at "
+            "FROM reporter_logs WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, max(1, min(50, limit))),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def reporter_stats() -> dict:
+    """آمار تجمعی برای پنل مالک — بدون محتوای شخصی کاربران."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _conn() as c:
+        total = c.execute("SELECT COUNT(*) AS n FROM reporter_logs").fetchone()["n"]
+        users = c.execute(
+            "SELECT COUNT(DISTINCT user_id) AS n FROM reporter_logs").fetchone()["n"]
+        today_n = c.execute(
+            "SELECT COUNT(*) AS n FROM reporter_logs WHERE created_at >= ?",
+            (today,),
+        ).fetchone()["n"]
+        by_cat = {
+            r["category"]: r["n"]
+            for r in c.execute(
+                "SELECT category, COUNT(*) AS n FROM reporter_logs GROUP BY category"
+            ).fetchall()
+        }
+        ok_n = c.execute(
+            "SELECT COUNT(*) AS n FROM reporter_logs WHERE status = 'ok'"
+        ).fetchone()["n"]
+    return {"total": int(total), "users": int(users), "today": int(today_n),
+            "by_category": by_cat, "ok": int(ok_n)}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -7217,6 +7369,11 @@ WIZ_WALLET_CREDIT_AMOUNT = "wallet_credit_amount"
 WIZ_WALLET_CREDIT_REASON = "wallet_credit_reason"
 WIZ_WALLET_DEBIT_AMOUNT = "wallet_debit_amount"
 WIZ_WALLET_DEBIT_REASON = "wallet_debit_reason"
+# v2.18.0: ویزاردهای ریپورتر (ورودیِ متنیِ هدف + مرحله‌ی دکمه‌ایِ جریان +
+# سقفِ جدید از پنل مالک)
+WIZ_REPORTER_TARGET = "reporter_target"
+WIZ_REPORTER_FLOW = "reporter_flow"
+WIZ_REPORTER_CAP = "reporter_cap"
 WIZ_OWNER_TICKET_REPLY = "owner_ticket_reply"
 WIZ_SET_CARD = "awaiting_card_info"
 WIZ_SET_CHANNEL = "awaiting_channel"
@@ -7783,7 +7940,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-20-v2.17.1"
+BUILD_VERSION = "2026-10-20-v2.18.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -11820,6 +11977,24 @@ __all__ = [
     'register_group_plan',
     'trial_enabled',
     'ticket_message_count',
+    'ensure_reporter_schema',
+    'reporter_enabled',
+    'reporter_daily_cap',
+    'reporter_today_count',
+    'reporter_quota_left',
+    'reporter_recently_reported',
+    'add_reporter_log',
+    'list_reporter_logs',
+    'reporter_stats',
+    'REPORTER_ENABLED_SETTING',
+    'REPORTER_CAP_SETTING',
+    'REPORTER_CAP_DEFAULT',
+    'REPORTER_CAP_MIN',
+    'REPORTER_CAP_MAX',
+    'REPORTER_DUP_HOURS',
+    'WIZ_REPORTER_TARGET',
+    'WIZ_REPORTER_FLOW',
+    'WIZ_REPORTER_CAP',
     'time',
     'timedelta',
     'timezone',
