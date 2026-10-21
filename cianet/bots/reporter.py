@@ -559,8 +559,11 @@ async def send_reporter_action(client, peer, message_ids, category,
 # ════════════════════════════════════════════════════════════════════
 #
 # معماری فعال‌سازی:
-#   • هر گزارش فقط با اکانتِ خودِ کاربرِ گزارش‌دهنده ارسال می‌شود (SelfBotِ
-#     در حال اجرای او از رجیستری ACCOUNTS) — نه استخر اکانت، نه سشن دیگران.
+#   • v2.21.0 (خواستهٔ صریح مالک — «ریپورت بهتر»): بستهٔ گزارش
+#     «همزمان» از همهٔ اکانت‌های در حالِ اجرای سیستم شلیک می‌شود —
+#     اکانتِ خودِ کاربر اول، بعدِ اکانت‌های فعالِ دیگر (سوییچِ مالک:
+#     reporter_multi_account). تا v2.20.0 فقط اکانتِ خودِ کاربر
+#     شلیک می‌کرد («اصلِ طلایی»)؛ مالک این سیاست را صریحاً تغییر داد.
 #   • یک گزارش برای هر هدف در ۲۴ ساعت (reporter_recently_reported) +
 #     سقفِ روزانه (reporter_daily_cap؛ پیش‌فرض ۱۰، مالک بین ۱ تا ۳۰).
 #   • «ریپورت کل متن‌های کانال/گروه» = پیوستِ تا ۱۰ پیامِ اخیر به همان
@@ -678,6 +681,34 @@ def _user_client(saas_bot, uid: int):
     return None, None
 
 
+def _burst_pool(saas_bot, uid: int, target_id=None):
+    """اکانت‌های شلیک‌کنندهٔ بسته — v2.21.0 (چنداکانتهٔ همزمان).
+
+    ترتیب: اکانتِ خودِ کاربر اول (اگر روشن است)، بعدِ همهٔ اکانت‌های در
+    حالِ اجرای سیستم (اگر حالتِ چنداکانتهٔ مالک روشن باشد). کلاینتِ
+    تکراری حذف می‌شود، خودِ هدف هرگز شلیک نمی‌کند (اگر اتفاقی در سیستم
+    لاگین باشد) و سقفِ امنِ REPORTER_MULTI_MAX_ACCOUNTS رعایت می‌شود.
+    خروجی: [(label, client, is_own)] — label فقط برای لاگ/دیباگ است.
+    """
+    from cianet.core import (REPORTER_MULTI_MAX_ACCOUNTS,
+                             reporter_multi_account, running_report_clients)
+    own_tag, own_client = _user_client(saas_bot, uid)
+    pool, seen = [], set()
+    if own_client is not None:
+        pool.append((own_tag or "own", own_client, True))
+        seen.add(id(own_client))
+    if reporter_multi_account():
+        for tag, client, _my_id in running_report_clients(
+                exclude_ids=[target_id] if target_id else None):
+            if id(client) in seen:
+                continue
+            pool.append((tag, client, False))
+            seen.add(id(client))
+            if len(pool) >= REPORTER_MULTI_MAX_ACCOUNTS:
+                break
+    return pool
+
+
 # ─────────────────────────── صفحه‌ها ───────────────────────────
 
 
@@ -690,7 +721,8 @@ async def render_reporter_page(event, saas_bot) -> None:
     """
     from cianet.bots.ui import UI
     from cianet.core import (fa_digits, reporter_daily_cap,
-                             reporter_dup_hours, reporter_quota_left)
+                             reporter_dup_hours, reporter_multi_account,
+                             reporter_quota_left)
 
     uid = event.sender_id
 
@@ -728,7 +760,9 @@ async def render_reporter_page(event, saas_bot) -> None:
         "با رسید، تاریخچه و سهمیه‌ی شفاف.",
         "",
         "**📋 قوانینِ ساده:**",
-        "👤 گزارش‌ها فقط با **اکانتِ خودِ تو** ارسال می‌شوند",
+        ("👥 گزارش‌ها با **همهٔ اکانت‌های فعالِ سیستم** شلیک می‌شوند — همزمان"
+         if reporter_multi_account() else
+         "👤 گزارش‌ها فقط با **اکانتِ خودِ تو** ارسال می‌شوند"),
         f"🔥 **حالتِ اسپم:** با یک تأیید، کلِ سهمیه‌ی باقی‌مانده",
         "      پشت‌سرهم روی همان هدف شلیک می‌شود",
         f"⏳ هر هدف تا **{fa_digits(dup_h)} ساعت** فقط یک‌بار قابل گزارشِ مجدد است",
@@ -861,6 +895,21 @@ async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
     dup_h = reporter_dup_hours()
     # v2.20.0 (SPAM-MODE · خواستهٔ مالک): تعداد شلیک = کلِ سهمیهٔ باقی‌مانده
     burst = max(1, reporter_quota_left(uid))
+    # v2.21.0 (چنداکانته): پیش‌نمایشِ زندهٔ استخر — چه کسانی شلیک می‌کنند
+    pool = _burst_pool(saas_bot, uid,
+                       target_id=d.get("info", {}).get("id"))
+    n_acc = len(pool)
+    has_own = any(p[2] for p in pool)
+    if n_acc > 1 and has_own:
+        sender_txt = (f"👥 **ارسال با:** اکانتِ شما + {fa_digits(n_acc - 1)}"
+                      " اکانتِ فعالِ دیگر — **همزمان**")
+    elif n_acc > 1:
+        sender_txt = (f"👥 **ارسال با:** {fa_digits(n_acc)} اکانتِ فعالِ"
+                      " سیستم — **همزمان** (اکانتِ شما روشن نیست)")
+    else:
+        sender_txt = "👤 **ارسال با:** اکانتِ خودِ شما"
+    shots_txt = ("کلِ سهمیهٔ باقی‌مانده، پشت‌سرهم و همزمان"
+                 if n_acc > 1 else "کلِ سهمیهٔ باقی‌مانده، پشت‌سرهم")
     scope_txt = ("همراه با حداکثر ۱۰ پیامِ اخیر (شواهد)"
                  if d.get("scope") == "msgs" else "فقط خودِ هدف")
     cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
@@ -868,11 +917,14 @@ async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
         f"🎯 **هدف:** {_target_label(d)}",
         f"🎭 **دسته:** {cat_txt}",
         f"📨 **دامنه:** {scope_txt}",
-        f"🔥 **تعداد شلیک:** {fa_digits(burst)} گزارش — کلِ سهمیهٔ باقی‌مانده، پشت‌سرهم",
-        "👤 **ارسال با:** اکانتِ خودِ شما",
+        f"🔥 **تعداد شلیک:** {fa_digits(burst)} گزارش — {shots_txt}",
+        sender_txt,
         "",
-        f"⚠️ با زدنِ دکمهٔ سبز، همین حالا {fa_digits(burst)} گزارشِ پیاپی از",
-        "اکانتِ شما روی همین هدف به تلگرام می‌رود؛ سهمیهٔ امروزتان تمام",
+        f"⚠️ با زدنِ دکمهٔ سبز، همین حالا {fa_digits(burst)} گزارش از",
+        ("اکانت‌های شلیک‌کننده روی همین هدف به تلگرام می‌رود؛ سهمیهٔ"
+         if n_acc > 1 else
+         "اکانتِ شما روی همین هدف به تلگرام می‌رود؛ سهمیهٔ"),
+        "امروزتان تمام",
         f"می‌شود و همین هدف تا **{fa_digits(dup_h)} ساعت** قابلِ گزارشِ مجدد",
         "نخواهد بود. در حین اجرا دکمهٔ «⛔ توقف» در اختیار شماست.",
         "",
@@ -927,8 +979,10 @@ async def _page_owner(event, saas_bot, uid: int) -> None:
     from cianet.core import (REPORTER_CAP_MAX, REPORTER_CAP_MIN,
                              REPORTER_DUP_MAX, REPORTER_DUP_MIN,
                              fa_digits, reporter_daily_cap, reporter_dup_hours,
-                             reporter_enabled, reporter_stats)
+                             reporter_enabled, reporter_multi_account,
+                             reporter_stats, running_report_clients)
     on = reporter_enabled()
+    multi = reporter_multi_account()
     cap = reporter_daily_cap()
     dup_h = reporter_dup_hours()
     st = reporter_stats()
@@ -936,6 +990,8 @@ async def _page_owner(event, saas_bot, uid: int) -> None:
                  for k, v in sorted(st["by_category"].items())] or ["• هنوز گزارشی ثبت نشده"]
     body = [
         f"**وضعیت:** {'🟢 روشن' if on else '🔴 خاموش'} (پیش‌فرض: روشن)",
+        f"**چنداکانتهٔ همزمان:** {'🟢 روشن' if multi else '🔴 خاموش'} "
+        f"({fa_digits(len(running_report_clients()))} اکانتِ فعال)",
         "",
         "**⚖️ محدودیت‌ها (قابلِ تنظیم):**",
         f"• سقفِ روزانه‌ی هر کاربر: **{fa_digits(cap)}** گزارش "
@@ -952,6 +1008,7 @@ async def _page_owner(event, saas_bot, uid: int) -> None:
     ]
     rows = [
         [UI.toggle("ریپورتر روشن/خاموش", on, "reporter:owner:toggle")],
+        [UI.toggle("چنداکانتهٔ همزمان", multi, "reporter:owner:multi")],
         [UI.go(f"± سقفِ روزانه (فعلاً {fa_digits(cap)})", "reporter:owner:cap")],
         [UI.go(f"± فاصله‌ی گزارشِ مجدد (فعلاً {fa_digits(dup_h)} ساعت)", "reporter:owner:dup")],
         [UI.refresh("reporter:owner")],
@@ -974,7 +1031,11 @@ _SPAM_SHOT_DELAY = (0.8, 1.8)    # ثانیهٔ تصادفی بین شلیک‌�
 _SPAM_FLOOD_MAX_PAUSES = 2       # حداکثر FloodWait کوتاهی که صبر می‌کنیم
 _SPAM_FLOOD_TOLERANCE_S = 12     # «کوتاه» یعنی حداکثر این ثانیه
 _SPAM_FAIL_STREAK_STOP = 3       # چند خطای پیاپی ⟹ توقفِ بسته
-_SPAM_PROGRESS_EVERY = 2         # هر چند شلیک، صفحهٔ پیشرفت رفرش شود
+# v2.21.0 (چنداکانته): صفحهٔ پیشرفت دیگر per-shot نیست — حلقهٔ نظارت
+# با فاصلهٔ ثابت چک می‌کند و رفرشِ واقعیِ صفحه حداقل این فاصله را دارد
+# (ضدِ flood خودِ ویرایشِ پیام در بسته‌های بزرگ).
+_SPAM_PROGRESS_POLL_S = 0.6      # فاصلهٔ چکِ پایانِ کارِ اکانت‌ها
+_SPAM_PROGRESS_MIN_S = 2.0       # حداقل فاصلهٔ واقعی بینِ دو رفرشِ صفحه
 
 
 def _stop_requested(saas_bot, uid: int) -> bool:
@@ -983,8 +1044,13 @@ def _stop_requested(saas_bot, uid: int) -> bool:
 
 
 async def _edit_progress(event, d: dict, done: int, total: int,
-                         sent: int, failed: int) -> None:
-    """صفحهٔ زندهٔ پیشرفتِ بسته — شکستِ ویرایش بسته را نمی‌ترکاند."""
+                         sent: int, failed: int, n_accounts: int = 1) -> None:
+    """صفحهٔ زندهٔ پیشرفتِ بسته — شکستِ ویرایش بسته را نمی‌ترکاند.
+
+    v2.21.0 (چنداکانته): خطِ تعداد اکانت‌های در حالِ شلیکِ همزمان اضافه
+    شد؛ رفرشِ صفحه دیگر per-shot نیست و از بیرون (حلقهٔ نظارتِ _run_burst)
+    با فاصلهٔ حداقلی صدا زده می‌شود.
+    """
     from cianet.bots.ui import UI
     from cianet.core import fa_digits
     pct = round(done * 10 / max(1, total))
@@ -996,6 +1062,10 @@ async def _edit_progress(event, d: dict, done: int, total: int,
         "",
         f"`{bar}`",
         f"⚡ **{fa_digits(done)} از {fa_digits(total)}** شلیک",
+    ]
+    if n_accounts > 1:
+        body.append(f"👥 شلیکِ همزمان با **{fa_digits(n_accounts)} اکانت**")
+    body += [
         f"✅ موفق: {fa_digits(sent)} · ❌ ناموفق: {fa_digits(failed)}",
         "",
         "برای توقف، دکمهٔ زیر را بزنید.",
@@ -1008,98 +1078,148 @@ async def _edit_progress(event, d: dict, done: int, total: int,
 
 
 async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
-    """اجرای بستهٔ گزارش — حالتِ اسپم (v2.20.0 · خواستهٔ صریح مالک).
+    """اجرای بستهٔ گزارش — اسپمِ چنداکانتهٔ همزمان (v2.21.0 · خواستهٔ مالک).
 
-    یک تأیید ⟹ کلِ سهمیهٔ باقی‌ماندهٔ کاربر پشت‌سرهم روی همان هدف
-    شلیک می‌شود؛ بین شلیک‌ها تأخیرِ تصادفی. FloodWaitِ کوتاه (حداکثر
-    ۱۲ ثانیه و ۲ بار) صبر می‌شود؛ FloodWaitِ بلند یا خطاهای پیاپی بسته را
-    ناتمام می‌بندد — بستهٔ ناتمام target_id را NULL ثبت می‌کند تا پنجرهٔ
-    dup هدف را قفل نکند و ادامهٔ سهمیه بعداً شلیک شود. شلیکی که به
-    FloodWait خورد سهمیه مصرف نمی‌کند.
+    v2.20.0: یک تأیید ⟹ کلِ سهمیهٔ باقی‌ماندهٔ کاربر پشت‌سرهم روی همان
+    هدف شلیک می‌شود.
+    v2.21.0: سهمیهٔ همان کاربر بینِ همهٔ اکانت‌های در حالِ اجرا (اکانتِ
+    خودِ کاربر اول + اکانت‌های فعالِ دیگرِ سیستم، اگر حالتِ چنداکانته
+    روشن باشد) تقسیم و «همزمان» شلیک می‌شود. هر اکانت FloodWait/خطای
+    خودش را جدا مهار می‌کند؛ بستهٔ ناتمام target_id را NULL ثبت می‌کند
+    تا پنجرهٔ dup قفل نشود و ادامهٔ سهمیه بعداً شلیک شود. شلیقی که به
+    FloodWaitِ بلند می‌خورد سهمیه مصرف نمی‌کند.
     """
-    import asyncio
-    import random
-    from cianet.bots.ui import UI
-    from cianet.core import (add_reporter_log, fa_digits, reporter_dup_hours,
+    from cianet.core import (fa_digits, reporter_dup_hours,
                              reporter_quota_left, reporter_recently_reported)
 
-    # گیت‌های لحظه‌ی ارسال (دوباره چک می‌شوند — وضعیت ممکن است عوض شده باشد)
+    # گیت‌های لحظهٔ ارسال (دوباره چک می‌شوند — وضعیت ممکن است عوض شده باشد)
     if not _eff_enabled():
         await event.answer("🎙 ریپورتر توسط مالک غیرفعال شده است.", alert=True)
         return
     if reporter_quota_left(uid) <= 0:
-        await event.answer("⛔ سهمیه‌ی گزارشِ امروزِ شما تمام شده است — فردا.",
+        await event.answer("⛔ سهمیهٔ گزارشِ امروزِ شما تمام شده است — فردا.",
                            alert=True)
         return
     info = d.get("info", {})
-    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id"), target=str(d.get("target") or "")):
-        await event.answer(f"⛔ این هدف را در {fa_digits(reporter_dup_hours())} ساعتِ اخیر"
-                           " گزارش داده‌اید.", alert=True)
+    if info.get("id") is not None and reporter_recently_reported(
+            uid, info.get("id"), target=str(d.get("target") or "")):
+        await event.answer(
+            f"⛔ این هدف را در {fa_digits(reporter_dup_hours())} ساعتِ اخیر"
+            " گزارش داده‌اید.", alert=True)
         return
 
-    tag, client = _user_client(saas_bot, uid)
-    if client is None:
-        await event.edit(
-            UI.screen("❌ اکانتِ شما روشن نیست",
-                      body=["برای ارسال گزارش، اکانتِ خودِ شما باید در حال اجرا باشد.",
-                            "",
-                            "از «🔊 مدیریت اکانت‌ها» اکانت‌تان را روشن کنید و دوباره"
-                            " به این بخش بیایید."],
-                      hint="گزارش فقط با اکانتِ خودِ شما ارسال می‌شود — نه اکانت دیگران."),
-            buttons=_back_row(),
-        )
+    # v2.21.0 (BG1-FIX): گاردِ در-حال-اجرا — دو بار زدنِ «شلیک» (یا دو
+    # دستگاهِ همزمان) نباید دو بستهٔ موازی بسازد؛ هم سهمیه ازدحام می‌کرد
+    # هم ریتمِ اسپم دوچندان می‌شد (ریسکِ flood/ban).
+    if not hasattr(saas_bot, "_reporter_busy"):
+        saas_bot._reporter_busy = set()
+    if uid in saas_bot._reporter_busy:
+        await event.answer(
+            "⏳ بستهٔ گزارشِ شما همین حالا در حالِ اجراست — چند لحظه صبر کنید.",
+            alert=True)
         return
+    saas_bot._reporter_busy.add(uid)
+    try:
+        await _run_burst(event, saas_bot, uid, d)
+    finally:
+        saas_bot._reporter_busy.discard(uid)
+
+
+async def _run_burst(event, saas_bot, uid: int, d: dict) -> None:
+    """قلبِ بستهٔ اسپمی — استخرِ اکانت‌ها، توزیعِ سهمیه و شلیکِ همزمان."""
+    import asyncio
+    import random
+    import time
+    from cianet.bots.ui import UI
+    from cianet.core import add_reporter_log, fa_digits, reporter_quota_left
 
     cat = d.get("cat", "")
     scope = d.get("scope", "peer")
     target = d.get("target", "")
+    info = d.get("info", {})
+
+    # ── استخرِ شلیک‌کنندگان (v2.21.0: چنداکانتهٔ همزمان) ──
+    pool = _burst_pool(saas_bot, uid, target_id=info.get("id"))
+    if not pool:
+        await event.edit(
+            UI.screen("❌ اکانتی برای ارسال پیدا نشد",
+                      body=["هیچ اکانتِ در حالِ اجرایی در دسترس نیست.",
+                            "",
+                            "اکانتِ خودتان را از «🔊 مدیریت اکانت‌ها» روشن"
+                            " کنید و دوباره بیایید."],
+                      hint="گزارش فقط با اکانتِ در حالِ اجرا ارسال می‌شود."),
+            buttons=_back_row(),
+        )
+        return
     await event.answer()  # بستنِ اسپینر قبل از کارِ شبکه‌ای
 
-    msg_ids = []
-    try:
-        entity = await client.get_entity(target)
+    # ── فازِ آماده‌سازی — حلِ هدف روی «هر» اکانت، به‌صورتِ همزمان
+    #    (entity هر سشن جدا است؛ خواندنِ شواهد با fallback به سطح-peer —
+    #    BG2-FIX: خرابیِ خواندنِ پیام‌ها، مثلاً کانالِ خصوصیِ غیرعضو،
+    #    دیگر کلِ بسته را نمی‌کشد) ──
+    async def _resolve_one(entry):
+        label, client, is_own = entry
+        try:
+            entity = await client.get_entity(target)
+        except Exception:
+            return None
+        msg_ids = []
         if scope == "msgs" and info.get("type") in ("channel", "group"):
-            # «ریپورت کل متن‌ها»: تا ۱۰ پیامِ اخیر به‌عنوان شواهد — فقط id،
-            # محتوا خوانده/ذخیره نمی‌شود (حریم خصوصی + پهنای باند).
-            recent = await client.get_messages(entity, limit=10)
-            msg_ids = [m.id for m in recent if getattr(m, "id", None)
-                       and not getattr(m, "action", None)]
-    except Exception as e:
+            try:
+                recent = await client.get_messages(entity, limit=10)
+                msg_ids = [m.id for m in recent
+                           if getattr(m, "id", None)
+                           and not getattr(m, "action", None)]
+            except Exception:
+                msg_ids = []  # شواهد نشد ⟹ همان گزارشِ سطح-peer ادامه می‌دهد
+        return (label, client, is_own, entity, msg_ids)
+
+    resolved = await asyncio.gather(*[_resolve_one(p) for p in pool])
+    shooters = [s for s in resolved if s is not None]
+    resolve_failed = len(pool) - len(shooters)
+
+    if not shooters:
+        # هیچ اکانتی هدف را حل نکرد — همان رفتارِ خطای v2.20.0
         add_reporter_log(uid, target, info.get("id"), info.get("type", ""),
                          cat, with_messages=False, status="error",
                          report_count=1)
         saas_bot.wizards.pop(uid, None)
-        await _render_receipt(event, d, ok=False,
-                              error=f"حل کردنِ هدف ناموفق بود: {str(e)[:60]}",
-                              left=reporter_quota_left(uid))
+        await _render_receipt(
+            event, d, ok=False,
+            error=(f"حل کردنِ هدف ناموفق بود "
+                   f"({fa_digits(resolve_failed or len(pool))} اکانت امتحان شد)"),
+            left=reporter_quota_left(uid))
         return
 
-    # ── v2.20.0 (SPAM-MODE): تعداد شلیک = کلِ سهمیهٔ باقی‌مانده ──
+    # ── توزیعِ سهمیه: کلِ باقی‌مانده بینِ شلیک‌کنندگان (اولی = خودِ کاربر) ──
     total = max(1, reporter_quota_left(uid))
+    n = len(shooters)
+    base, rem = divmod(total, n)
+    shares = [base + (1 if i < rem else 0) for i in range(n)]
     comment = _REPORT_SCAM_COMMENT if cat == "scam" else ""
-    opt_cache = {}  # کشِ گزینهٔ گزارشِ پیام‌محور — کشف فقط بارِ اول
 
-    sent = failed = attempted = 0
-    fail_streak = 0
-    flood_pauses = 0
-    stopped = None  # None | "flood" | "errors" | "user" | "needs_comment"
+    counters = {"sent": 0, "failed": 0, "attempted": 0}
+    own_sent = 0
+    stop_reasons = []  # دلایلِ توقفِ اکانت‌ها (flood/errors/user/needs_comment)
 
-    if not hasattr(saas_bot, "_reporter_stop"):
-        saas_bot._reporter_stop = set()
-    saas_bot._reporter_stop.discard(uid)
-
-    await _edit_progress(event, d, 0, total, 0, 0)
-    try:
-        while attempted < total:
+    async def _worker(widx: int):
+        nonlocal own_sent
+        label, client, is_own, entity, msg_ids = shooters[widx]
+        share = shares[widx]
+        opt_cache = {}  # کشِ گزینهٔ گزارشِ پیام‌محور — جدا برای هر اکانت
+        sent = failed = 0
+        flood_pauses = 0
+        fail_streak = 0
+        reason = None
+        while sent + failed < share:
             if _stop_requested(saas_bot, uid):
-                stopped = "user"
+                reason = "user"
                 break
             result = await send_reporter_action(
                 client, entity, msg_ids or None, cat,
                 comment=comment, _opt_cache=opt_cache)
             if result.get("success"):
                 sent += 1
-                attempted += 1
                 fail_streak = 0
             elif result.get("floodwait") is not None:
                 wait_s = int(result["floodwait"])
@@ -1108,24 +1228,58 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
                         and wait_s <= _SPAM_FLOOD_TOLERANCE_S):
                     await asyncio.sleep(min(wait_s + 0.5, 15))
                     continue  # تلاشِ دوبارهٔ همان شلیک — سهمیه مصرف نشد
-                stopped = "flood"
+                reason = "flood"
                 break
             elif result.get("needs_comment"):
-                stopped = "needs_comment"
+                reason = "needs_comment"
                 break
             else:
                 failed += 1
-                attempted += 1
                 fail_streak += 1
                 if fail_streak >= _SPAM_FAIL_STREAK_STOP:
-                    stopped = "errors"
+                    reason = "errors"
                     break
-            if attempted < total:
+            if sent + failed < share:
                 await asyncio.sleep(random.uniform(*_SPAM_SHOT_DELAY))
-            if attempted % _SPAM_PROGRESS_EVERY == 0:
-                await _edit_progress(event, d, attempted, total, sent, failed)
-    finally:
-        saas_bot._reporter_stop.discard(uid)
+        counters["sent"] += sent
+        counters["failed"] += failed
+        counters["attempted"] += sent + failed
+        if is_own:
+            own_sent = sent
+        if reason:
+            stop_reasons.append(reason)
+        return reason
+
+    if not hasattr(saas_bot, "_reporter_stop"):
+        saas_bot._reporter_stop = set()
+    saas_bot._reporter_stop.discard(uid)
+
+    await _edit_progress(event, d, 0, total, 0, 0, n_accounts=n)
+    tasks = [asyncio.create_task(_worker(i)) for i in range(n)]
+    last_edit = time.monotonic()
+    pending = set(tasks)
+    while pending:
+        done, pending = await asyncio.wait(pending,
+                                           timeout=_SPAM_PROGRESS_POLL_S)
+        now = time.monotonic()
+        if pending and now - last_edit >= _SPAM_PROGRESS_MIN_S:
+            last_edit = now
+            await _edit_progress(event, d, counters["attempted"], total,
+                                 counters["sent"], counters["failed"],
+                                 n_accounts=n)
+    reasons = [r for r in await asyncio.gather(*tasks) if r]
+    saas_bot._reporter_stop.discard(uid)
+
+    sent = counters["sent"]
+    failed = counters["failed"]
+    attempted = counters["attempted"]
+    stopped = None
+    if reasons:
+        # اولویتِ نمایش: توقفِ کاربر > flood > خطا > نیاز به توضیح
+        for pref in ("user", "flood", "errors", "needs_comment"):
+            if pref in reasons:
+                stopped = pref
+                break
 
     if attempted == 0:
         # هیچ شلیکی انجام نشد (مثلاً flood فوری) — سهمیه سالم می‌ماند
@@ -1138,33 +1292,39 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
             err = "محدودیتِ سرعتِ تلگرام (FloodWait) اجازهٔ شروع نداد"
         await _render_receipt(event, d, ok=False, error=err,
                               left=reporter_quota_left(uid),
-                              n_msgs=len(msg_ids))
+                              n_msgs=len(shooters[0][4]))
         return
 
     # بستهٔ تمام‌شده ⟸ target_id ثبت می‌شود (پنجرهٔ dup قفل می‌شود)؛
     # بستهٔ ناتمام ⟸ NULL تا ادامهٔ سهمیه بعداً روی همان هدف ممکن بماند
     completed = attempted >= total and stopped is None
     log_target_id = info.get("id") if completed else None
-    status = "ok" if failed == 0 else ("error" if sent == 0 else "partial")
+    # v2.21.0: بستهٔ ناتمام (توقفِ زودهنگام) حتی بدونِ شلیکِ ناموفق هم
+    # «partial» است — «ok» فقط برای بستهٔ تمام‌شدهٔ بی‌خطا.
+    status = ("ok" if (failed == 0 and completed)
+              else ("error" if sent == 0 else "partial"))
     add_reporter_log(uid, target, log_target_id, info.get("type", ""),
-                     cat, with_messages=bool(msg_ids), status=status,
+                     cat, with_messages=bool(shooters[0][4]), status=status,
                      report_count=attempted)
     saas_bot.wizards.pop(uid, None)
-    await _render_receipt(event, d, ok=(sent > 0), error="",
-                          left=reporter_quota_left(uid),
-                          n_msgs=len(msg_ids), sent=sent, failed=failed,
-                          total=total, stopped=stopped)
+    await _render_receipt(
+        event, d, ok=(sent > 0), error="",
+        left=reporter_quota_left(uid),
+        n_msgs=len(shooters[0][4]), sent=sent, failed=failed,
+        total=total, stopped=stopped, n_accounts=n,
+        own_sent=(own_sent if any(s[2] for s in shooters) else None))
 
 
 async def _render_receipt(event, d: dict, ok: bool, left: int,
                           error: str = "", n_msgs: int = 0,
                           sent: int = 0, failed: int = 0, total: int = 0,
-                          stopped: str = None) -> None:
+                          stopped: str = None, n_accounts: int = 1,
+                          own_sent: int = None) -> None:
     from cianet.bots.ui import UI
     from cianet.core import fa_digits, reporter_daily_cap
     cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
     if total:
-        # ── رسیدِ بستهٔ اسپمی (v2.20.0) ──
+        # ── رسیدِ بستهٔ اسپمی (v2.20.0) + چنداکانته (v2.21.0) ──
         if ok and stopped is None:
             head = "🔥 **کلِ سهمیه شلیک شد!**"
         elif ok:
@@ -1180,6 +1340,16 @@ async def _render_receipt(event, d: dict, ok: bool, left: int,
             "",
             f"✅ ارسال‌شده: **{fa_digits(sent)} از {fa_digits(total)}**",
         ]
+        if n_accounts > 1:
+            if own_sent is not None:
+                body.append(
+                    f"👥 شلیکِ همزمان با **{fa_digits(n_accounts)} اکانت** — "
+                    f"اکانتِ شما: {fa_digits(own_sent)} · بقیه: "
+                    f"{fa_digits(max(0, sent - own_sent))}")
+            else:
+                body.append(
+                    f"👥 شلیکِ همزمان با **{fa_digits(n_accounts)} اکانتِ"
+                    " فعالِ سیستم** (اکانتِ شما روشن نبود)")
         if failed:
             body.append(f"❌ ناموفق: **{fa_digits(failed)}**")
         if stopped == "flood":
@@ -1294,6 +1464,16 @@ async def handle_reporter_action(event, saas_bot, action: str) -> None:
                 buttons=[_cancel_row()],
             )
             return
+        if action == "reporter:owner:multi":
+            # v2.21.0 (OWNER-REQUEST «ریپورت بهتر»): سوییچِ حالتِ
+            # چنداکانته — شلیکِ همزمانِ بسته از همهٔ اکانت‌های در حالِ اجرا.
+            from cianet.core import (REPORTER_MULTI_SETTING,
+                                     reporter_multi_account)
+            new_val = "0" if reporter_multi_account() else "1"
+            set_setting(REPORTER_MULTI_SETTING, new_val, actor_id=uid)
+            log_action(uid, "reporter_multi_toggle", f"multi={new_val}")
+            await _page_owner(event, saas_bot, uid)
+            return
         await event.answer("مسیر نامعتبر است.", alert=True)
         return
 
@@ -1377,9 +1557,10 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
     from cianet.core import (ROLE_OWNER, WIZ_REPORTER_CAP, WIZ_REPORTER_DUP,
                              WIZ_REPORTER_FLOW, WIZ_REPORTER_TARGET,
                              log_action, reporter_daily_cap,
-                             reporter_dup_hours, reporter_quota_left,
-                             reporter_recently_reported,
-                             set_setting, REPORTER_CAP_MAX, REPORTER_CAP_MIN,
+                             reporter_dup_hours, reporter_multi_account,
+                             reporter_quota_left, reporter_recently_reported,
+                             running_report_clients, set_setting,
+                             REPORTER_CAP_MAX, REPORTER_CAP_MIN,
                              REPORTER_CAP_SETTING, REPORTER_DUP_MAX,
                              REPORTER_DUP_MIN, REPORTER_DUP_SETTING)
 
@@ -1498,15 +1679,31 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
         return True
 
     tag, client = _user_client(saas_bot, uid)
+    if client is None and reporter_multi_account():
+        # v2.21.0: اکانتِ خودِ کاربر خاموش است ولی حالتِ چنداکانته روشن
+        # است — هر اکانتِ فعالِ دیگری می‌تواند هدف را برایِ شروعِ جریان
+        # چک کند (بسته بعداً از همهٔ اکانت‌های فعال شلیک می‌شود).
+        for ctag, cclient, _my in running_report_clients():
+            tag, client = ctag, cclient
+            break
     if client is None:
         saas_bot.wizards.pop(uid, None)
-        await event.respond(
-            UI.screen("❌ اکانتِ شما روشن نیست",
-                      body=["برای ارسال گزارش، اکانتِ خودِ شما باید در حال اجرا باشد.",
-                            "از «🔊 مدیریت اکانت‌ها» اکانت‌تان را روشن کنید و دوباره بیایید."],
-                      hint="گزارش فقط با اکانتِ خودِ شما ارسال می‌شود — نه اکانت دیگران."),
-            buttons=_back_row(),
-        )
+        if reporter_multi_account():
+            await event.respond(
+                UI.screen("❌ اکانتی در حالِ اجرا نیست",
+                          body=["هیچ اکانتِ در حالِ اجرایی در دسترس نیست — نه اکانتِ خودِ شما و نه اکانتِ فعالِ دیگری.",
+                                "از «🔊 مدیریت اکانت‌ها» اکانت‌تان را روشن کنید و دوباره بیایید."],
+                          hint="حالتِ چنداکانته روشن است؛ به‌محضِ روشن‌شدنِ هر اکانتی، ارسال ممکن می‌شود."),
+                buttons=_back_row(),
+            )
+        else:
+            await event.respond(
+                UI.screen("❌ اکانتِ شما روشن نیست",
+                          body=["برای ارسال گزارش، اکانتِ خودِ شما باید در حال اجرا باشد.",
+                                "از «🔊 مدیریت اکانت‌ها» اکانت‌تان را روشن کنید و دوباره بیایید."],
+                          hint="گزارش فقط با اکانتِ خودِ شما ارسال می‌شود — نه اکانت دیگران."),
+                buttons=_back_row(),
+            )
         return True
 
     info = await check_reporter_target(client, target)

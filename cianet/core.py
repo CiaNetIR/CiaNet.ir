@@ -2073,6 +2073,51 @@ REPORTER_DUP_HOURS = 24                              # فاصله‌ی حداق�
 REPORTER_DUP_SETTING = "reporter_dup_hours"
 REPORTER_DUP_MIN = 1
 REPORTER_DUP_MAX = 72
+# v2.21.0 (OWNER-REQUEST «ریپورت بهتر»): حالتِ چنداکانته — بستهٔ گزارش
+# به‌جایِ فقطِ اکانتِ خودِ کاربر، به‌صورتِ «همزمان» از همهٔ اکانت‌های در
+# حالِ اجرای سیستم شلیک می‌شود (سهمیهٔ همان کاربر بینشان تقسیم می‌شود).
+# مالک می‌تواند از پنلِ ریپورتر خاموش/روشنش کند. سیاستِ v2.18.0–v2.20.0
+# («فقط اکانتِ خودِ کاربر») با خواستهٔ صریحِ مالک عوض شد.
+REPORTER_MULTI_SETTING = "reporter_multi_account"
+REPORTER_MULTI_MAX_ACCOUNTS = 15   # سقفِ امنِ اکانت‌های شرکت‌کننده در یک بسته
+
+
+def reporter_multi_account() -> bool:
+    """v2.21.0: سوییچِ حالتِ چنداکانتهٔ مالک (پیش‌فرض روشن — خواستهٔ
+    صریحِ مالک در ۲۰۲۶-10-22). خاموش یعنی رفتارِ v2.20.0: فقط اکانتِ
+    خودِ کاربرِ گزارش‌دهنده."""
+    return str(get_setting(REPORTER_MULTI_SETTING, "1")).strip() == "1"
+
+
+def running_report_clients(exclude_ids=None, limit=None):
+    """همهٔ کلاینت‌های READY سیستم — برای بستهٔ چنداکانتهٔ ریپورتر.
+
+    خروجی: [(tag, client, my_id)] — بدونِ کلاینتِ تکرار، با سقفِ امنِ
+    REPORTER_MULTI_MAX_ACCOUNTS. exclude_ids: آیدی‌های تلگرامی که نباید
+    شلیک کنند (مثلاً خودِ هدف، اگر اتفاقی در سیستم لاگین باشد).
+    نکته: ACCOUNTS/is_running پایین‌تر در همین ماژول تعریف شده‌اند —
+    فراخوانیِ زمان-اجرا است و ترتیبِ تعریفِ ماژول مشکلی نمی‌سازد.
+    """
+    out, seen = [], set()
+    excl = {i for i in (exclude_ids or []) if i is not None}
+    cap = int(limit or REPORTER_MULTI_MAX_ACCOUNTS)
+    for tag, entry in list(ACCOUNTS.items()):
+        try:
+            if not is_running(tag):
+                continue
+            client = getattr(getattr(entry, "bot", None), "client", None)
+            if client is None or id(client) in seen:
+                continue
+            my_id = getattr(getattr(entry, "bot", None), "my_id", None)
+            if my_id is not None and my_id in excl:
+                continue
+            seen.add(id(client))
+            out.append((tag, client, my_id))
+            if len(out) >= cap:
+                break
+        except Exception:
+            continue
+    return out
 
 
 def ensure_reporter_schema() -> None:
@@ -8225,7 +8270,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-22-v2.20.0"
+BUILD_VERSION = "2026-10-22-v2.21.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
