@@ -7253,7 +7253,8 @@ UI_STATES_NEED_DOT = {"starting", "connecting", "pending", "stopping", "warn",
                       "paused", "disabled"}
 
 
-def bot_error_alert_text(exc: Exception, is_owner: bool = False) -> str:
+def bot_error_alert_text(exc: Exception, is_owner: bool = False,
+                         base: str = None) -> str:
     """v2.19.1 (DIAG): متنِ هشدارِ catch-all دیسپچر — خود-تشخیصی.
 
     پس از باگِ production ریپورتر (۲۰۲۶-۱۰-۲۱) معلوم شد پیامِ عمومیِ
@@ -7271,6 +7272,11 @@ def bot_error_alert_text(exc: Exception, is_owner: bool = False) -> str:
       باگِ v2.19.0 را در یک نگاه لو می‌داد.)
 
     متنِ برگشتی همیشه ≤ ۲۰۰ کاراکتر است (سقفِ alert تلگرام).
+
+    v2.19.3 (IMG_8254): پارامترِ ``base`` اضافه شد — دیسپچرِ **متن**ِ
+    ویزارد (saas.py) هم همین تابع را استفاده می‌کند ولی متنِ پایه‌اش
+    «پیام» است نه «دکمه». پیش‌فرض دقیقاً همان متنِ قبلی است (سازگار
+    با v2.19.1).
     """
     name = type(exc).__name__
     if name == "FloodWaitError":
@@ -7282,7 +7288,8 @@ def bot_error_alert_text(exc: Exception, is_owner: bool = False) -> str:
             return (f"⏳ تلگرام فعلاً محدودش کرده — حدود {secs} ثانیه صبر کن"
                     " و دوباره بزن.")
         return "⏳ تلگرام فعلاً محدودش کرده — چند ثانیه صبر کن و دوباره بزن."
-    base = "❌ خطا در پردازش این دکمه. دوباره تلاش کن."
+    if base is None:
+        base = "❌ خطا در پردازش این دکمه. دوباره تلاش کن."
     if not is_owner:
         return base
     # str(exc) ممکن است چندخطی/طولانی باشد → یک‌خطی و بریده
@@ -8063,7 +8070,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-21-v2.19.2"
+BUILD_VERSION = "2026-10-21-v2.19.3"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)

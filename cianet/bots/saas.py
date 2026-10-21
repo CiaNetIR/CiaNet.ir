@@ -8613,9 +8613,25 @@ class SaaSBot:
                     if handled:
                         return
                 except Exception as e:
-                    print(f"⚠️ [saas_bot] خطا در ویزارد: {e}")
+                    print(f"⚠️ [saas_bot] خطا در ویزارد: {type(e).__name__}: {e}")
                     self.wizards.pop(event.sender_id, None)
-                    await event.respond(_friendly_error(e, "callback"))
+                    # v2.19.3 (DIAG · IMG_8254): همین مسیرِ متنی بود که باگِ
+                    # «خطایی رخ داد» ریپورتر را پنهان نگه داشت — پیامِ عمومیِ
+                    # بدونِ نامِ خطا. حالا همان هشدارِ خود-تشخیصیِ دیسپچرِ
+                    # دکمه (v2.19.1) اینجا هم هست: FloodWait پیامِ آرام می‌گیرد
+                    # و OWNER نامِ خطا + جزئیاتِ کوتاهش را می‌بیند؛ فقط «base»
+                    # پیام‌محور است چون اینجا دکمه‌ای در کار نیست.
+                    try:
+                        _own = False
+                        try:
+                            _own = self._role(event.sender_id) == ROLE_OWNER
+                        except Exception:
+                            pass
+                        await event.respond(bot_error_alert_text(
+                            e, is_owner=_own,
+                            base="❌ خطا در پردازش پیامِ شما. دوباره تلاش کن."))
+                    except Exception:
+                        pass
                     return
 
             # اگر ویزاردِ ما این پیام را نخواست، آن را به پنل مدیریت

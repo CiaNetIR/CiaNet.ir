@@ -735,6 +735,31 @@ def _cancel_row():
     return [UI.neutral(UI.L_CANCEL, "reporter:cancel")]
 
 
+async def _show(event, text, buttons=None) -> None:
+    """v2.19.3 (PROD-BUGFIX · IMG_8254): رندرِ مسیر-آگنوستیکِ صفحات.
+
+    باگِ production (۲۰۲۶-۱۰-۲۱): بعد از فرستادنِ هدفِ معتبر (لینک یا
+    یوزرنیم) کاربر «❌ خطایی رخ داد. دوباره تلاش کن.» می‌گرفت. ریشه:
+    صفحاتِ بعد از هدف با ``event.edit`` رندر می‌شدند؛ در مسیرِ متنِ
+    ویزارد، event از نوعِ NewMessage است و ``edit``ِ آن از طریقِ
+    ``__getattr__`` به ``Message.edit`` همان پیامِ **کاربر** واگذار
+    می‌شود — ربات مؤلفِ آن پیام نیست → ``MessageAuthorRequiredError``
+    → پیامِ عمومیِ خطا.
+
+    نکته‌ی ظریف: ``hasattr(event, "edit")`` روی NewMessage واقعی هم
+    True است (همان واگذاریِ ``__getattr__``) — پس تشخیصِ مسیر فقط با
+    ``isinstance`` روی CallbackQuery درست است. صفحاتی که از مسیرِ متن
+    هم رندر می‌شوند (اولین صفحه بعد از هدف: دامنه/دسته) با این هلپر
+    رندر می‌شوند — در مسیرِ دکمه همان edit قبلی، در مسیرِ متن پیامِ
+    جدیدِ ربات با همان دکمه‌ها.
+    """
+    from telethon import events as _tg_events
+    if isinstance(event, _tg_events.CallbackQuery.Event):
+        await event.edit(text, buttons=buttons)
+    else:
+        await event.respond(text, buttons=buttons)
+
+
 async def _page_scope(event, d: dict) -> None:
     """دامنه‌ی گزارش برای کانال/گروه: فقط خودِ هدف یا همراه با شواهد."""
     from cianet.bots.ui import UI
@@ -751,8 +776,8 @@ async def _page_scope(event, d: dict) -> None:
         [UI.go("🎯 فقط خودِ هدف", "reporter:scope:peer")],
         [UI.go("📨 همراه با پیام‌های اخیر", "reporter:scope:msgs")],
     ]
-    await event.edit(UI.screen("📨 دامنه‌ی گزارش", body=body),
-                     buttons=rows + _back_row())
+    await _show(event, UI.screen("📨 دامنه‌ی گزارش", body=body),
+                buttons=rows + _back_row())
 
 
 def _target_label(d: dict) -> str:
@@ -776,7 +801,8 @@ async def _page_cat(event, d: dict) -> None:
         [UI.go("🎭 کلاهبرداری (Scam)", "reporter:cat:scam")],
         [UI.go("🃏 جعلی (Fake)", "reporter:cat:fake")],
     ]
-    await event.edit(UI.screen("🎭 نوع تخلف", body=body), buttons=rows + _back_row())
+    await _show(event, UI.screen("🎭 نوع تخلف", body=body),
+                buttons=rows + _back_row())
 
 
 async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
