@@ -1383,6 +1383,11 @@ def init_db() -> None:
             plan TEXT NOT NULL,
             amount INTEGER,
             receipt_ref TEXT,
+            -- v2.19.4 (AUDIT-36 C1): این ستون قبلاً فقط در شاخه‌ی مهاجرت
+            -- ساخته می‌شد نه در CREATE TABLE — یعنی هر نصبِ تازه (یا رباتِ
+            -- اختصاصی با DB تازه) در «ارسال رسید کارتی» با OperationalError
+            -- می‌شکست (create_payment). حالا از اول ساخته می‌شود.
+            receipt_file_uid TEXT,
             status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
             reviewed_by INTEGER,
             created_at TEXT NOT NULL,
@@ -1406,7 +1411,13 @@ def init_db() -> None:
             -- v2.9.0: تخفیف
             discount_code TEXT,
             discount_percent INTEGER DEFAULT 0,
-            original_amount_toman INTEGER
+            original_amount_toman INTEGER,
+            -- v2.19.4 (AUDIT-36 C1): این دو ستون مثل receipt_file_uidِ
+            -- payments فقط در مهاجرت ساخته می‌شدند — DB تازه یعنی
+            -- create_order با «no such column: amount_salt» می‌ترکید و کلِ
+            -- جریان خرید روی نصبِ تازه مرده بود. حالا در CREATE TABLE هم هست.
+            amount_salt TEXT DEFAULT '0.00',
+            receipt_file_uid TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
@@ -1647,15 +1658,46 @@ def init_db() -> None:
     # affiliate_commissions و ستون wallet_balance روی users وجود نداشتند
     # و endpoint‌های web_panel با 500 error شکست می‌کردند. حالا اینجا هم
     # صدا می‌زنیم تا DB بعد از init_db() همیشه schema کامل داشته باشه.
-    try:
-        ensure_wallet_schema()
-    except Exception as _e:
-        print(f"⚠️ [init_db] ensure_wallet_schema failed: {type(_e).__name__}: {_e}")
+    # v2.19.4 (AUDIT-36 M8): wallet/block هم مثل reporter (v2.19.0) سه
+    # تلاش با فاصله می‌گیرند — قفلِ لحظه‌ایِ DB موقعِ بوتِ هم‌زمانِ bot و
+    # web_panel دیگر جریان را «خطا در پردازشِ» همیشگی نمی‌کند.
+    for _attempt_w in range(3):
+        try:
+            ensure_wallet_schema()
+            break
+        except Exception as _e:
+            if _attempt_w == 2:
+                print(f"⚠️ [init_db] ensure_wallet_schema failed after retries: "
+                      f"{type(_e).__name__}: {_e}")
+            else:
+                time.sleep(1.0)
     # v2.17.0: ستون‌های بلاک کاربر
-    try:
-        ensure_block_schema()
-    except Exception as _e:
-        print(f"⚠️ [init_db] ensure_block_schema failed: {type(_e).__name__}: {_e}")
+    for _attempt_b in range(3):
+        try:
+            ensure_block_schema()
+            break
+        except Exception as _e:
+            if _attempt_b == 2:
+                print(f"⚠️ [init_db] ensure_block_schema failed after retries: "
+                      f"{type(_e).__name__}: {_e}")
+            else:
+                time.sleep(1.0)
+    # v2.19.4 (AUDIT-36 C2 — CRITICAL): ستون‌های رفرال (referred_by /
+    # referral_rewards) تا حالا فقط از main() ساخته می‌شدند (فراخوانیِ
+    # fire-once بدون retry)؛ شواهدِ production: بکاپ‌های واقعیِ سرور این
+    # ستون را ندارند و «👤 حساب کاربری» — هابِ کیف پول/سفارش‌ها/دعوت —
+    # با OperationalError می‌شکست. حالا مثل reporter: سه تلاش در init_db
+    # + لایه‌ی دومِ self-heal در لحظه‌ی استفاده (_ensure_referral_ready).
+    for _attempt_rf in range(3):
+        try:
+            ensure_referral_schema()
+            break
+        except Exception as _e:
+            if _attempt_rf == 2:
+                print(f"⚠️ [init_db] ensure_referral_schema failed after retries: "
+                      f"{type(_e).__name__}: {_e}")
+            else:
+                time.sleep(1.0)
     # v2.18.0: جدول لاگ ریپورتر (متادیتا فقط — بدون محتوا)
     # v2.19.0 (SELF-HEAL): سه تلاش با فاصله — قفلِ لحظه‌ایِ DB موقعِ بوت
     # (تراکنشِ هم‌زمانِ web_panel) باعث شده بود جدول ساخته نشود و دکمه‌های
@@ -2149,23 +2191,36 @@ def reporter_dup_hours() -> int:
     return max(REPORTER_DUP_MIN, min(REPORTER_DUP_MAX, val))
 
 
-def reporter_recently_reported(user_id: int, target_id, hours: int = None) -> bool:
+def reporter_recently_reported(user_id: int, target_id, hours: int = None,
+                              target: str = None) -> bool:
     """آیا همین کاربر همین هدف را در INTERVAL ساعتِ اخیر گزارش داده؟
     target_id ممکن است None باشد (هدفِ حل‌نشده) — در آن حالت مقایسه با
     رشته‌ی هدف انجام می‌شود تا دورزدنِ سهمیه با یوزرنیم/آیدیِ متناوب سخت بماند.
-    v2.19.2: hours=None یعنی مقدارِ تنظیم‌شده‌ی مالک (reporter_dup_hours)."""
-    if target_id is None:
-        return False
+    v2.19.2: hours=None یعنی مقدارِ تنظیم‌شده‌ی مالک (reporter_dup_hours).
+    v2.19.4 (AUDIT-36 L8): fallback رشته‌ای که docstring وعده می‌داد بالاخره
+    پیاده شد — وقتی target_id هست همان مقایسه‌ی عددی؛ وقتی None است و
+    target (رشته) داده شده، مقایسه روی ستونِ target انجام می‌شود."""
     if hours is None:
         hours = reporter_dup_hours()
     if not _ensure_reporter_ready():
         return False  # جدول نیست → «قبلاً گزارش داده» فرض نکن (fail-open امن)
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(_DATETIME_FMT)
+    if target_id is not None:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM reporter_logs "
+                "WHERE user_id = ? AND target_id = ? AND created_at >= ? LIMIT 1",
+                (user_id, int(target_id), cutoff),
+            ).fetchone()
+        return row is not None
+    if not target:
+        return False
     with _conn() as c:
         row = c.execute(
             "SELECT 1 FROM reporter_logs "
-            "WHERE user_id = ? AND target_id = ? AND created_at >= ? LIMIT 1",
-            (user_id, int(target_id), cutoff),
+            "WHERE user_id = ? AND target_id IS NULL AND target = ? "
+            "AND created_at >= ? LIMIT 1",
+            (user_id, str(target)[:120], cutoff),
         ).fetchone()
     return row is not None
 
@@ -2429,6 +2484,28 @@ def ensure_referral_schema() -> None:
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by)")
 
 
+def _ensure_referral_ready() -> bool:
+    """v2.19.4 (AUDIT-36 C2 — لایه‌ی دوم): probe ارزان + خوددرمانیِ لحظه‌ای.
+
+    اگر ستون‌های رفرال به هر دلیلی (DB قدیمی، بوتِ ناقص، مهاجرتِ از دست
+    رفته) وجود نداشته باشند، همین‌جا ساخته می‌شوند تا «👤 حساب کاربری»
+    (هابِ کیف پول/سفارش‌ها/دعوت) هرگز با OperationalError نشکند — همان
+    الگوی _ensure_reporter_ready (v2.19.0). بازگشتِ False یعنی حتی بعد
+    از تلاشِ بازسازی هم آماده نیست (fail-open امن: آمارِ رفرال صفر).
+    """
+    try:
+        with _conn() as c:
+            c.execute("SELECT referred_by, referral_rewards FROM users LIMIT 1")
+        return True
+    except Exception:
+        try:
+            ensure_referral_schema()
+            return True
+        except Exception as _e:
+            print(f"⚠️ [referral] self-heal failed: {type(_e).__name__}: {_e}")
+            return False
+
+
 def ensure_wallet_schema() -> None:
     """Schema کیف پول کاربر — ستونِ موجودی روی users + جدولِ تراکنش‌ها.
 
@@ -2476,6 +2553,32 @@ def ensure_wallet_schema() -> None:
                 print("✅ [expiry] ستون extensions_applied به orders اضافه شد")
         except Exception as _e:
             print(f"⚠️ [expiry] add column extensions_applied failed: {_e}")
+        # v2.19.4 (AUDIT-36 C1 — لایه‌ی دومِ خوددرمانی): سه ستونی که قبلاً
+        # فقط در _migrate_schema ساخته می‌شدند، اینجا هم به‌صورت ALTERِ
+        # idempotent اضافه می‌شوند. دلیل: CREATE TABLE IF NOT EXISTS روی
+        # نصبِ تازه‌ای که با نسخه‌ی خرابِ قبلی ساخته شده (جدول بدون ستون)
+        # هیچ ستونی اضافه نمی‌کند؛ این بلوک همان نصب‌ها را هم نجات می‌دهد —
+        # همان الگویی که برای extensions_applied بالاتر رفت.
+        try:
+            _pay_cols = {r[1] for r in c.execute("PRAGMA table_info(payments)").fetchall()}
+            if "receipt_file_uid" not in _pay_cols:
+                c.execute("ALTER TABLE payments ADD COLUMN receipt_file_uid TEXT")
+                print("✅ [saas_db] ستون receipt_file_uid به payments اضافه شد (self-heal v2.19.4)")
+        except Exception as _e:
+            print(f"⚠️ [saas_db] self-heal payments.receipt_file_uid: {_e}")
+        try:
+            _ord_cols = {r[1] for r in c.execute("PRAGMA table_info(orders)").fetchall()}
+            _ord_added = False
+            if "amount_salt" not in _ord_cols:
+                c.execute("ALTER TABLE orders ADD COLUMN amount_salt TEXT DEFAULT '0.00'")
+                _ord_added = True
+            if "receipt_file_uid" not in _ord_cols:
+                c.execute("ALTER TABLE orders ADD COLUMN receipt_file_uid TEXT")
+                _ord_added = True
+            if _ord_added:
+                print("✅ [saas_db] ستون‌های amount_salt/receipt_file_uid به orders اضافه شد (self-heal v2.19.4)")
+        except Exception as _e:
+            print(f"⚠️ [saas_db] self-heal orders columns: {_e}")
         # ۲) جدول تراکنش‌ها
         c.execute(
             "CREATE TABLE IF NOT EXISTS wallet_transactions ("
@@ -2578,6 +2681,8 @@ def attach_referrer(user_id: int, referrer_id: int) -> bool:
     ندارد — تا کسی نتواند با /start زدنِ دوباره برای خودش یا دیگری
     امتیاز بسازد. خود-دعوتی هم رد می‌شود.
     """
+    if not _ensure_referral_ready():
+        return False
     if not user_id or not referrer_id or user_id == referrer_id:
         return False
     now_ts = time.time()
@@ -2600,7 +2705,15 @@ def attach_referrer(user_id: int, referrer_id: int) -> bool:
 
 
 def referral_stats(user_id: int) -> dict:
-    """{invited, rewards, remaining} — پیشرفتِ دعوت‌های یک کاربر."""
+    """{invited, rewards, remaining} — پیشرفتِ دعوت‌های یک کاربر.
+
+    v2.19.4 (AUDIT-36 C2): اگر ستون‌ها نباشند، اول ساخته می‌شوند و اگر
+    حتی بعد از آن هم نباشند، آمارِ صفرِ امن برگردانده می‌شود — صفحهٔ
+    «حساب کاربری» هرگز به‌خاطرِ رفرال نمی‌شکند.
+    """
+    if not _ensure_referral_ready():
+        return {"invited": 0, "rewards": 0, "pending": 0,
+                "remaining": REFERRAL_GOAL if REFERRAL_GOAL else 0}
     with _conn() as c:
         invited = c.execute(
             "SELECT COUNT(*) AS n FROM users WHERE referred_by = ?", (user_id,)
@@ -2620,6 +2733,8 @@ def referral_stats(user_id: int) -> dict:
 
 def claim_referral_rewards(user_id: int) -> int:
     """اعطای اتمیک جایزه دعوت در یک تراکنش BEGIN IMMEDIATE همراه با قید یکتایی."""
+    if not _ensure_referral_ready():
+        return 0
     granted = 0
     with _conn_immediate() as c:
         c.execute(
@@ -2690,10 +2805,25 @@ def claim_referral_rewards(user_id: int) -> int:
 #  موجودی را آپدیت می‌کنند و هم ردِ تراکنش را با balance_after می‌سازند.
 
 def get_wallet_balance(user_id: int) -> int:
-    """موجودی کیف پول کاربر به Toman (۰ اگر کاربر/ستون نباشد)."""
-    with _conn() as c:
-        row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    return int(row["wallet_balance"]) if row and row["wallet_balance"] is not None else 0
+    """موجودی کیف پول کاربر به Toman (۰ اگر کاربر/ستون نباشد).
+
+    v2.19.4 (AUDIT-36 M8 — لایه‌ی دوم): اگر ستونِ wallet_balance به هر
+    دلیلی (بوتِ ناقص/قفلِ لحظه‌ایِ DB) وجود نداشته باشد، یک بار
+    بازسازی می‌شود و دوباره تلاش می‌شود — منوی کاربر دیگر «خطا در
+    پردازشِ» همیشگی نمی‌گیرد. شکستِ نهایی = ۰ (fail-open امن).
+    """
+    try:
+        with _conn() as c:
+            row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return int(row["wallet_balance"]) if row and row["wallet_balance"] is not None else 0
+    except Exception:
+        try:
+            ensure_wallet_schema()
+            with _conn() as c:
+                row = c.execute("SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+            return int(row["wallet_balance"]) if row and row["wallet_balance"] is not None else 0
+        except Exception:
+            return 0
 
 
 # v2.12.10 (QA2-USER C8 / AUDIT-10-C C1): getter/setter برای auto_renew_enabled.
@@ -7279,7 +7409,10 @@ def bot_error_alert_text(exc: Exception, is_owner: bool = False,
     با v2.19.1).
     """
     name = type(exc).__name__
-    if name == "FloodWaitError":
+    # v2.19.4 (AUDIT-36 L1): خواهرهای دارایِ «seconds» هم پیامِ آرام می‌گیرند
+    # (SlowModeWaitError و هم‌خانواده‌ها — همان منطقِ FloodWait).
+    _has_wait_secs = bool(getattr(exc, "seconds", None))
+    if name == "FloodWaitError" or (name.endswith("WaitError") and _has_wait_secs):
         try:
             secs = int(getattr(exc, "seconds", 0) or 0)
         except Exception:
@@ -8070,7 +8203,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-21-v2.19.3"
+BUILD_VERSION = "2026-10-21-v2.19.4"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -9343,10 +9476,17 @@ def load_config() -> dict:
         return {}
     try:
         mtime = os.path.getmtime(CONFIG_FILE)
+        size = os.path.getsize(CONFIG_FILE)
     except OSError:
         mtime = 0.0
+        size = -1
     # از کش استفاده کن اگه فایل تغییری نکرده
-    if _CONFIG_CACHE is not None and _CONFIG_CACHE_MTIME == mtime:
+    # v2.19.4 (AUDIT-36 M7): mtime به‌تنهایی کافی نیست — روی فایل‌سیستم‌های
+    # با گرانولاریتیِ درشت (برخی mountهای شبکه / writeهای پشت‌سرهم) فایلِ
+    # خرابِ هم‌mtime از کش سرو می‌شد و CONFIG_INVALID گزارش نمی‌شد و گاردِ
+    # save هم دور زده می‌شد. حالا (mtime, size) هر دو باید یکی باشند.
+    if _CONFIG_CACHE is not None and _CONFIG_CACHE_MTIME == mtime \
+            and getattr(load_config, "_cache_size", None) == size:
         _config_state = CONFIG_VALID
         # یک کپی برگردون تا caller نتونه کش رو mutate کنه
         # v2.12.28 (HUNT-5 #2): deepcopy به‌جای shallow dict() — قبلاً
@@ -9362,6 +9502,7 @@ def load_config() -> dict:
         _config_state = CONFIG_VALID
         _CONFIG_CACHE = cfg
         _CONFIG_CACHE_MTIME = mtime
+        load_config._cache_size = size
         # v2.12.28: deepcopy
         import copy as _copy_mod2
         return _copy_mod2.deepcopy(cfg)

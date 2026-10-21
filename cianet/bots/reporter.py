@@ -328,20 +328,44 @@ def _extract_chat_from_link(text: str):
         match = re.search(pattern, text)
         if match:
             username = match.group(1)
-            if username not in ['joinchat', '+']:
+            # v2.19.4 (AUDIT-36 M2): 'c' هم blacklist — لینکِ خصوصیِ
+            # t.me/c/<id> بالاتر (در extract_reporter_targets) به آیدیِ
+            # عددیِ -100... تبدیل می‌شود؛ اگر اینجا جدا نشود، سگمنتِ 'c'
+            # به‌عنوانِ یوزرنیمِ ساختگی برگردد و پیامِ خطا مبهم می‌شد
+            # («entity corresponding to "c"»).
+            if username not in ['joinchat', '+', 'c']:
                 return username
     return None
 
 
-def extract_reporter_targets(text: str):
-    """متن چندخطی → لیست یونیک اهداف (یوزرنیم/آیدی/لینک) — عین ZIP.
+# v2.19.4 (AUDIT-36 M3): هدفِ قابلِ قبول در مسیرِ ویزارد — یوزرنیمِ
+# لاتینِ تمیز یا عدد (خالی از متن/جمله). قبل از این، هر متنِ غیرخالی
+# «هدف» تلقی می‌شد (شاخه‌ی «خطِ خام»ِ پورتِ ZIP برای ابزارِ batch) و
+# پیامِ «هدفی پیدا نشد» کدِ مرده بود؛ متنِ «سلام» به‌عنوانِ یوزرنیم به
+# get_entity می‌رفت و اگر اتفاقی حل می‌شد، جریانِ گزارشِ اکانتِ بی‌ربط
+# ادامه پیدا می‌کرد.
+_TARGET_OK_RE = re.compile(r'[A-Za-z][A-Za-z0-9_]{2,30}|-?\d{1,16}')
 
-    ترتیب امتحان برای هر خط: لینکِ پیام → لینکِ چت → «@name» → خطِ خام.
+
+def extract_reporter_targets(text: str):
+    """متن چندخطی → لیست یونیک اهداف (یوزرنیم/آیدی/لینک).
+
+    ترتیب امتحان برای هر خط: لینکِ خصوصیِ t.me/c/<id> (v2.19.4 → آیدیِ
+    عددیِ -100…) → لینکِ پیام → لینکِ چت → «@name» → خطِ خام.
     """
     usernames = []
     for line in text.split('\n'):
         line = line.strip()
         if not line:
+            continue
+        # v2.19.4 (AUDIT-36 M2 — MEDIUM): لینکِ کانال/گروهِ خصوصی — قبلاً
+        # سگمنتِ 'c' به‌عنوانِ یوزرنیم برمی‌گشت و هرگز حل نمی‌شد. حالا به
+        # آیدیِ عددیِ مارک‌دارِ چنل تبدیل می‌شود (-100…) که کلاینتِ خودِ
+        # کاربر (اگر عضو باشد) می‌تواند resolve کند. لینکِ پیامِ خصوصی هم
+        # همین‌طور (msg_id فعلاً استفاده نمی‌شود — chat ملاک است).
+        m_private = re.search(r'(?:https?://)?(?:t|telegram)\.me/c/(\d+)', line)
+        if m_private:
+            usernames.append(f"-100{m_private.group(1)}")
             continue
         username, _ = _extract_from_link(line)
         if username:
@@ -603,10 +627,14 @@ def _quota_bar(left: int, cap: int) -> str:
 
 async def _render_coming_soon(event) -> None:
     from cianet.bots.ui import UI
+    # v2.19.4 (AUDIT-36 L3): این صفحه فقط برای کاربرِ عادی وقتی که مالک
+    # ریپورتر را خاموش کرده رندر می‌شود — «در حال ساخت» دروغِ گمراه‌کننده‌ای
+    # بود (بخش ساخته شده و فقط غیرفعال است) و برای پشتیبانی/اعتمادِ کاربر
+    # بد بود. متنِ صادقانه جایگزین شد.
     await event.edit(
         "🎙 **ریپورتر**\n\n"
-        "🚧 این بخش در حال ساخت است و به‌زودی فعال می‌شود.\n"
-        "⏳ لطفاً منتظر خبرهای بعدی باشید.",
+        "🔕 این بخش فعلاً توسط مدیریت غیرفعال شده است.\n"
+        "⏳ به‌زودی دوباره فعال می‌شود.",
         buttons=[UI.nav_row()],
     )
 
@@ -918,7 +946,7 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
                            alert=True)
         return
     info = d.get("info", {})
-    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id")):
+    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id"), target=str(d.get("target") or "")):
         await event.answer(f"⛔ این هدف را در {fa_digits(reporter_dup_hours())} ساعتِ اخیر"
                            " گزارش داده‌اید.", alert=True)
         return
@@ -1165,8 +1193,12 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
 
     # ── سقفِ جدیدِ مالک ──
     if state == WIZ_REPORTER_CAP:
-        saas_bot.wizards.pop(uid, None)
+        # v2.19.4 (AUDIT-36 M1 — MEDIUM): pop فقط بعد از اعتبارسنجیِ موفق.
+        # قبلاً pop در خطِ اول بود → ورودیِ نامعتبر (متن/اعشاری/خالی) پیامِ
+        # «عدد بفرست» می‌داد ولی ویزارد مرده بود و عددِ بعدیِ مالک به
+        # هیچ‌جا نمی‌رسید (سکوتِ مطلق — بازتولیدشده در شبیه‌سازِ 36-f).
         if saas_bot._role(uid) != ROLE_OWNER:
+            saas_bot.wizards.pop(uid, None)
             await event.respond("⛔ این عملیات فقط برای مالک است.")
             return True
         raw = text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
@@ -1174,7 +1206,8 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
             val = int(raw)
         except ValueError:
             await event.respond("❌ لطفاً فقط یک عدد بفرستید.")
-            return True
+            return True  # ویزارد باز می‌ماند تا عددِ درست برسد
+        saas_bot.wizards.pop(uid, None)
         val = max(REPORTER_CAP_MIN, min(REPORTER_CAP_MAX, val))
         set_setting(REPORTER_CAP_SETTING, str(val), actor_id=uid)
         log_action(uid, "reporter_cap_changed", f"cap={val}")
@@ -1188,8 +1221,9 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
 
     # ── v2.19.2: پنجره‌ی جدیدِ گزارشِ مجدد از مالک ──
     if state == WIZ_REPORTER_DUP:
-        saas_bot.wizards.pop(uid, None)
+        # v2.19.4 (AUDIT-36 M1 — MEDIUM): مثل CAP — pop بعد از validate.
         if saas_bot._role(uid) != ROLE_OWNER:
+            saas_bot.wizards.pop(uid, None)
             await event.respond("⛔ این عملیات فقط برای مالک است.")
             return True
         raw = text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
@@ -1197,7 +1231,8 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
             val = int(raw)
         except ValueError:
             await event.respond("❌ لطفاً فقط یک عدد (به ساعت) بفرستید.")
-            return True
+            return True  # ویزارد باز می‌ماند
+        saas_bot.wizards.pop(uid, None)
         val = max(REPORTER_DUP_MIN, min(REPORTER_DUP_MAX, val))
         set_setting(REPORTER_DUP_SETTING, str(val), actor_id=uid)
         log_action(uid, "reporter_dup_changed", f"dup_hours={val}")
@@ -1231,6 +1266,18 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
         return True
 
     targets = extract_reporter_targets(text)
+    # v2.19.4 (AUDIT-36 L2): لینکِ دعوت (invite) از داخلش آیدی قابلِ استخراج
+    # نیست — پیامِ صریح به‌جای خطای مبهمِ «get_entity روی کلِ URL».
+    if re.search(r'(?:t|telegram)\.me/(?:joinchat|\+)', text, re.IGNORECASE):
+        await event.respond(
+            UI.screen("⛔ لینک دعوت پشتیبانی نمی‌شود",
+                      body=["از لینک‌های دعوت (joinchat / +) نمی‌توان هدف ساخت —",
+                            "آیدیِ عددیِ چنل/گروه یا یوزرنیمِ عمومیِ هدف را بفرستید.",
+                            "اگر عضوِ همان چت هستید، آیدیِ عددی آن را از اطلاعات چت کپی کنید."],
+                      hint="مثال: @cynetgap یا -1234567890"),
+            buttons=[_cancel_row()],
+        )
+        return True  # ویزارد باز می‌ماند
     if not targets:
         await event.respond("❌ هدفی در پیام شما پیدا نشد — یوزرنیم/لینک/آیدی بفرستید.")
         return True  # ویزارد باز می‌ماند تا دوباره بفرستد
@@ -1238,6 +1285,12 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
         await event.respond("⛔ هر بار فقط **یک هدف** — اولین گزارش را برای اولین هدف کامل کنید.")
         return True
     target = targets[0]
+    # v2.19.4 (AUDIT-36 M3 — MEDIUM): فقط الگوی مجاز (یوزرنیمِ لاتینِ تمیز
+    # یا عدد) — قبلاً هر متنِ غیرخالی هدف تلقی می‌شد و «سلام» به‌عنوانِ
+    # یوزرنیم به سرور می‌رفت. ویزارد باز می‌ماند.
+    if not _TARGET_OK_RE.fullmatch(target):
+        await event.respond("❌ هدفی در پیام شما پیدا نشد — یوزرنیم/لینک/آیدی بفرستید.")
+        return True
 
     tag, client = _user_client(saas_bot, uid)
     if client is None:
@@ -1269,7 +1322,7 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
     if ttype and ttype != actual and not (ttype == "user" and actual == "bot"):
         ttype = actual  # نوعِ واقعی ملاک است؛ در صفحه‌ی بعد نمایش داده می‌شود
 
-    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id")):
+    if info.get("id") is not None and reporter_recently_reported(uid, info.get("id"), target=target):
         saas_bot.wizards.pop(uid, None)
         dup_h = reporter_dup_hours()
         from cianet.core import fa_digits

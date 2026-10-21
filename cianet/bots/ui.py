@@ -204,6 +204,21 @@ class UI:
         return UI.btn(f"{UI.GRAY} {label}", route)
 
     @staticmethod
+    def noop(label: str):
+        """
+        v2.19.4 (AUDIT-36 H6 — HIGH): دکمه‌ی تزئینیِ بی‌اثر (شمارنده‌ی صفحه).
+
+        admin.py:852 (نوارِ صفحه‌بندیِ «دستگاه‌های لاگین‌شده») این متد را
+        صدا می‌زد ولی هرگز تعریف نشده بود → هر اکانتی با بیش از ۸ دستگاهِ
+        دیگر، کلِ صفحه‌ی نشست‌ها را با AttributeError از دست می‌داد
+        («خطا در پردازش این دکمه»). مسیرِ ثابتِ NAV_NOOP («nav:noop») از
+        قبل در دیسپچرِ هر دو ربات جوابِ بی‌اثرِ امن می‌گیرد — فقط سازنده‌اش
+        جا افتاده بود. خروجی: یک دکمه‌ی خنثی که کلیک روی آن answer
+        می‌شود و هیچ کاری نمی‌کند.
+        """
+        return UI.neutral(label, NAV_NOOP)
+
+    @staticmethod
     def refresh(route: str):
         return UI.btn(f"{UI.REFRESH} بروزرسانی", route, style="primary")
 

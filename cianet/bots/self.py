@@ -964,7 +964,12 @@ class SelfBot:
     def _parse_tg_link(link: str):
         # scheme اختیاری (کاربر معمولاً بدونِ https می‌فرستد)، و هر چیزی بعد
         # از شماره‌ی پیام (؟single، ؟comment=…) نادیده گرفته می‌شود.
-        m = re.match(r'(?:https?://)?t\.me/(?:c/)?([^/?\s]+)/(\d+)', link.strip())
+        # v2.19.4 (AUDIT-36 L6): دامنه‌ی telegram.me هم پشتیبانی می‌شود و در
+        # پیامِ داخلِ تاپیک (t.me/g/5/9 → msg=9) آخرین id ملاک است، نه idِ
+        # ریشه‌ی تاپیک — قبلاً پیامِ اشتباه یا «پیدا نشد» می‌داد.
+        m = re.match(
+            r'(?:https?://)?(?:t|telegram)\.me/(?:c/)?([^/?\s]+)/(?:\d+/)*(\d+)',
+            link.strip())
         return (m.group(1), int(m.group(2))) if m else (None, None)
 
     # سقفِ کلِ عملیات کپی (ثانیه) و سقفِ حجمِ فایل. جدا از پوششِ ۹۰ ثانیه‌ی
@@ -1266,11 +1271,19 @@ class SelfBot:
 
             # ۶) ارسال به Saved Messages
             if dl:
-                await self.client.send_file("me", dl, caption=caption)
-                await _edit("✅ کپی شد ← Saved Messages")
+                # v2.19.4 (AUDIT-36 M11): None = گیتِ ضدبن رد کرد — پیامِ موفقیتِ
+                # دروغ نده؛ کاربر بداند بعداً دوباره امتحان کند.
+                _cp_sent = await self.client.send_file("me", dl, caption=caption)
+                if _cp_sent is None:
+                    await _edit("🛡️ محدودیتِ ارسالِ ضدبن فعال است — کپی الان انجام نشد؛ کمی بعد دوباره بزن.")
+                else:
+                    await _edit("✅ کپی شد ← Saved Messages")
             elif caption:
-                await self.client.send_message("me", caption)
-                await _edit("✅ متن کپی شد ← Saved Messages")
+                _cp_sent = await self.client.send_message("me", caption)
+                if _cp_sent is None:
+                    await _edit("🛡️ محدودیتِ ارسالِ ضدبن فعال است — کمی بعد دوباره بزن.")
+                else:
+                    await _edit("✅ متن کپی شد ← Saved Messages")
             else:
                 await _edit("❌ چیزی برای کپی پیدا نشد.")
 
@@ -1734,8 +1747,20 @@ class SelfBot:
             # خطاهای رایج: PASSWORD_TOO_FRESH_X (رمز تازه ست شده)،
             # RESET_REQUEST_MISSING (چیزی برای بازنشانی نیست)
             msg = str(e)
-            m = re.search(r"(\d+)", msg)
-            secs = int(m.group(1)) if m and "FRESH" in msg.upper() else None
+            # v2.19.4 (AUDIT-36 L4): تشخیصِ زمانِ انتظار با isinstance +
+            # فیلدِ seconds — نه با substringِ «FRESH» (نامِ خطا در str(e)
+            # تلثون 1.45 نمی‌آید؛ فقط عدد می‌آید — هم‌خانواده‌ی باگِ v2.12.11).
+            # حالا کاربر راهنمای «رمز به‌تازگی عوض شده؛ تا ~۲۴ ساعت اجازه
+            # نمی‌دهد» را واقعاً می‌بیند.
+            _pw_fresh_secs = getattr(e, "seconds", None)
+            if _pw_fresh_secs:
+                try:
+                    secs = int(_pw_fresh_secs)
+                except Exception:
+                    secs = None
+            else:
+                m = re.search(r"(\d+)", msg)
+                secs = int(m.group(1)) if m else None
             return {"state": "error", "error": type(e).__name__, "raw": msg[:120],
                     "fresh_seconds": secs}
         # تشخیص با isinstance روی تایپ‌های واقعیِ telethon — نه با نامِ
@@ -1772,6 +1797,15 @@ class SelfBot:
         """
         تغییر یا حذف رمز دو مرحله‌ای با رمز فعلی.
 
+        v2.19.4 (AUDIT-36 H2 — HIGH · بازنویسی کامل): پیاده‌سازیِ قبلی
+        «compute_password_hash» را import می‌کرد که در telethon 1.45 وجود
+        ندارد (ImportError از متد بیرون می‌پرید → «❌ خطا: ImportError») و
+        PasswordInputSettings را با کیوردهای ناموجود (flags/new_hint/new_email)
+        می‌ساخت (TypeError) — یعنی «تغییر/حذف رمز» ۱۰۰٪ مرده بود. حالا از
+        client.edit_2fa خودِ تلثون استفاده می‌کنیم که تمامِ جریانِ درست را
+        دارد (SRP + نوسازیِ salt با new_algo + digest) — هم‌ارزشِ مرجعِ
+        telethon/client/auth.py.
+
         Args:
             old_pass: رمز فعلی (الزامی)
             new_pass: رمز جدید (خالی = حذف رمز)
@@ -1780,9 +1814,7 @@ class SelfBot:
         Returns:
             {"ok": True, "action": "changed"|"removed"} یا {"ok": False, "error": "..."}
         """
-        from telethon.tl.functions.account import UpdatePasswordSettingsRequest
-        from telethon.tl.types import account
-        from telethon.password import compute_check, compute_password_hash
+        from telethon.tl.functions.account import GetPasswordRequest
         try:
             pw_info = await asyncio.wait_for(
                 self.client(GetPasswordRequest()), timeout=25
@@ -1790,35 +1822,23 @@ class SelfBot:
             if not pw_info or not pw_info.has_password:
                 return {"ok": False, "error": "no_password"}
 
-            old_check = compute_check(pw_info, old_pass)
-            if old_check is None:
-                return {"ok": False, "error": "invalid_password"}
-
-            if not new_pass:
-                # حذف رمز
-                new_settings = account.PasswordInputSettings(
-                    flags=0,
-                    new_password_hash=None,
-                    new_hint=None,
-                    new_email=None,
+            # edit_2fa: تغییر (هر دو رمز) یا حذف (فقط رمز فعلی). SRP با
+            # primeهای بزرگ کند است → timeout بلندتر از قبل.
+            if new_pass:
+                ok = await asyncio.wait_for(
+                    self.client.edit_2fa(current_password=old_pass,
+                                         new_password=new_pass,
+                                         hint=hint or ""),
+                    timeout=90,
                 )
             else:
-                new_hash = compute_password_hash(pw_info.new_algo, new_pass)
-                new_settings = account.PasswordInputSettings(
-                    flags=3,  # hash + hint
-                    new_password_hash=new_hash,
-                    new_hint=hint if hint else None,
-                    new_email=None,
+                ok = await asyncio.wait_for(
+                    self.client.edit_2fa(current_password=old_pass),
+                    timeout=90,
                 )
-
-            await asyncio.wait_for(
-                self.client(UpdatePasswordSettingsRequest(
-                    password=old_check,
-                    new_settings=new_settings,
-                )),
-                timeout=25
-            )
-            return {"ok": True, "action": "removed" if not new_pass else "changed"}
+            if ok:
+                return {"ok": True, "action": "changed" if new_pass else "removed"}
+            return {"ok": False, "error": "no_change"}
 
         except Exception as e:
             if 'PASSWORD_HASH_INVALID' in str(e).upper():
@@ -1828,34 +1848,54 @@ class SelfBot:
     # PATCH (v2.6.2): تغییر یا حذف ایمیل بازیابی 2FA
     async def change_2fa_email(self, old_pass: str, new_email: str = "") -> dict:
         """
-        تغییر یا حذف ایمیل بازیابی 2FA.
+        تغییر ایمیل بازیابی 2FA.
+
+        v2.19.4 (AUDIT-36 H3 — HIGH · بازنویسی کامل): پیاده‌سازیِ قبلی
+        PasswordInputSettings را با کیوردهای ناموجود (flags/new_hint/new_email)
+        می‌ساخت → TypeError قبل از هر درخواستی → «❌ خطا: TypeError» — مرده‌ی
+        ۱۰۰٪. حالا الگوی رسمیِ edit_2fa تلثون: نوسازیِ salt (new_algo) +
+        digest با همان رمزِ فعلی (رمز تغییر نمی‌کند؛ فقط ایمیل) + فیلدِ email
+        با نامِ درست. سرور برای ایمیلِ جدید کد تأیید می‌فرستد
+        (EmailUnconfirmedError) — تا تأیید، ایمیلِ قبلی فعّال می‌ماند؛ چون
+        ویزاردِ فعلی مرحله‌ی کد ندارد، همین حالت را صادقانه برمی‌گردانیم.
 
         Args:
             old_pass: رمز فعلی (الزامی)
-            new_email: ایمیل جدید (خالی = حذف ایمیل)
+            new_email: ایمیل جدید (خالی پذیرفته نمی‌شود — حذفِ ایمیلِ بازیابی
+            در API تلگرام جریانِ جدا و پیچیده‌تری دارد که عمداً وارد نشدیم)
 
         Returns:
-            {"ok": True} یا {"ok": False, "error": "..."}
+            {"ok": True} یا {"ok": True, "pending_email_confirm": True,
+            "code_length": N} یا {"ok": False, "error": "..."}
         """
-        from telethon.tl.functions.account import UpdatePasswordSettingsRequest
-        from telethon.tl.types import account
-        from telethon.password import compute_check
+        from telethon.tl.functions.account import (GetPasswordRequest,
+                                                   UpdatePasswordSettingsRequest)
+        from telethon.tl.types import account as _account_types
+        from telethon.password import compute_check, compute_digest
+        if not new_email:
+            return {"ok": False, "error": "email_required",
+                    "hint": "حذفِ ایمیل بازیابی پشتیبانی نمی‌شود — ایمیلِ جدید بفرست."}
         try:
-            pw_info = await asyncio.wait_for(
+            pwd = await asyncio.wait_for(
                 self.client(GetPasswordRequest()), timeout=25
             )
-            if not pw_info or not pw_info.has_password:
+            if not pwd or not pwd.has_password:
                 return {"ok": False, "error": "no_password"}
 
-            old_check = compute_check(pw_info, old_pass)
+            old_check = compute_check(pwd, old_pass)
             if old_check is None:
                 return {"ok": False, "error": "invalid_password"}
 
-            new_settings = account.PasswordInputSettings(
-                flags=4,  # new_email
-                new_password_hash=None,
-                new_hint=None,
-                new_email=new_email if new_email else None,
+            # الگوی edit_2fa (telethon/client/auth.py): salt تازه + digest با
+            # همان رمز — سرور رمز را «به همان مقدار» دوباره ثبت می‌کند و
+            # ایمیل را pending می‌کند.
+            pwd.new_algo.salt1 += os.urandom(32)
+            new_settings = _account_types.PasswordInputSettings(
+                new_algo=pwd.new_algo,
+                new_password_hash=compute_digest(pwd.new_algo, old_pass),
+                hint=pwd.hint,
+                email=new_email,
+                new_secure_settings=None,
             )
 
             await asyncio.wait_for(
@@ -1863,14 +1903,21 @@ class SelfBot:
                     password=old_check,
                     new_settings=new_settings,
                 )),
-                timeout=25
+                timeout=60,
             )
             return {"ok": True}
 
         except Exception as e:
+            _en = type(e).__name__
+            if _en == "EmailUnconfirmedError":
+                # کد به ایمیلِ جدید رفت؛ تا ConfirmPasswordEmail(code) زده
+                # نشود، ایمیلِ قبلی فعّال است. مرحله‌ی کد در ویزاردِ پنل هنوز
+                # وجود ندارد — وضعیت را شفاف برمی‌گردانیم تا UI درست بگوید.
+                return {"ok": True, "pending_email_confirm": True,
+                        "code_length": getattr(e, "code_length", None)}
             if 'PASSWORD_HASH_INVALID' in str(e).upper():
                 return {"ok": False, "error": "invalid_password"}
-            return {"ok": False, "error": type(e).__name__, "raw": str(e)[:120]}
+            return {"ok": False, "error": _en, "raw": str(e)[:120]}
 
     @staticmethod
     def _fmt_dt_local(dt=None) -> str:
@@ -2211,7 +2258,15 @@ class SelfBot:
             except Exception:
                 pass
             try:
-                await self.client.send_message(t, text)
+                # v2.19.4 (AUDIT-36 M11): گیتِ ضدبن وقتی ارسال را رد می‌کند،
+                # بدونِ exception مقدارِ None برمی‌گرداند — این یعنی «تحویل
+                # نشد». قبلاً delivered=True می‌شد و کد بی‌صدا گم می‌شد؛ حالا
+                # مقصدِ بعدی / fallback امتحان می‌شود (کد در تاریخچه‌ی 777000
+                # موجود است و دکمه‌ی «📲 دریافت کد» هم می‌تواند بخواندش).
+                _code_sent = await self.client.send_message(t, text)
+                if _code_sent is None:
+                    print(f"🛡️ [{self.tag}] ارسالِ کد به {t} توسطِ گیتِ ضدبن رد شد — مقصدِ بعدی")
+                    continue
                 delivered = True
                 break
             except Exception as e:
@@ -2347,6 +2402,12 @@ class SelfBot:
             self.enabled
             and sid != self.TELEGRAM_SERVICE_ID
             and sid != self.my_id
+            # v2.19.4 (AUDIT-36 L5 — LOW/امنیتی): فقط چتِ خصوصی — قبلاً بدون
+            # فیلترِ نوعِ چت، اگر کسی در یک گروهِ مشترک کلیدواژه را می‌گفت،
+            # متنِ پاسخِ ساخته‌شده برای پیوی عمومی در گروه پست می‌شد (نشتِ
+            # محتوای خصوصی + رفتار اسپم‌گونه). broadcast/گروه حالا مستثنی‌اند؛
+            # اگر روزی «پاسخ در گروه» خواسته شد، باید toggle صریح اضافه شود.
+            and event.is_private
             and (event.raw_text or "").strip()
             and not (self._flood_until and time.time() < self._flood_until)
         ):
@@ -2420,15 +2481,24 @@ class SelfBot:
                 path = os.path.join(owner_dir, f"auto_{secrets.token_hex(8)}.{ext}")
                 await event.download_media(file=path)
                 _chmod_private(path, 0o600)
+                _ttl_sent = None
                 try:
-                    await self.client.send_file("me", path,
-                                                 caption=f"🔥 خودکار | از {sender} | ⏳{ttl}s")
+                    _ttl_sent = await self.client.send_file(
+                        "me", path,
+                        caption=f"🔥 خودکار | از {sender} | ⏳{ttl}s")
                 finally:
-                    if os.path.exists(path):
+                    # v2.19.4 (AUDIT-36 M11 — MEDIUM): اگر گیتِ ضدبن ارسال را
+                    # رد کرد (None)، فایلِ محلی پاک نمی‌شود — محتوای تایم‌دار
+                    # فقط یک‌بار زندگی می‌کند و قبلاً با پاک‌شدنِ بی‌صدا برای
+                    # همیشه از بین می‌رفت. فایل برای ارسالِ دستی/تلاشِ بعدی
+                    # می‌ماند و مسیرش در لاگ ثبت می‌شود.
+                    if _ttl_sent is not None and os.path.exists(path):
                         try:
                             os.remove(path)
                         except Exception:
                             pass
+                if _ttl_sent is None:
+                    print(f"🛡️ [{self.tag}] ارسالِ رسانه‌ی تایم‌دار توسطِ گیتِ ضدبن رد شد — فایل حفظ شد: {path}")
 
     async def _on_edited(self, event):
         if not self.tracker_enabled:
@@ -2617,7 +2687,13 @@ class SelfBot:
                     for e in deleted_entries:
                         cache_entry = self._msg_cache.get((chat_id, e["msg_id"]))
                         if cache_entry is not None:
-                            self._forget_msg_bytes(cache_entry)
+                            # v2.19.4 (AUDIT-36 M10 — MEDIUM): قبلاً خودِ dict
+                            # به _forget_msg_bytes داده می‌شد → dict غیرقابلِ
+                            # hash → TypeError پنهان در except بیرونی → نه
+                            # شمارنده‌ی RAM کم می‌شد و نه media_bytes خالی می‌شد
+                            # (نشتِ تدریجیِ RAM تا ۸MB برای هر پیامِ حذف‌شده).
+                            # کلیدِ درست tuple (chat_id, msg_id) است.
+                            self._forget_msg_bytes((chat_id, e["msg_id"]))
                             cache_entry["media_bytes"] = None
                 else:
                     print(f"⚠️ [{self.tag}] ارسال فایل HTML ردیاب ناموفق بود — فایل حفظ شد: {html_path}")

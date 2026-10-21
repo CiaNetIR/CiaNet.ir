@@ -3438,6 +3438,14 @@ class AdminBot:
             # دو سلف روی یک اکانتِ تلگرامی یعنی تداخل. پاکسازی امن.
             if (_old_tag != tag and isinstance(_old_acc, dict)
                     and _old_acc.get("user_id") == me.id):
+                # v2.19.4 (AUDIT-36 M6 — MEDIUM): همان گاردِ اسکنِ تلفنیِ
+                # v2.15.4 (SEC-HOTFIX) — سلفِ هم‌user_id که به کاربرِ دیگری
+                # تعلق دارد (یا یتیم است و برای این پنل visible نیست) دیگر
+                # بدونِ دیالوگ حذف نمی‌شود؛ فقط سلفِ قابل‌مشاهده/مالِ خودِ
+                # کاربر پاکسازیِ امن می‌شود. عدمِ تقارنِ اسکنِ تلفنی (که این
+                # گارد را داشت) و اسکنِ user_id (که نداشت) برطرف شد.
+                if not self._account_visible(_old_acc):
+                    continue
                 print(f"ℹ️ [login] سلف قدیمیِ همین اکانت ({_old_tag}) پیدا شد — "
                       f"پاکسازی امن برای جلوگیری از تداخل.")
                 await self._safe_replace_self(_old_tag)
@@ -3898,38 +3906,60 @@ class AdminBot:
                 tag = data.split(":", 1)[1]
                 await self._delete_account(event, tag)
             # ── مدیریتِ مجوزهای حساس (فقط OWNER) ──
-            elif data == "cap_list":
-                await self._owner_show_capability_list(event)
-            elif data == "cap_add_start":
-                await self._owner_start_capability_add(event)
-            elif data.startswith("cap_user:"):
-                uid = safe_callback_int(data.split(":", 1)[1], 0)
-                try:
-                    await event.answer()
-                except Exception:
-                    pass
-                await self._owner_show_capability_user(event, uid)
-            elif data.startswith("cap_choose_scope:"):
-                uid = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_choose_capability_scope(event, uid)
-            elif data.startswith("cap_confirm:"):
-                _, uid, scope = data.split(":", 2)
-                await self._owner_confirm_capability(event, safe_callback_int(uid, 0), scope)
-            elif data.startswith("cap_grant:"):
-                _, uid, scope = data.split(":", 2)
-                await self._owner_grant_capability(event, safe_callback_int(uid, 0), scope)
-            elif data.startswith("cap_revoke:"):
-                _, uid, scope = data.split(":", 2)
-                await self._owner_revoke_capability(event, safe_callback_int(uid, 0), scope)
-            elif data.startswith("dbcap:"):
-                bot_id = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_show_dbot_capability(event, bot_id)
-            elif data.startswith("dbcap_grant:"):
-                bot_id = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_grant_dbot_capability(event, bot_id)
-            elif data.startswith("dbcap_revoke:"):
-                bot_id = safe_callback_int(data.split(":", 1)[1], 0)
-                await self._owner_revoke_dbot_capability(event, bot_id)
+            # v2.19.4 (AUDIT-36 M4 — MEDIUM): متدهای این بلوک فقط روی
+            # SaaSBot تعریف شده‌اند (saas.py). در استقرارِ یکپارچه، روترِ saas
+            # این مسیرها را قبل از fallthrough برای OWNER می‌گیرد؛ یعنی این
+            # شاخه‌های موازی در AdminBot فقط برای غیر-OWNERِ جعل‌کننده قابل‌
+            # دسترس بودند و همان‌جا با AttributeError ('AdminBot' object has
+            # no attribute '_owner_grant_capability') می‌ترکیدند — کاربرِ جعل
+            # کننده «خطا در پردازشِ دکمه» می‌گرفت به‌جای «دسترسی نداری». حالا
+            # اگر متد در دسترس نیست (حالتِ یکپارچه/standalone بدون سیمِ saas)،
+            # پاسخِ صریح و بدونِ کرش.
+            elif (data == "cap_list" or data == "cap_add_start"
+                    or data.startswith(("cap_user:", "cap_choose_scope:",
+                                        "cap_confirm:", "cap_grant:",
+                                        "cap_revoke:", "dbcap:",
+                                        "dbcap_grant:", "dbcap_revoke:"))):
+                if not hasattr(self, "_owner_show_capability_list"):
+                    try:
+                        await event.answer(
+                            "⛔ این عملیات فقط از پنلِ نقش‌های رباتِ اصلی انجام می‌شود.",
+                            alert=True)
+                    except Exception:
+                        pass
+                    return True
+                if data == "cap_list":
+                    await self._owner_show_capability_list(event)
+                elif data == "cap_add_start":
+                    await self._owner_start_capability_add(event)
+                elif data.startswith("cap_user:"):
+                    uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    try:
+                        await event.answer()
+                    except Exception:
+                        pass
+                    await self._owner_show_capability_user(event, uid)
+                elif data.startswith("cap_choose_scope:"):
+                    uid = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_choose_capability_scope(event, uid)
+                elif data.startswith("cap_confirm:"):
+                    _, uid, scope = data.split(":", 2)
+                    await self._owner_confirm_capability(event, safe_callback_int(uid, 0), scope)
+                elif data.startswith("cap_grant:"):
+                    _, uid, scope = data.split(":", 2)
+                    await self._owner_grant_capability(event, safe_callback_int(uid, 0), scope)
+                elif data.startswith("cap_revoke:"):
+                    _, uid, scope = data.split(":", 2)
+                    await self._owner_revoke_capability(event, safe_callback_int(uid, 0), scope)
+                elif data.startswith("dbcap:"):
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_show_dbot_capability(event, bot_id)
+                elif data.startswith("dbcap_grant:"):
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_grant_dbot_capability(event, bot_id)
+                elif data.startswith("dbcap_revoke:"):
+                    bot_id = safe_callback_int(data.split(":", 1)[1], 0)
+                    await self._owner_revoke_dbot_capability(event, bot_id)
             else:
                 return False
         except errors.MessageNotModifiedError:

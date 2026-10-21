@@ -712,6 +712,38 @@ class SaaSBot:
         import time as _t_wiz
         self.wizards[user_id] = {"state": state, "data": data, "_ts": _t_wiz.time()}
 
+    # v2.19.4 (AUDIT-36 H1 — HIGH): سه call-site در callback_h (set_merchant:
+    # خطِ ~۹۷۷۸ + order_zarinpal: و order_zibal: بعد از ساختِ موفقِ پرداخت)
+    # «self._respond_safe» را صدا می‌زدند در حالی که این متد فقط روی
+    # AdminBot تعریف شده بود → AttributeError: 'SaaSBot' object has no
+    # attribute '_respond_safe'. اثر: مالک هرگز نمی‌توانست مرچنتِ
+    # زرین‌پال/زیبال را از داخلِ ربات تنظیم کند و کاربر بعد از درست‌شدنِ
+    # پرداختِ آنلاین، لینک را هرگز نمی‌گرفت (لینک ساخته می‌شد ولی respond
+    # می‌ترکید). این متد — هم‌شکلِ AdminBot._respond_safe (admin.py) —
+    # نسخه‌ی SaaSBot است: respond با timeout + fallback به alert.
+    async def _respond_safe(self, event, text: str, buttons=None,
+                            link_preview: bool = False) -> bool:
+        try:
+            await asyncio.wait_for(
+                event.respond(text, buttons=buttons, link_preview=link_preview),
+                timeout=30,
+            )
+            return True
+        except asyncio.TimeoutError:
+            print("⚠️ [saas respond_safe] timeout after 30s", flush=True)
+            try:
+                await event.answer("⏳ تلگرام پاسخ نداد. دوباره بزن.", alert=True)
+            except Exception:
+                pass
+            return False
+        except Exception as _e:
+            print(f"⚠️ [saas respond_safe] {type(_e).__name__}: {_e}", flush=True)
+            try:
+                await event.answer("❌ خطا در نمایش. دوباره بزن.", alert=True)
+            except Exception:
+                pass
+            return False
+
     # v2.13.0 (TEST-WIZARD-FLOWS): SaaSBot-side wizard TTL GC. قبلاً فقط
     # AdminBot.wizards پاک می‌شد (AdminBot._cleanup_stale_wizards از
     # AdminBot.handle_message صدا زده می‌شد) ولی SaaSBot.wizards هرگز
@@ -3717,7 +3749,12 @@ class SaaSBot:
             return
 
         try:
-            info = updater.get_version_info()
+            # v2.19.4 (AUDIT-36 H7 — HIGH): get_version_info بدنه‌اش sync است
+            # و دو git fetch با timeout=30s دارد — قبلاً مستقیم روی event loop
+            # اجرا می‌شد و هنگامِ کندی/قطعیِ شبکه، کلِ ربات (همه‌ی هندلرها و
+            # همه‌ی سلف‌بات‌ها) تا ~۶۰ ثانیه کامل فریز می‌شد. حالا در thread
+            # جدا (الگوی موجودِ apply_update در همین فایل).
+            info = await asyncio.to_thread(updater.get_version_info)
         except Exception as e:
             await event.edit(
                 f"❌ خطا در گرفتن اطلاعات ورژن: {type(e).__name__}: {e}",
@@ -4141,7 +4178,20 @@ class SaaSBot:
         # `versions_dir`) could exploit this. Now: reject any `name`
         # containing path separators / traversal segments, and verify
         # the resolved `src_path` actually stays inside `versions_dir`.)
-        if not name or "/" in name or "\\" in name or name in (".", ".."):
+        #
+        # v2.19.4 (AUDIT-36 M5 — MEDIUM): لیستِ rollback خودِ ربات نام‌های
+        # stable/... را می‌سازد و گاردِ قبلی صددرصدشان را رد می‌کرد — یعنی
+        # rollback به نسخه‌های stable همیشه «نامِ نسخه نامعتبر» می‌گرفت با
+        # اینکه دکمه‌اش را خودِ ربات نمایش داده بود. حالا فقط همین پیشوندِ
+        # دقیقِ یک‌سطحی مجاز است و روی sub-name همان گاردِ traversal اجرا
+        # می‌شود؛ resolve-check پایین‌تر همچنان لایه‌ی دوم است.
+        _stable_ok = False
+        if name.startswith("stable/") and name.count("/") == 1:
+            _sub = name[len("stable/"):]
+            if _sub and "\\" not in _sub and _sub not in (".", ".."):
+                _stable_ok = True
+        if (not name or name in (".", "..")
+                or (("/" in name or "\\" in name) and not _stable_ok)):
             await event.edit(
                 f"❌ نام نسخه نامعتبر است: `{name}`",
                 buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
@@ -6696,10 +6746,18 @@ class SaaSBot:
         # خودشان‌اند) و اگر خریدارِ فاقدِ اشتراک باشد، گزینه‌ی دسته‌جمعی
         # با تخفیف گروهی هم پایینِ فهرست پیشنهاد می‌شود.
         plans = [p for p in list_pricing() if not is_group_plan(p["plan"])]
-        buttons = [
-            [UI.go(f"{p['plan']} — {p['price_toman']:,} تومان", f"renew_plan:{p['plan']}".encode())]
-            for p in plans
-        ]
+        buttons = []
+        for _pi, p in enumerate(plans):
+            _cb = f"renew_plan:{p['plan']}"
+            # v2.19.4 (AUDIT-36 M12 — MEDIUM): نامِ بلند (۲۷+ حرف فارسی =
+            # ۶۵+ بایت با prefix) از سقفِ callback-data تلگرام (۶۴ بایت) رد
+            # می‌شد و ValueError در زمانِ ساختِ دکمه، کلِ صفحه‌ی خرید را برای
+            # همه‌ی کاربران می‌کشت. پلن‌های با نامِ کوتاه همان callback نامیِ
+            # قبلی را می‌گیرند (سازگاری کامل با پلن‌های موجود)؛ نامِ بلند
+            # به index ارجاع می‌دهد و در _user_plan_chosen resolve می‌شود.
+            if len(_cb.encode("utf-8")) > 64:
+                _cb = f"renew_plan:idx{_pi}"
+            buttons.append([UI.go(f"{p['plan']} — {p['price_toman']:,} تومان", _cb.encode())])
         if group_sub_enabled() \
                 and self._role(event.sender_id) not in (ROLE_OWNER, ROLE_ADMIN) \
                 and not get_active_subscription(event.sender_id):
@@ -6782,6 +6840,21 @@ class SaaSBot:
             await event.edit(text, buttons=buttons)
 
     async def _user_plan_chosen(self, event, plan: str):
+        # v2.19.4 (AUDIT-36 M12): ارجاعِ index برای پلن‌های با نامِ بلند —
+        # callback «renew_plan:idxN» (ساخته‌شده در _user_start_renew وقتی نام
+        # از سقفِ ۶۴ بایتِ تلگرام رد می‌شود) اینجا به نامِ واقعی resolve
+        # می‌شود. اگر لیست بینِ رندر و کلیک عوض شده باشد، answerِ تمیز.
+        if isinstance(plan, str) and plan.startswith("idx"):
+            try:
+                _pi = int(plan[3:])
+            except ValueError:
+                _pi = -1
+            _plans = [p for p in list_pricing() if not is_group_plan(p["plan"])]
+            if 0 <= _pi < len(_plans):
+                plan = _plans[_pi]["plan"]
+            else:
+                await event.answer("❌ این پلن دیگر موجود نیست — لیست را دوباره باز کنید.", alert=True)
+                return
         plans = {p["plan"]: p for p in list_pricing()}
         info = plans.get(plan)
         if not info:
@@ -7037,6 +7110,17 @@ class SaaSBot:
                 "❌ این یک متن است، نه تصویرِ رسید.\n\n"
                 "📷 لطفاً **عکسِ رسید پرداخت** رو بفرست (مثل اسکرین‌شات از اپلیکیشن بانکی).\n"
                 "اگه می‌خوای انصراف بدی، دکمه‌ی «بازگشت» رو بزن.",
+                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+            return True
+
+        # v2.19.4 (AUDIT-36 L7): ویزارد Restore فقط document هندل می‌کرد و
+        # پیامِ متنیِ مالک در وسطِ Restore سایلنت دراپ می‌شد (تا TTL ۳۰
+        # دقیقه). حالا پاسخِ دوستانه + ویزارد باز — الگوی همان QA-USER.
+        if state == WIZ_DB_RESTORE:
+            await event.respond(
+                "♻️ در انتظارِ **فایل ZIP بکاپ** هستم — لطفاً فایل را بفرست.\n"
+                "متن پذیرفته نیست؛ برای لغو دکمه‌ی «بازگشت» را بزن.",
                 buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
             )
             return True
@@ -9056,6 +9140,17 @@ class SaaSBot:
                 if data == "owner_toggle_auto_update" and role == ROLE_OWNER:
                     await self._owner_toggle_auto_update(event)
                     return
+                # v2.19.4 (AUDIT-36 H4 — HIGH): سیم‌کشی جاافتاده. متدها از
+                # v2.17.0 موجود بودند (با گارد نقشِ داخلیِ کامل) ولی شاخه‌ی
+                # دیسپچر هرگز نوشته نشد → هر دو دکمه در «⚙️ تنظیمات سیستم»
+                # نمایش داده می‌شدند ولی کلیک = سکوتِ مطلق (نه answer، نه
+                # alert) — مالک فکر می‌کرد ربات هنگ کرده.
+                if data == "owner_toggle_trial" and role == ROLE_OWNER:
+                    await self._owner_toggle_trial(event)
+                    return
+                if data == "owner_toggle_group_sub" and role == ROLE_OWNER:
+                    await self._owner_toggle_group_sub(event)
+                    return
                 # PATCH (v2.4.0): language toggle
                 if data == "owner_toggle_lang" and role == ROLE_OWNER:
                     new_lang = "en" if CIANET_LANG == "fa" else "fa"
@@ -9313,6 +9408,50 @@ class SaaSBot:
                         await self._show_user_management_panel(event, target_id, back_data=back_data_cb)
                     else:
                         await event.answer("⛔ دسترسی نداری", alert=True)
+                    return
+                # v2.19.4 (AUDIT-36 H5 — HIGH): سیم‌کشی زنجیره‌ی «بلاک کاربر»
+                # (v2.17.0) — دکمه‌ها و Backend کامل بودند ولی هیچ شاخه‌ی
+                # دیسپچری وجود نداشت → بلاک/رفع‌بلاک از هیچ UIای قابل‌اجرا
+                # نبود و _enforce_block فقط با ویرایشِ دستیِ DB فعال می‌شد.
+                # گاردهای دقیقِ نقش (OWNER برای بلاکِ ADMIN و…) داخل خودِ
+                # متدها + re-check در block_saas_user هستند (دفاع در عمق).
+                # ترتیب مهم: user_block_go قبل از user_block چک می‌شود چون
+                # پیشوندِ آن هم هست.
+                if data.startswith("user_block_go:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    await self._do_block_user(event, target_id, back_data_cb)
+                    return
+                if data.startswith("user_block:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    await self._show_user_block_confirm(event, target_id, back_data_cb)
+                    return
+                if data.startswith("user_unblock:"):
+                    parts_cb = data.split(":", 2)
+                    target_id = safe_callback_int(parts_cb[1])
+                    back_data_cb = parts_cb[2].encode() if len(parts_cb) > 2 else b"owner_users"
+                    if target_id is None:
+                        await event.answer("❌ داده‌ی دکمه نامعتبر است.", alert=True)
+                        return
+                    if role not in (ROLE_OWNER, ROLE_ADMIN):
+                        await event.answer("⛔ دسترسی نداری", alert=True)
+                        return
+                    await self._do_unblock_user(event, target_id, back_data_cb)
                     return
                 if data.startswith("user_expire:"):
                     parts_cb = data.split(":", 2)

@@ -996,17 +996,23 @@ async def check_for_update() -> Optional[dict]:
     """
     polling endpoint. هر ۵ دقیقه صدا زده می‌شه.
     Returns: dict با commit info اگه update باشه، None در غیر این صورت.
+
+    v2.19.4 (AUDIT-36 H7 — HIGH): get_pending_commits/get_remote_commit هر
+    کدام یک ``git fetch`` با timeout=۳۰ ثانیه به‌صورتِ sync اجرا می‌کنند؛
+    قبلاً مستقیم روی event loop صدا زده می‌شدند و هنگامِ کندی/قطعیِ شبکه
+    کلِ ربات (همه‌ی هندلرها، همه‌ی سلف‌بات‌ها) تا ~۶۰ ثانیه کامل فریز
+    می‌شد. حالا هر دو در thread جدا اجرا می‌شوند (asyncio.to_thread).
     """
     state = _read_state()
     state["last_check"] = time.time()
     _write_state(state)
 
-    pending = get_pending_commits()
+    pending = await asyncio.to_thread(get_pending_commits)
     if not pending:
         return None
 
     local = get_local_commit()
-    remote = get_remote_commit()
+    remote = await asyncio.to_thread(get_remote_commit)
 
     return {
         "local": local,
