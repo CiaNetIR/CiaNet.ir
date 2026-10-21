@@ -14,6 +14,15 @@
   سلف‌بات روی اکانتِ خودشان داده شده و گزارشِ انبوهِ هماهنگ هم بنِ آبشاری
   کل سرویس است (همان دلیلی که استخر ZIP در v2.17.1 حذف شد).
 
+🔥 v2.20.0 (SPAM-MODE — خواستهٔ صریح مالک، ۲۰۲۶-۱۰-۲۲):
+  «ریپورتر یک‌بار گزارش نکند؛ مثلاً سهمیه ۲۰ تا است، بزند گزارش و کلِ
+  سهمیه مثل حالت اسپم پشت‌سرهم روی کانال/گروه/اکانت شلیک شود.»
+  یعنی: تأییدِ کاربر = یک بستهٔ چندتایی (burst) روی همان هدف — همچنان
+  فقط با اکانتِ خودِ کاربر، همچنان سقفِ روزانه (اکنون SUM شلیک‌ها) و
+  پنجرهٔ گزارشِ مجدد. FloodWaitِ کوتاه صبر می‌شود؛ FloodWaitِ بلند بسته را
+  ناتمام می‌بندد (بدون قفلِ dup تا ادامهٔ سهمیه بعداً شلیک شود) و
+  دکمهٔ «⛔ توقف» در حین اجرا در دسترس است.
+
 دو لایه‌ی سوییچ:
   • REPORTER_ENABLED (همین فایل، کامپایل-تایم) — کیل‌سوییچ اصلی.
   • settings.reporter_enabled (رانتایم، پنل مالک) — پیش‌فرض روشن.
@@ -478,7 +487,7 @@ async def check_reporter_target(client, target):
 
 
 async def send_reporter_action(client, peer, message_ids, category,
-                               comment="", is_story=False):
+                               comment="", is_story=False, _opt_cache=None):
     """ارسال یک گزارش تلگرامی — پورتِ send_report_action با فیکسِ ZIP-BUG-3.
 
     • استوری یا بدون پیام → ReportPeerRequest (در 1.45.0 سالم — reason دارد)
@@ -490,6 +499,11 @@ async def send_reporter_action(client, peer, message_ids, category,
             اگر سرور ReportResultAddComment برگرداند و کامنت خالی باشد،
             نتیجه با needs_comment=True برمی‌گردد تا UI درخواستِ متن کند.
     • دسته‌ی «other» → دلیل Spam (عین رفتار ZIP؛ در نقشه نیست).
+    • v2.20.0 (SPAM-MODE): _opt_cache — دیکشنریِ اختیاریِ {category: option}
+      برای استفادهٔ چندباره در یک بسته؛ کشفِ گزینه فقط بارِ اول انجام
+      می‌شود و شلیک‌های بعدی مستقیم submit می‌کنند (نصف‌کردنِ درخواست‌ها).
+    • v2.20.0: خطای FloodWait با کلیدِ «floodwait» (ثانیه) هم برمی‌گردد تا
+      حلقهٔ بستهٔ اسپمی بتواند صبر/توقف را خودش تصمیم بگیرد.
     """
     from telethon import errors
     from telethon.tl.types import ReportResultAddComment
@@ -514,11 +528,15 @@ async def send_reporter_action(client, peer, message_ids, category,
                                        reason=reason_obj, message=comment))
             return {"success": True}
         # اسکیمای جدید (telethon 1.45+ · ZIP-BUG-3 FIX)
-        option = await _resolve_message_report_option(client, peer,
-                                                      message_ids, category)
+        option = _opt_cache.get(category) if _opt_cache is not None else None
         if option is None:
-            return {"success": False,
-                    "error": "گزینه‌ی گزارش از سرور دریافت نشد"}
+            option = await _resolve_message_report_option(client, peer,
+                                                          message_ids, category)
+            if option is None:
+                return {"success": False,
+                        "error": "گزینه‌ی گزارش از سرور دریافت نشد"}
+            if _opt_cache is not None:
+                _opt_cache[category] = option
         result = await client(ReportRequest(peer=peer, id=list(message_ids),
                                             option=option, message=comment))
         if isinstance(result, ReportResultAddComment) and not comment:
@@ -530,7 +548,8 @@ async def send_reporter_action(client, peer, message_ids, category,
                 option=result.option, message=comment))
         return {"success": True, "result": type(result).__name__}
     except errors.FloodWaitError as e:
-        return {"success": False, "error": f"⏳ Flood wait {e.seconds}s"}
+        return {"success": False, "error": f"⏳ Flood wait {e.seconds}s",
+                "floodwait": int(e.seconds)}
     except Exception as e:
         return {"success": False, "error": str(e)[:100]}
 
@@ -705,11 +724,13 @@ async def render_reporter_page(event, saas_bot) -> None:
 
     body = [
         "🛡 **سپرِ جامعه‌ی تلگرامِ فارسی** — کانال، گروه یا اکانتی که",
-        "جعلی است یا کلاهبرداری می‌کند را همان‌طور که خودِ تلگرام می‌خواهد",
-        "گزارش کن؛ با رسید، تاریخچه و سهمیه‌ی شفاف.",
+        "جعلی است یا کلاهبرداری می‌کند را به تلگرام گزارش کن؛",
+        "با رسید، تاریخچه و سهمیه‌ی شفاف.",
         "",
         "**📋 قوانینِ ساده:**",
-        f"👤 هر گزارش فقط با **اکانتِ خودِ تو** ارسال می‌شود",
+        "👤 گزارش‌ها فقط با **اکانتِ خودِ تو** ارسال می‌شوند",
+        f"🔥 **حالتِ اسپم:** با یک تأیید، کلِ سهمیه‌ی باقی‌مانده",
+        "      پشت‌سرهم روی همان هدف شلیک می‌شود",
         f"⏳ هر هدف تا **{fa_digits(dup_h)} ساعت** فقط یک‌بار قابل گزارشِ مجدد است",
         f"📅 سقفِ روزانه: **{fa_digits(cap)} گزارش** برای هر کاربر",
         "",
@@ -835,8 +856,11 @@ async def _page_cat(event, d: dict) -> None:
 
 async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
     from cianet.bots.ui import UI
-    from cianet.core import (fa_digits, reporter_dup_hours)
+    from cianet.core import (fa_digits, reporter_dup_hours,
+                             reporter_quota_left)
     dup_h = reporter_dup_hours()
+    # v2.20.0 (SPAM-MODE · خواستهٔ مالک): تعداد شلیک = کلِ سهمیهٔ باقی‌مانده
+    burst = max(1, reporter_quota_left(uid))
     scope_txt = ("همراه با حداکثر ۱۰ پیامِ اخیر (شواهد)"
                  if d.get("scope") == "msgs" else "فقط خودِ هدف")
     cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
@@ -844,31 +868,37 @@ async def _page_confirm(event, saas_bot, uid: int, d: dict) -> None:
         f"🎯 **هدف:** {_target_label(d)}",
         f"🎭 **دسته:** {cat_txt}",
         f"📨 **دامنه:** {scope_txt}",
-        "👤 **ارسال با:** اکانتِ خودِ شما — **یک گزارش**",
+        f"🔥 **تعداد شلیک:** {fa_digits(burst)} گزارش — کلِ سهمیهٔ باقی‌مانده، پشت‌سرهم",
+        "👤 **ارسال با:** اکانتِ خودِ شما",
         "",
-        f"⚠️ بعد از ارسال، همین هدف تا **{fa_digits(dup_h)} ساعت** قابل گزارشِ مجدد",
-        " توسط شما نیست و از سهمیه‌ی امروزتان یک گزارش کم می‌شود.",
+        f"⚠️ با زدنِ دکمهٔ سبز، همین حالا {fa_digits(burst)} گزارشِ پیاپی از",
+        "اکانتِ شما روی همین هدف به تلگرام می‌رود؛ سهمیهٔ امروزتان تمام",
+        f"می‌شود و همین هدف تا **{fa_digits(dup_h)} ساعت** قابلِ گزارشِ مجدد",
+        "نخواهد بود. در حین اجرا دکمهٔ «⛔ توقف» در اختیار شماست.",
+        "",
+        "‼️ گزارشِ مکرر از یک اکانت می‌تواند موجب محدودشدنِ خودِ همان",
+        "اکانت نزد تلگرام شود — با مسئولیتِ خودتان.",
     ]
     rows = [
-        [UI.confirm("✅ ارسال گزارش", "reporter:go")],
+        [UI.confirm(f"🔥 شلیک {fa_digits(burst)} گزارش", "reporter:go")],
         _cancel_row(),
     ]
     await event.edit(UI.screen("⚠️ تأیید نهایی", body=body,
-                               subtitle="یک گزارش، با اکانتِ خودِ شما",
-                               hint="مطمئن هستی؟ دکمه‌ی سبز را بزن"),
+                               subtitle=f"حالتِ اسپم — {fa_digits(burst)} گزارش با یک تأیید",
+                               hint="مطمئن هستی؟ دکمهٔ سبز را بزن"),
                      buttons=rows + _back_row())
 
 
 async def _page_history(event, saas_bot, uid: int) -> None:
     from cianet.bots.ui import UI
-    from cianet.core import jalali_date
+    from cianet.core import fa_digits, jalali_date
     from datetime import datetime
     logs = list_reporter(uid)
     if not logs:
         body = ["هنوز گزارشی ثبت نشده است.",
                 "", "اولین گزارش را از «🎯 گزارش جدید» شروع کنید."]
     else:
-        body = [f"آخرین {len(logs)} گزارشِ شما:"]
+        body = [f"آخرین {len(logs)} بستهٔ گزارشِ شما:"]
         for r in logs:
             try:
                 dt = datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M:%S")
@@ -878,8 +908,16 @@ async def _page_history(event, saas_bot, uid: int) -> None:
             cat = REPORTER_QUICK_CATEGORIES.get(r["category"], r["category"])
             ttype = REPORTER_TARGET_TYPES.get(r["target_type"],
                                               r["target_type"] or "?")
-            icon = "✅" if r["status"] == "ok" else "❌"
-            body.append(f"{icon} `{r['target']}` · {ttype} · {cat} · {when}")
+            # v2.20.0 (SPAM-MODE): ×N برای بستهٔ چندتایی + آیکونِ partial
+            cnt = int(r.get("report_count") or 1)
+            cnt_txt = f" ×{fa_digits(cnt)}" if cnt > 1 else ""
+            if r["status"] == "ok":
+                icon = "✅"
+            elif r["status"] == "partial":
+                icon = "⚠️"
+            else:
+                icon = "❌"
+            body.append(f"{icon} `{r['target']}`{cnt_txt} · {ttype} · {cat} · {when}")
     await event.edit(UI.screen("📜 تاریخچه گزارش‌ها", body=body),
                      buttons=_back_row())
 
@@ -931,8 +969,56 @@ def list_reporter(uid: int):
 # ───────────────────── اجرای گزارش ─────────────────────
 
 
+# ── v2.20.0 (SPAM-MODE): تنظیماتِ بستهٔ اسپمی ──
+_SPAM_SHOT_DELAY = (0.8, 1.8)    # ثانیهٔ تصادفی بین شلیک‌ها (الگوی ZIP: ۱-۳)
+_SPAM_FLOOD_MAX_PAUSES = 2       # حداکثر FloodWait کوتاهی که صبر می‌کنیم
+_SPAM_FLOOD_TOLERANCE_S = 12     # «کوتاه» یعنی حداکثر این ثانیه
+_SPAM_FAIL_STREAK_STOP = 3       # چند خطای پیاپی ⟹ توقفِ بسته
+_SPAM_PROGRESS_EVERY = 2         # هر چند شلیک، صفحهٔ پیشرفت رفرش شود
+
+
+def _stop_requested(saas_bot, uid: int) -> bool:
+    """کاربر در حینِ بسته دکمهٔ «⛔ توقف» را زده است؟"""
+    return uid in getattr(saas_bot, "_reporter_stop", set())
+
+
+async def _edit_progress(event, d: dict, done: int, total: int,
+                         sent: int, failed: int) -> None:
+    """صفحهٔ زندهٔ پیشرفتِ بسته — شکستِ ویرایش بسته را نمی‌ترکاند."""
+    from cianet.bots.ui import UI
+    from cianet.core import fa_digits
+    pct = round(done * 10 / max(1, total))
+    bar = "▰" * pct + "▱" * (10 - pct)
+    body = [
+        "🔥 **حالتِ اسپم در حال اجرا**",
+        "",
+        f"🎯 **هدف:** {_target_label(d)}",
+        "",
+        f"`{bar}`",
+        f"⚡ **{fa_digits(done)} از {fa_digits(total)}** شلیک",
+        f"✅ موفق: {fa_digits(sent)} · ❌ ناموفق: {fa_digits(failed)}",
+        "",
+        "برای توقف، دکمهٔ زیر را بزنید.",
+    ]
+    rows = [[UI.neutral("⛔ توقف", "reporter:stop")]]
+    try:
+        await event.edit(UI.screen("🚀 در حال ارسال…", body=body), buttons=rows)
+    except Exception:
+        pass  # رفرشِ پیشرفت فقط نمایشی است
+
+
 async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
-    """اجرای یک گزارش — با اکانتِ خودِ کاربر، فقط یک گزارش."""
+    """اجرای بستهٔ گزارش — حالتِ اسپم (v2.20.0 · خواستهٔ صریح مالک).
+
+    یک تأیید ⟹ کلِ سهمیهٔ باقی‌ماندهٔ کاربر پشت‌سرهم روی همان هدف
+    شلیک می‌شود؛ بین شلیک‌ها تأخیرِ تصادفی. FloodWaitِ کوتاه (حداکثر
+    ۱۲ ثانیه و ۲ بار) صبر می‌شود؛ FloodWaitِ بلند یا خطاهای پیاپی بسته را
+    ناتمام می‌بندد — بستهٔ ناتمام target_id را NULL ثبت می‌کند تا پنجرهٔ
+    dup هدف را قفل نکند و ادامهٔ سهمیه بعداً شلیک شود. شلیکی که به
+    FloodWait خورد سهمیه مصرف نمی‌کند.
+    """
+    import asyncio
+    import random
     from cianet.bots.ui import UI
     from cianet.core import (add_reporter_log, fa_digits, reporter_dup_hours,
                              reporter_quota_left, reporter_recently_reported)
@@ -979,43 +1065,154 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
             msg_ids = [m.id for m in recent if getattr(m, "id", None)
                        and not getattr(m, "action", None)]
     except Exception as e:
+        add_reporter_log(uid, target, info.get("id"), info.get("type", ""),
+                         cat, with_messages=False, status="error",
+                         report_count=1)
+        saas_bot.wizards.pop(uid, None)
         await _render_receipt(event, d, ok=False,
                               error=f"حل کردنِ هدف ناموفق بود: {str(e)[:60]}",
                               left=reporter_quota_left(uid))
         return
 
+    # ── v2.20.0 (SPAM-MODE): تعداد شلیک = کلِ سهمیهٔ باقی‌مانده ──
+    total = max(1, reporter_quota_left(uid))
     comment = _REPORT_SCAM_COMMENT if cat == "scam" else ""
-    result = await send_reporter_action(client, entity, msg_ids or None, cat,
-                                        comment=comment)
-    ok = bool(result.get("success"))
-    err = result.get("error", "")
-    if not ok and result.get("needs_comment"):
-        err = "این دسته به توضیح متنی نیاز دارد — دوباره تلاش کنید"
-    add_reporter_log(uid, target, info.get("id"), info.get("type", ""),
-                     cat, with_messages=bool(msg_ids),
-                     status="ok" if ok else f"error")
+    opt_cache = {}  # کشِ گزینهٔ گزارشِ پیام‌محور — کشف فقط بارِ اول
+
+    sent = failed = attempted = 0
+    fail_streak = 0
+    flood_pauses = 0
+    stopped = None  # None | "flood" | "errors" | "user" | "needs_comment"
+
+    if not hasattr(saas_bot, "_reporter_stop"):
+        saas_bot._reporter_stop = set()
+    saas_bot._reporter_stop.discard(uid)
+
+    await _edit_progress(event, d, 0, total, 0, 0)
+    try:
+        while attempted < total:
+            if _stop_requested(saas_bot, uid):
+                stopped = "user"
+                break
+            result = await send_reporter_action(
+                client, entity, msg_ids or None, cat,
+                comment=comment, _opt_cache=opt_cache)
+            if result.get("success"):
+                sent += 1
+                attempted += 1
+                fail_streak = 0
+            elif result.get("floodwait") is not None:
+                wait_s = int(result["floodwait"])
+                flood_pauses += 1
+                if (flood_pauses <= _SPAM_FLOOD_MAX_PAUSES
+                        and wait_s <= _SPAM_FLOOD_TOLERANCE_S):
+                    await asyncio.sleep(min(wait_s + 0.5, 15))
+                    continue  # تلاشِ دوبارهٔ همان شلیک — سهمیه مصرف نشد
+                stopped = "flood"
+                break
+            elif result.get("needs_comment"):
+                stopped = "needs_comment"
+                break
+            else:
+                failed += 1
+                attempted += 1
+                fail_streak += 1
+                if fail_streak >= _SPAM_FAIL_STREAK_STOP:
+                    stopped = "errors"
+                    break
+            if attempted < total:
+                await asyncio.sleep(random.uniform(*_SPAM_SHOT_DELAY))
+            if attempted % _SPAM_PROGRESS_EVERY == 0:
+                await _edit_progress(event, d, attempted, total, sent, failed)
+    finally:
+        saas_bot._reporter_stop.discard(uid)
+
+    if attempted == 0:
+        # هیچ شلیکی انجام نشد (مثلاً flood فوری) — سهمیه سالم می‌ماند
+        saas_bot.wizards.pop(uid, None)
+        if stopped == "needs_comment":
+            err = "این دسته به توضیح متنی نیاز دارد — دوباره تلاش کنید"
+        elif stopped == "user":
+            err = "به درخواستِ شما متوقف شد"
+        else:
+            err = "محدودیتِ سرعتِ تلگرام (FloodWait) اجازهٔ شروع نداد"
+        await _render_receipt(event, d, ok=False, error=err,
+                              left=reporter_quota_left(uid),
+                              n_msgs=len(msg_ids))
+        return
+
+    # بستهٔ تمام‌شده ⟸ target_id ثبت می‌شود (پنجرهٔ dup قفل می‌شود)؛
+    # بستهٔ ناتمام ⟸ NULL تا ادامهٔ سهمیه بعداً روی همان هدف ممکن بماند
+    completed = attempted >= total and stopped is None
+    log_target_id = info.get("id") if completed else None
+    status = "ok" if failed == 0 else ("error" if sent == 0 else "partial")
+    add_reporter_log(uid, target, log_target_id, info.get("type", ""),
+                     cat, with_messages=bool(msg_ids), status=status,
+                     report_count=attempted)
     saas_bot.wizards.pop(uid, None)
-    await _render_receipt(event, d, ok=ok, error=err,
-                          left=reporter_quota_left(uid), n_msgs=len(msg_ids))
+    await _render_receipt(event, d, ok=(sent > 0), error="",
+                          left=reporter_quota_left(uid),
+                          n_msgs=len(msg_ids), sent=sent, failed=failed,
+                          total=total, stopped=stopped)
 
 
 async def _render_receipt(event, d: dict, ok: bool, left: int,
-                          error: str = "", n_msgs: int = 0) -> None:
+                          error: str = "", n_msgs: int = 0,
+                          sent: int = 0, failed: int = 0, total: int = 0,
+                          stopped: str = None) -> None:
     from cianet.bots.ui import UI
     from cianet.core import fa_digits, reporter_daily_cap
     cat_txt = REPORTER_QUICK_CATEGORIES.get(d.get("cat", ""), d.get("cat", "?"))
-    body = [
-        ("🎉 **گزارش با موفقیت ارسال شد!**" if ok
-         else "❌ **ارسال ناموفق بود**"),
-        "",
-        f"🎯 **هدف:** {_target_label(d)}",
-        f"🎭 **دسته:** {cat_txt}",
-        f"📨 **شواهد:** {n_msgs} پیام" if n_msgs else "📨 **شواهد:** بدون پیام",
-    ]
-    if ok:
-        body += ["", "🫡 کارت درست انجام شد — تلگرام گزارشِ تو را دریافت کرد."]
-    if error:
-        body += ["", f"**علت خطا:** {error}"]
+    if total:
+        # ── رسیدِ بستهٔ اسپمی (v2.20.0) ──
+        if ok and stopped is None:
+            head = "🔥 **کلِ سهمیه شلیک شد!**"
+        elif ok:
+            head = "⏸ **بستهٔ گزارش متوقف شد** (بخشی ارسال شد)"
+        else:
+            head = "❌ **ارسال ناموفق بود**"
+        body = [
+            head,
+            "",
+            f"🎯 **هدف:** {_target_label(d)}",
+            f"🎭 **دسته:** {cat_txt}",
+            f"📨 **شواهد:** {n_msgs} پیام" if n_msgs else "📨 **شواهد:** بدون پیام",
+            "",
+            f"✅ ارسال‌شده: **{fa_digits(sent)} از {fa_digits(total)}**",
+        ]
+        if failed:
+            body.append(f"❌ ناموفق: **{fa_digits(failed)}**")
+        if stopped == "flood":
+            body += [
+                "",
+                "⏳ **علتِ توقف:** محدودیتِ سرعتِ تلگرام (FloodWait).",
+                "سهمیهٔ باقی‌مانده سالم است — چند دقیقه بعد همین هدف را",
+                "دوباره گزارش کنید تا ادامهٔ سهمیه شلیک شود.",
+            ]
+        elif stopped == "user":
+            body += ["", "⛔ به درخواستِ خودتان متوقف شد."]
+        elif stopped == "errors":
+            body += ["", "⚠️ **علتِ توقف:** خطاهای پیاپی در ارسال."]
+        elif stopped == "needs_comment":
+            body += ["", "⚠️ این دسته به توضیح متنی نیاز دارد — بعداً دوباره تلاش کنید."]
+        elif ok:
+            body += ["", "🫡 کارت درست انجام شد — تلگرام گزارش‌های تو را دریافت کرد."]
+        if error:
+            body += ["", f"**علت خطا:** {error}"]
+    else:
+        # ── رسیدِ تک‌موردی (خطای قبل از شلیک) ──
+        body = [
+            ("🎉 **گزارش با موفقیت ارسال شد!**" if ok
+             else "❌ **ارسال ناموفق بود**"),
+            "",
+            f"🎯 **هدف:** {_target_label(d)}",
+            f"🎭 **دسته:** {cat_txt}",
+            f"📨 **شواهد:** {n_msgs} پیام" if n_msgs else "📨 **شواهد:** بدون پیام",
+        ]
+        if ok:
+            body += ["", "🫡 کارت درست انجام شد — تلگرام گزارشِ تو را دریافت کرد."]
+        if error:
+            body += ["", f"**علت خطا:** {error}"]
     body += ["", f"🧮 سهمیه‌ی امروز: **{_quota_bar(left, reporter_daily_cap())}**",
              f"      **{fa_digits(left)} از {fa_digits(reporter_daily_cap())}** باقی‌مانده"]
     rows = [
@@ -1122,6 +1319,14 @@ async def handle_reporter_action(event, saas_bot, action: str) -> None:
     if action == "reporter:history":
         saas_bot.wizards.pop(uid, None)
         await _page_history(event, saas_bot, uid)
+        return
+    if action == "reporter:stop":
+        # v2.20.0 (SPAM-MODE): پرچمِ توقف — حلقهٔ بستهٔ در حالِ اجرا آن را
+        # می‌بیند و بسته را ناتمام می‌بندد. جریان/ویزارد دست‌نخورده می‌ماند.
+        if not hasattr(saas_bot, "_reporter_stop"):
+            saas_bot._reporter_stop = set()
+        saas_bot._reporter_stop.add(uid)
+        await event.answer("⛔ در حال توقفِ بستهٔ گزارش…")
         return
 
     # ── جریانِ گزارشِ جدید ──

@@ -2096,6 +2096,13 @@ def ensure_reporter_schema() -> None:
                 created_at TEXT NOT NULL
             )"""
         )
+        # v2.20.0 (SPAM-MODE): هر ردیف دیگر «یک گزارش» نیست — تعداد شلیکِ
+        # همان بسته است (burst). ردیف‌های قدیمی با DEFAULT 1 معتبر می‌مانند.
+        cols = {r[1] for r in c.execute(
+            "PRAGMA table_info(reporter_logs)").fetchall()}
+        if "report_count" not in cols:
+            c.execute("ALTER TABLE reporter_logs "
+                      "ADD COLUMN report_count INTEGER NOT NULL DEFAULT 1")
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_reporter_user_time "
             "ON reporter_logs (user_id, created_at)"
@@ -2161,7 +2168,9 @@ def reporter_daily_cap() -> int:
 
 
 def reporter_today_count(user_id: int) -> int:
-    """تعداد گزارش‌های همین کاربر در امروزِ UTC — روزانه بودن سهمیه.
+    """مجموعِ گزارش‌های شلیک‌شدهٔ همین کاربر در امروزِ UTC — روزانه بودن
+    سهمیه. v2.20.0 (SPAM-MODE): با آمدنِ burst، COUNT ردیف‌ها دیگر عددِ
+    واقعی نیست؛ SUM(report_count) ملاک است (ردیف‌های قدیمی = ۱).
     گزارش‌های ناموفق هم شمرده می‌شوند تا خطای سرور تبدیل به حلقه‌ی
     تلاشِ بی‌سقف نشود."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -2169,7 +2178,7 @@ def reporter_today_count(user_id: int) -> int:
         return 0  # جدول قابلِ ساخت/خواندن نیست — سهمیه را محدود نشان نده
     with _conn() as c:
         row = c.execute(
-            "SELECT COUNT(*) AS n FROM reporter_logs "
+            "SELECT COALESCE(SUM(report_count), 0) AS n FROM reporter_logs "
             "WHERE user_id = ? AND created_at >= ?",
             (user_id, today),
         ).fetchone()
@@ -2227,8 +2236,14 @@ def reporter_recently_reported(user_id: int, target_id, hours: int = None,
 
 def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
                      category: str, with_messages: bool = False,
-                     status: str = "ok") -> None:
-    """ثبتِ یک گزارش در تاریخچه‌ی scoped کاربر (متادیتا فقط)."""
+                     status: str = "ok", report_count: int = 1) -> None:
+    """ثبتِ یک بستهٔ گزارش در تاریخچهٔ scoped کاربر (متادیتا فقط).
+
+    v2.20.0 (SPAM-MODE): report_count = تعداد شلیکِ همین بسته (پیش‌فرض ۱ =
+    رفتارِ قدیمی). سهمیهٔ روزانه با SUM همین ستون مصرف می‌شود؛ target_id
+    را فقط برای بستهٔ «تمام‌شده» پر کنید (بستهٔ ناتمام با NULL ثبت می‌شود
+    تا پنجرهٔ dup هدف را قفل نکند و کاربر بتواند بقیهٔ سهمیه را بعداً
+    روی همان هدف شلیک کند)."""
     if not _ensure_reporter_ready():
         # گزارشِ واقعی ممکن است به تلگرام رسیده باشد — شکستِ لاگ نباید
         # رسیدِ کاربر را خراب کند؛ فقط در کنسول هشدار می‌دهیم.
@@ -2237,12 +2252,13 @@ def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
     with _conn() as c:
         c.execute(
             "INSERT INTO reporter_logs "
-            "(user_id, target, target_id, target_type, category, with_messages, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(user_id, target, target_id, target_type, category, with_messages, status, report_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, str(target)[:120],
              int(target_id) if target_id is not None else None,
              str(target_type or "")[:20], str(category)[:40],
-             1 if with_messages else 0, str(status)[:20], _now()),
+             1 if with_messages else 0, str(status)[:20],
+             max(1, int(report_count or 1)), _now()),
         )
 
 
@@ -2252,7 +2268,7 @@ def list_reporter_logs(user_id: int, limit: int = 10) -> list:
         return []
     with _conn() as c:
         rows = c.execute(
-            "SELECT target, target_id, target_type, category, with_messages, status, created_at "
+            "SELECT target, target_id, target_type, category, with_messages, status, report_count, created_at "
             "FROM reporter_logs WHERE user_id = ? "
             "ORDER BY id DESC LIMIT ?",
             (user_id, max(1, min(50, limit))),
@@ -2267,21 +2283,27 @@ def reporter_stats() -> dict:
         # v2.19.0 SELF-HEAL: پنل مالک هم نباید روی جدولِ ناتواب بشکند
         return {"total": 0, "users": 0, "today": 0, "by_category": {}, "ok": 0}
     with _conn() as c:
-        total = c.execute("SELECT COUNT(*) AS n FROM reporter_logs").fetchone()["n"]
+        # v2.20.0 (SPAM-MODE): همهٔ شمارنده‌ها SUM(report_count) — با آمدنِ
+        # بسته‌های چندتایی، COUNT ردیف‌ها «بسته» می‌شمرد نه «گزارش».
+        total = c.execute("SELECT COALESCE(SUM(report_count), 0) AS n "
+                          "FROM reporter_logs").fetchone()["n"]
         users = c.execute(
             "SELECT COUNT(DISTINCT user_id) AS n FROM reporter_logs").fetchone()["n"]
         today_n = c.execute(
-            "SELECT COUNT(*) AS n FROM reporter_logs WHERE created_at >= ?",
+            "SELECT COALESCE(SUM(report_count), 0) AS n FROM reporter_logs "
+            "WHERE created_at >= ?",
             (today,),
         ).fetchone()["n"]
         by_cat = {
             r["category"]: r["n"]
             for r in c.execute(
-                "SELECT category, COUNT(*) AS n FROM reporter_logs GROUP BY category"
+                "SELECT category, COALESCE(SUM(report_count), 0) AS n "
+                "FROM reporter_logs GROUP BY category"
             ).fetchall()
         }
         ok_n = c.execute(
-            "SELECT COUNT(*) AS n FROM reporter_logs WHERE status = 'ok'"
+            "SELECT COALESCE(SUM(report_count), 0) AS n FROM reporter_logs "
+            "WHERE status != 'error'"
         ).fetchone()["n"]
     return {"total": int(total), "users": int(users), "today": int(today_n),
             "by_category": by_cat, "ok": int(ok_n)}
@@ -8203,7 +8225,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-21-v2.19.4"
+BUILD_VERSION = "2026-10-22-v2.20.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
