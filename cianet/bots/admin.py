@@ -448,8 +448,6 @@ class AdminBot:
             buttons=buttons,
         )
 
-    @staticmethod
-
     # ─────────────────────────────────────────────────────
     #  جزئیات و مدیریت یک اکانت — همه‌ی قابلیت‌های سلف اینجا کنترل می‌شوند
     # ─────────────────────────────────────────────────────
@@ -2812,35 +2810,46 @@ class AdminBot:
                     pass
                 # v2.14.12: اگه back_route یک route ساده (مثل admin_tools)
                 # هست، مستقیم به صفحه برگردون — نه nav stack.
+                # v2.23.1 (AUDIT-43 #2 — ددلاک): قبلاً اینجا روترِ saas
+                # صدا زده می‌شد؛ ولی مسیرهای 2FA (tfa:TAG) در saas دیسپچِ
+                # مستقیم ندارند و از fall-throughِ همان قفلِ غیرتکرارپذیرِ
+                # _panel_lock می‌گذشتند که همین الان در اختیارِ ماست → هر
+                # انصرافِ ویزارد 2FA کلِ پنل را تا ری‌استارت فریز می‌کرد.
+                # حالا صفحه‌ی مقصد مستقیم رندر می‌شود — همان کاری که دیسپچِ
+                # عادیِ tfa: در handle_callback می‌کند (بدون قفل)؛ گاردهای
+                # مالکیت هم داخلِ _show_2fa/_sess_guard دوباره اجرا می‌شوند.
                 _saas_for_back = getattr(self, "saas", None)
-                _router_for_back = getattr(_saas_for_back, "_router", None) if _saas_for_back else None
-                if _router_for_back is not None:
-                    # مسیرِ ویزارد (tfachange/tfaremove/tfaemail) که روتر موقعِ
-                    # شروعِ ویزارد روی پشته گذاشته بود، مثلِ NAV_BACK از پشته
-                    # برداشته می‌شود تا «بازگشت» بعدی قدمِ اضافه نخورد.
-                    _cur = self.nav.current(notify_event.sender_id) or ""
-                    if _cur.startswith(("tfachange:", "tfaremove:", "tfaemail:")):
-                        self.nav.pop(notify_event.sender_id)
-                    # dispatch از ابتدا — همه‌ی گاردهای مالکیت/نقش مثلِ کلیکِ
-                    # مستقیم اجرا می‌شوند (همان الگوی NAV_BACK و _nav_heal).
-                    await _router_for_back(notify_event, _route=back_route, _depth=1)
-                elif back_route == "admin_tools" and _saas_for_back is not None:
-                    # v2.14.12: خاص برای admin_tools — مستقیم صدا بزن
-                    try:
+                # مسیرِ ویزارد (tfachange/tfaremove/tfaemail) که روتر موقعِ
+                # شروعِ ویزارد روی پشته گذاشته بود، مثلِ NAV_BACK از پشته
+                # برداشته می‌شود تا «بازگشت» بعدی قدمِ اضافه نخورد.
+                _cur = self.nav.current(notify_event.sender_id) or ""
+                if _cur.startswith(("tfachange:", "tfaremove:", "tfaemail:")):
+                    self.nav.pop(notify_event.sender_id)
+                try:
+                    if back_route.startswith("tfa:"):
+                        await self._show_2fa(notify_event, back_route.split(":", 1)[1])
+                    elif back_route == "admin_tools" and _saas_for_back is not None:
                         _role = _saas_for_back._role(notify_event.sender_id)
                         await _saas_for_back._show_admin_tools(notify_event, _role)
-                    except Exception as _e:
-                        print(f"⚠️ [cancel_wizard] admin_tools fallback failed: {_e}")
+                    else:
+                        # مسیرهای ناشناخته/آینده: هرگز از داخلِ این شاخه
+                        # (که زیرِ _panel_lock است) روترِ saas را صدا نزن —
+                        # رندرِ ایمنِ بدونِ قفل: پیامِ لغو + دکمه‌ی بازگشت.
                         await notify_event.edit(
                             "❌ لغو شد.",
                             buttons=[[UI.neutral(UI.L_BACK, back_route)]],
                         )
-                else:
-                    # حالت standalone: پیامِ کوتاهِ لغو + دکمه‌ی بازگشت به مقصد.
-                    await notify_event.edit(
-                        "❌ لغو شد.",
-                        buttons=[[UI.neutral(UI.L_BACK, back_route)]],
-                    )
+                except Exception:
+                    # fail-safe: اگر رندرِ صفحه‌ی مقصد نشد، حداقل پیامِ لغو
+                    # تمیز با دکمه‌ی بازگشت نشان بده (کلیکِ بعدی از مسیرِ
+                    # عادی و بدونِ قفلِ قبلی انجام می‌شود).
+                    try:
+                        await notify_event.edit(
+                            "❌ لغو شد.",
+                            buttons=[[UI.neutral(UI.L_BACK, back_route)]],
+                        )
+                    except Exception:
+                        pass
             else:
                 # v2.22.2 (OWNER-REPORT «انصراف» — دابل‌رندر + گیت نقش):
                 # قبلاً اینجا edit("لغو شد") + ارسالِ پیامِ جداگانه‌ی منوی

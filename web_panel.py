@@ -1919,51 +1919,41 @@ async def user_pay_order_with_wallet(order_id: int, request: Request,
     """پرداخت فاکتور از موجودی کیف پول — خودکار تأیید می‌شه."""
     uid = require_user_auth(request)
     m = _main()
-    order = m.get_order(order_id)
-    if not order or order["user_id"] != uid:
-        raise HTTPException(404, "فاکتور پیدا نشد")
-    if order["status"] != "pending":
-        raise HTTPException(400, "این فاکتور قابل پرداخت نیست")
-    amount = int(order["amount_toman"])
-    bal = m.get_wallet_balance(uid)
-    if bal < amount:
-        raise HTTPException(400, f"موجودی کافی نیست — موجودی: {bal} Toman")
-    pay_result = m.wallet_pay_from_balance(uid, amount, ref=f"order:{order['order_no']}")
+    # v2.23.1 (AUDIT-43 #3 — MONEY): قبلاً این اندپوینت نسخه‌ی غیراتمیکِ
+    # خودش را داشت: debit کیف پول در یک تراکنش، UPDATE سفارش در تراکنشی
+    # دیگر — دابل‌کلیک = دو برداشت (با پراب همزمانی اثبات شد)، رقابت با
+    # expiry-sweeper یا شکستِ ساخت اشتراک = پول کم‌شده بدون سرویس و بدون
+    # بازگشت، و فاکتورِ «ربات اختصاصی» اشتراکِ الکیِ ۳۰روزه می‌ساخت.
+    # حالا همان تابعِ اتمیکِ مسیرِ ربات (pay_order_wallet_atomic) استفاده
+    # می‌شود: کلِ عملیات در یک تراکنشِ واحدِ BEGIN IMMEDIATE.
+    pay_result = m.pay_order_wallet_atomic(uid, order_id)
     if not pay_result.get("ok"):
-        raise HTTPException(500, f"خطا در پرداخت: {pay_result.get('error')}")
-    # Mark order as paid + create subscription
-    try:
-        import re as _re
-        plan_name = order["plan"]
-        # v2.10.0: استفاده از pricing.duration_days (قبلاً regex بود)
-        days = 30
+        err = pay_result.get("error")
+        if err == "order_not_found":
+            raise HTTPException(404, "فاکتور پیدا نشد")
+        if err == "user_not_found":
+            raise HTTPException(404, "کاربر پیدا نشد")
+        if err == "insufficient_balance":
+            raise HTTPException(400, f"موجودی کافی نیست — موجودی: {pay_result.get('balance', 0)} Toman")
+        raise HTTPException(400, "این فاکتور قابل پرداخت نیست")
+    # v2.23.1: اقداماتِ پس از پرداخت — همسان با مسیرِ ربات
+    # (_pay_order_from_wallet): پلنِ «ربات اختصاصی» اشتراک نمی‌سازد و
+    # درخواستِ در انتظار فعال می‌شود؛ در غیر این صورت سلف‌بات‌هایِ
+    # کاربر (که شاید موقعِ انقضا متوقف شده‌اند) از سر گرفته می‌شوند.
+    bot_ref = getattr(m, "_SAAS_BOT_REF", None)
+    if bot_ref is not None:
         try:
-            _pricing = m.get_pricing(plan_name)
-            if _pricing and _pricing.get("duration_days"):
-                days = int(_pricing["duration_days"])
-        except Exception:
-            pass
-        with m._conn_immediate() as c:
-            # v2.10.0: atomic — WHERE status='pending' برای جلوگیری از double-pay
-            cur = c.execute(
-                "UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? "
-                "WHERE id = ? AND status = 'pending'",
-                (m._now(), order_id),
-            )
-            if cur.rowcount == 0:
-                raise HTTPException(400, "این فاکتور قبلاً پرداخت شده یا لغو شده")
-
-        m.create_subscription(uid, plan_name, days)
-        # v2.17.0: اگر فاکتورِ دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
-        try:
-            m.maybe_fulfill_group_order(order_id=order_id)
-        except Exception as _ge:
-            print(f"⚠️ [invoice_confirm] group fulfill failed: {_ge}")
-        return {"ok": True, "balance": pay_result["balance"], "subscription_days": days}
-    except Exception as e:
-        # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details to client.
-        print(f"❌ [endpoint] Invoice confirm error: {type(e).__name__}: {e}")
-        raise HTTPException(500, "خطا در تأیید فاکتور — با پشتیبانی تماس بگیرید.")
+            if pay_result.get("plan") == m.DEDICATED_BOT_PLAN:
+                # دیک سینتتیک: payment_id نال‌پذیر است (COALESCE) — این
+                # پرداختِ کیف‌پولی ردیفِ payments ندارد.
+                await bot_ref._activate_dedicated_bot({"id": None, "user_id": uid})
+            else:
+                await bot_ref._resume_user_selfbots(uid)
+        except Exception as _pe:
+            print(f"⚠️ [pay-wallet] post-pay action failed: {_pe}")
+    return {"ok": True, "balance": pay_result["balance"],
+            "subscription_days": pay_result.get("days"),
+            "plan": pay_result.get("plan")}
 
 # v2.9.0: Reseller dashboard
 @app.get("/api/user/reseller-dashboard")

@@ -5520,6 +5520,45 @@ def _encrypt_file_inplace(path: str, password: str) -> bool:
         return False
 
 
+def _decrypt_cnb1_to_temp(enc_path: str, password: str):
+    """
+    دیکریپتِ فایل CNB1 (خروجیِ _encrypt_file_inplace) به یک ZIP خامِ موقت.
+
+    v2.23.1 (AUDIT-43 #4): تا این نسخه Restore فقط ZIP خام می‌پذیرفت و
+    بکاپ‌های رمزگذاری‌شده‌ی خودِ ربات (که همیشه CNB1 هستند) با پیامِ
+    گیج‌کننده‌ی «فایل ZIP خراب است» رد می‌شدند؛ اکنون ویزاردِ Restore
+    رمز را می‌پرسد و از همین مسیر دیکریپت می‌کند. مسیرِ فایلِ موقتِ
+    رمزگشایی‌شده را برمی‌گرداند؛ None یعنی رمز غلط یا فایل نامعتبر.
+    (InvalidToken خودِ Fernet رمزِ غلط را می‌پوشاند — fail-closed.)
+    """
+    try:
+        with open(enc_path, "rb") as src:
+            data = src.read()
+        if len(data) < 24 or data[:4] != b"CNB1":
+            return None
+        salt = data[4:20]
+        token = data[20:]
+        import base64
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100_000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
+        plain = Fernet(key).decrypt(token)
+        _fd, tmp = tempfile.mkstemp(prefix="restore_dec_", suffix=".zip")
+        with os.fdopen(_fd, "wb") as dst:
+            dst.write(plain)
+        _chmod_private(tmp)
+        return tmp
+    except Exception:
+        return None
+
+
 def build_sessions_backup_zip(zip_path: str, password: Optional[str] = None) -> bool:
     """
     v2.22.0 (OWNER-REQUEST): بکاپِ سبکِ «فقط سشن‌های سلف» برای حلقهٔ ساعتی.
@@ -7488,6 +7527,9 @@ WIZ_SET_WALLET = "awaiting_usdt_wallet"
 WIZ_TRX_HASH = "awaiting_trx_hash"
 WIZ_DB_RESTORE = "awaiting_db_restore"
 WIZ_DB_RESTORE_CONFIRM = "awaiting_db_restore_confirm"
+# v2.23.1 (AUDIT-43 #4): حالتِ رمزِ فایلِ رمزگذاری‌شده‌ی CNB1 — ویزاردِ
+# Restore خودش رمز را می‌پرسد و درجا دیکریپت می‌کند.
+WIZ_DB_RESTORE_PASS = "awaiting_db_restore_pass"
 WIZ_LICENSE_CODE = "awaiting_license_code"
 WIZ_PAYMENT_RECEIPT = "awaiting_payment_receipt"
 WIZ_CL_RESELLER_LIMIT = "cl_reseller_limit"
@@ -8079,7 +8121,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.0"
+BUILD_VERSION = "2026-10-23-v2.23.1"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -11629,6 +11671,7 @@ __all__ = [
     'WIZ_CONFIRM_REPLACE',
     'WIZ_DB_RESTORE',
     'WIZ_DB_RESTORE_CONFIRM',
+    'WIZ_DB_RESTORE_PASS',
     'WIZ_DEDICATED_EXTEND_DAYS',
     'WIZ_DEDICATED_OWNER_ID',
     'WIZ_DEDICATED_TOKEN',

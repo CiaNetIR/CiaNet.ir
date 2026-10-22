@@ -82,6 +82,7 @@ from cianet.core import (
     WIZ_CL_RESELLER_LIMIT,
     WIZ_DB_RESTORE,
     WIZ_DB_RESTORE_CONFIRM,
+    WIZ_DB_RESTORE_PASS,
     WIZ_DEDICATED_EXTEND_DAYS,
     WIZ_DEDICATED_OWNER_ID,
     WIZ_DEDICATED_TOKEN,
@@ -245,6 +246,7 @@ from cianet.core import (
     REQUIRED_CHATS_MAX,
     reseller_user_count,
     restore_backup_from_zip_async,
+    _decrypt_cnb1_to_temp,
     review_payment_atomic,
     revoke_capability,
     safe_callback_int,
@@ -5245,13 +5247,13 @@ class SaaSBot:
             f"```\n{backup_password}\n```\n\n"
             f"این رمز فقط برای بکاپی که الان در چتِ بات دریافت می‌کنی "
             f"استفاده می‌شود. در جای امن نگه دار.\n\n"
-            f"برای Restore: ابتدا فایل را با این رمز دیکریپت کن:\n"
-            f"```python\nimport base64, hashlib\n"
-            f"from cryptography.fernet import Fernet\n"
-            f"key = base64.urlsafe_b64encode(hashlib.sha256(\"<password>\".encode()).digest())\n"
-            f"plain = Fernet(key).decrypt(open('backup.zip','rb').read())\n"
-            f"open('backup_decrypted.zip','wb').write(plain)\n```\n"
-            f"سپس `backup_decrypted.zip` را به ربات بفرست."
+            # v2.23.1 (AUDIT-43 #4): قبلاً اینجا یک اسنیپتِ پایتونی برای
+            # دیکریپتِ دستی داده می‌شد که (۱) کلیدش با فرمتِ واقعیِ CNB1
+            # (PBKDF2 + salt) هم‌خوان نبود و (۲) از اونرِ یک رباتِ تلگرامی
+            # انتظارِ اجرای پایتون روی سرور را داشت. حالا Restore خودش
+            # رمز را می‌پرسد — همان فایلِ رمزگذاری‌شده را بفرست.
+            f"برای Restore: همین فایل را به ربات بفرست؛ وقتی رمز خواست، "
+            f"همین رمز را به‌صورت پیام بفرست."
         )
         try:
             await asyncio.wait_for(
@@ -6640,6 +6642,8 @@ class SaaSBot:
         """دریافت فایل بکاپ برای Restore (فقط OWNER): دانلود → validate → تأیید."""
         if wiz["state"] != WIZ_DB_RESTORE:
             return False
+        # v2.23.1 (AUDIT-43 #5): فعالیت → تمدید TTL.
+        wiz["_ts"] = time.time()
         sender = event.sender_id
         if self._role(sender) != ROLE_OWNER:
             self.wizards.pop(sender, None)
@@ -6678,6 +6682,28 @@ class SaaSBot:
                 os.remove(tmp)
             except Exception:
                 pass
+            return True
+
+        # v2.23.1 (AUDIT-43 #4): بکاپ‌های خودِ ربات همیشه CNB1 (رمزگذاری‌شده)
+        # هستند — قبلاً اینجا مستقیم validate_backup_zip صدا زده می‌شد و فایلِ
+        # CNB1 با پیامِ گیج‌کننده‌ی «فایل ZIP خراب است» رد می‌شد؛ یعنی
+        # بکاپ‌های خودِ سیستم عملاً غیرقابلِ Restore بودند. حالا رمز در
+        # مرحله‌ی بعد پرسیده و درجا دیکریپت می‌شود.
+        _is_cnb1 = False
+        try:
+            with open(tmp, "rb") as _f:
+                _is_cnb1 = _f.read(4) == b"CNB1"
+        except Exception:
+            pass
+        if _is_cnb1:
+            wiz["state"] = WIZ_DB_RESTORE_PASS
+            wiz["data"]["tmp_enc"] = tmp
+            await event.respond(
+                "🔐 این فایل بکاپ **رمزگذاری‌شده** است.\n\n"
+                "رمزِ آن را همینجا به‌صورت پیام بفرست تا دیکریپت و بررسی شود.\n"
+                "(رمزِ بکاپ موقعِ گرفتنِ بکاپ، جدا از فایل برایتان ارسال شده است.)",
+                buttons=[[UI.neutral(UI.L_CANCEL, "owner_db_restore_cancel")]],
+            )
             return True
 
         ok, msg = validate_backup_zip(tmp)
@@ -6761,12 +6787,14 @@ class SaaSBot:
     async def _owner_db_restore_cancel(self, event):
         """❌ لغو Restore — ویزارد بسته و فایل موقت پاک می‌شود."""
         wiz = self.wizards.pop(event.sender_id, None)
-        tmp = (wiz or {}).get("data", {}).get("tmp_zip")
-        if tmp:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
+        # v2.23.1 (AUDIT-43 #4): فایلِ رمزگذاری‌شده‌ی CNB1 هم باید پاک شود.
+        for _key in ("tmp_zip", "tmp_enc"):
+            tmp = ((wiz or {}).get("data", {}) or {}).get(_key)
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
         await event.edit(
             "❌ لغو شد.",
             buttons=[UI.nav_row()],
@@ -7110,7 +7138,13 @@ class SaaSBot:
                 return
             plan_name = pay_result["plan"]
             if plan_name == DEDICATED_BOT_PLAN:
-                await self._activate_dedicated_bot(event.sender_id)
+                # v2.23.1 (AUDIT-43 #3): قبلاً اینجا event.sender_id (int)
+                # پاس داده می‌شد ولی تابع dict با کلیدهای user_id/id
+                # می‌خواهد → TypeError در هر پرداختِ کیف‌پولیِ پلنِ اختصاصی.
+                # دیک سینتتیک: payment_id نال‌پذیر است (COALESCE در
+                # update_dedicated_bot_status) — پرداختِ کیف‌پولی ردیفِ
+                # payments ندارد.
+                await self._activate_dedicated_bot({"id": None, "user_id": event.sender_id})
             # v2.12.21 (QA7-USER6 BUG#5): _pay_order_from_wallet،
             # _resume_user_selfbots رو صدا نمی‌زد. این یعنی کاربر بعد از
             # تمدید، SelfBotش همچنان disabled می‌موند تا restart بعدی.
@@ -7305,6 +7339,12 @@ class SaaSBot:
         state = wiz["state"]
         data = wiz["data"]
         text = (event.raw_text or "").strip()
+        # v2.23.1 (AUDIT-43 #5): هر فعالیتِ واقعی، TTL ویزارد را تمدید می‌کند
+        # (همان الگوی AdminBot) — قبلاً _ts فقط موقعِ شروع/انتقال ست می‌شد و
+        # فرآیندهایِ طولانیِ طبیعی (تیکت، رسید پرداخت، TRX، لایسنس) وسطِ کار
+        # با «سکوتِ مطلق» می‌مُردند: نه پاسخی، نه خطایی — پیام کاربر در
+        # fall-through گم می‌شد و او فکر می‌کرد ربات پیامش را خورده.
+        wiz["_ts"] = time.time()
 
         # v2.22.1 (AUDIT-39/e#5): ویزاردهای تنظیمیِ مالک فقط در چتِ خصوصی
         # مصرف می‌شوند — تکمیلِ ویزارد در گروه، صفحه‌هایِ تنظیماتِ مالک را
@@ -7339,6 +7379,61 @@ class SaaSBot:
                 "♻️ در انتظارِ **فایل ZIP بکاپ** هستم — لطفاً فایل را بفرست.\n"
                 "متن پذیرفته نیست؛ برای لغو دکمه‌ی «بازگشت» را بزن.",
                 buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+            )
+            return True
+
+        # v2.23.1 (AUDIT-43 #4): رمزِ فایلِ بکاپِ CNB1 — دیکریپت درجا،
+        # سپس همان مسیرِ validate/تأییدِ ZIP خام.
+        if state == WIZ_DB_RESTORE_PASS:
+            pw = (event.raw_text or "").strip()
+            if not pw:
+                await event.respond(
+                    "🔐 رمزِ فایل بکاپ را بفرست (متنِ خالی پذیرفته نیست).",
+                    buttons=[[UI.neutral(UI.L_CANCEL, "owner_db_restore_cancel")]],
+                )
+                return True
+            enc = wiz.get("data", {}).get("tmp_enc")
+            dec = _decrypt_cnb1_to_temp(enc, pw) if enc else None
+            if dec is None:
+                # رمز غلط — ویزارد باز می‌ماند تا دوباره امتحان کند.
+                await event.respond(
+                    "❌ رمز درست نیست (یا فایل خراب است).\n\n"
+                    "دوباره رمز را بفرست، یا با دکمه‌ی لغو منصرف شو.",
+                    buttons=[[UI.neutral(UI.L_CANCEL, "owner_db_restore_cancel")]],
+                )
+                return True
+            # فایلِ رمزگشایی‌شده جایگزینِ فایلِ رمز می‌شود.
+            try:
+                os.remove(enc)
+            except Exception:
+                pass
+            wiz["data"].pop("tmp_enc", None)
+            ok, msg = validate_backup_zip(dec)
+            if not ok:
+                self.wizards.pop(event.sender_id, None)
+                await event.respond(
+                    "❌ Restore انجام نشد.\n\nBackup فعلی تغییری نکرده است.\n\nخطا:\n" + msg
+                )
+                for _p in (dec,):
+                    try:
+                        os.remove(_p)
+                    except Exception:
+                        pass
+                return True
+            wiz["state"] = WIZ_DB_RESTORE_CONFIRM
+            wiz["data"]["tmp_zip"] = dec
+            await event.respond(
+                "🔓 فایل با موفقیت رمزگشایی شد.\n\n"
+                "📦 Backup معتبر است.\n\n"
+                "⚠️ **تأیید Restore**\n\n"
+                "با Restore کردن این فایل، اطلاعات فعلی سیستم با اطلاعات موجود "
+                "در Backup جایگزین می‌شود.\n"
+                "قبل از Restore یک Backup اضطراری از وضعیت فعلی ساخته خواهد شد.\n\n"
+                "آیا مطمئن هستید؟",
+                buttons=[
+                    [UI.danger("بله، Restore کن", b"owner_db_restore_go")],
+                    [UI.neutral(UI.L_CANCEL, "owner_db_restore_cancel")],
+                ],
             )
             return True
 
@@ -8519,6 +8614,10 @@ class SaaSBot:
         if wiz["state"] != WIZ_PAYMENT_RECEIPT:
             return False
         data = wiz["data"]
+        # v2.23.1 (AUDIT-43 #5): فعالیت → تمدید TTL (رسیدِ عکسِ کارت‌به‌کارت
+        # اغلب دیرتر از ۳۰ دقیقه‌ی پنجره‌ی اولیه می‌رسد — پنجره‌ی پرداخت
+        # خودِ سفارش ۲۴ ساعت است).
+        wiz["_ts"] = time.time()
         upsert_user(event.sender_id, event.sender.username if event.sender else None)
         # receipt_ref یک مرجع قابل‌بازیابی به خودِ پیام است (chat_id:message_id)
         # نه صرفاً event.photo.id که به‌تنهایی برای دانلود مجدد کافی نیست.
@@ -9062,6 +9161,23 @@ class SaaSBot:
             # (pricing، set_card، set_wallet، dedicated_bot_token، license_create،
             # discount_create، set_merchant، announce) نشت نکنن.
             await self._cleanup_stale_wizards()
+
+            # v2.23.1 (AUDIT-43 #5): انقضای TTL دیگر سایلنت نیست — قبل از
+            # lookup، ویزاردِ همین کاربر چک می‌شود؛ اگر ۳۰ دقیقه بی‌فعالیت
+            # منقضی شده باشد، با پیامِ روشن اطلاع داده می‌شود (GC دوره‌ایِ هر
+            # ۵ دقیقه‌ای قبلاً ویزارد را می‌بُرید و پیامِ بعدیِ کاربر — مثلِ
+            # رسیدِ پرداخت یا تیکت — بدونِ هیچ واکنشی در fall-through گم می‌شد).
+            _wiz_mine = self.wizards.get(event.sender_id)
+            if _wiz_mine and (time.time() - _wiz_mine.get("_ts", 0)) > self._WIZARD_TTL_SEC:
+                self.wizards.pop(event.sender_id, None)
+                _spawn_bg(self._cleanup_wizard_temp_client(_wiz_mine),
+                          "wizard_ttl_expire")
+                await event.respond(
+                    "⏳ فرآیندِ باز به‌دلیلِ ۳۰ دقیقه بی‌فعالیت بسته شد.\n"
+                    "لطفاً از منو دوباره شروع کن و این پیام را دوباره بفرست.",
+                    buttons=[UI.nav_row(back=False)],
+                )
+                return
 
             # گیت همیشگی: اگر کاربر از کانال خارج شده باشد، همین اولین
             # تعاملِ بعدی دسترسی را می‌بندد تا دوباره عضو شود.
