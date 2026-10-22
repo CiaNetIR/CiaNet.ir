@@ -343,40 +343,11 @@ def _verify_min_commit(repo_dir: str, remote_commit: str) -> Tuple[bool, str]:
                 return False, f"❌ GPG signature verification failed for {remote_commit[:8]}"
         except Exception as _gpg_e:
             return False, f"❌ GPG verification error (fail-closed): {_gpg_e}"
-    min_commit = floors[0]
-    # پذیرش SHA-1 (40 hex) و SHA-256 (64 hex) — برای آینده
-    if not (len(min_commit) in (40, 64) and all(c in "0123456789abcdef" for c in min_commit)):
-        return False, f"❌ CIANET_MIN_COMMIT invalid: '{min_commit[:8]}...' (must be 40 or 64 hex chars)"
-    if not remote_commit or len(remote_commit) not in (40, 64):
-        return False, f"❌ remote commit invalid: '{remote_commit}'"
-    if remote_commit == min_commit:
-        return True, ""  # همان — تأیید شده
-    # PATCH (v2.2.0): استفاده از git merge-base --is-ancestor
-    # که از تاریخچه‌ی واقعی git استفاده می‌کنه، نه مقایسه‌ی رشته‌ای.
-    try:
-        result = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", min_commit, remote_commit],
-            cwd=repo_dir, capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0:
-            # min_commit is ancestor of remote_commit → remote is at-or-after min → OK
-            return True, ""
-        elif result.returncode == 1:
-            # min_commit is NOT ancestor of remote_commit → remote is older → REJECT
-            return False, (
-                f"❌ Supply chain check failed:\n"
-                f"   remote commit {remote_commit[:8]} is NOT a descendant of min {min_commit[:8]}\n"
-                f"   Possible rollback attack or force-push to old commit.\n"
-                f"   Update refused. Update CIANET_MIN_COMMIT to a newer value to allow."
-            )
-        else:
-            # exit 128 = git error (commit not found, etc.)
-            stderr = result.stderr.strip()[:200]
-            return False, f"❌ git merge-base error (exit {result.returncode}): {stderr}"
-    except subprocess.TimeoutExpired:
-        return False, "❌ Supply chain check timeout — update refused (fail-closed)"
-    except Exception as e:
-        return False, f"❌ Supply chain check exception: {type(e).__name__}: {e}"
+    # v2.23.0 (AUDIT-40 · 40-a#10): نیمهٔ دومِ تکراریِ تابع حذف شد —
+    # همان loop بالای floors همه‌ی بررسی‌ها (اعتبارسنجی SHA + ancestor)
+    # را انجام می‌دهد؛ این بخش فقط floors[0] را دوباره چک می‌کرد و
+    # خروجی جدیدی نداشت. رسیدن به اینجا یعنی همه‌ی floorها عبور شدند.
+    return True, ""
 
 
 def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object = None) -> Tuple[bool, str]:
@@ -901,20 +872,9 @@ def _cleanup_old_backups(versions_dir: Path, keep: int = 10) -> None:
     """
     if not versions_dir.exists():
         return
-    backups = sorted(
-        versions_dir.glob("main.py.pre-auto-update.*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,  # جدیدترین اول
-    )
-    # هم rollback backups رو در نظر بگیر
-    backups += sorted(
-        versions_dir.glob("main.py.pre-rollback.*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    # نگه‌داشتنِ `keep` تا اخیر (به‌ترتیبِ زمان)
-    # backups لیست مسطح هست، نه مرتب به‌صورت واحد. بذار با همون mtime
-    # مرتب کن:
+    # v2.23.0 (AUDIT-40 · 40-a#16): لیستِ backups که ساخته می‌شد و دور
+    # انداخته می‌شد حذف شد — حذفِ واقعی از all_backups تازه‌سازی‌شده انجام
+    # می‌شود.
     all_backups = sorted(
         list(versions_dir.glob("main.py.pre-auto-update.*"))
         + list(versions_dir.glob("main.py.pre-rollback.*")),

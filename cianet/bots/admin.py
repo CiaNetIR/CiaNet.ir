@@ -65,7 +65,6 @@ from cianet.core import (
     WIZ_PROXY_USERNAME,
     WIZ_SEND_MSG_TARGET,
     WIZ_SEND_MSG_TEXT,
-    WIZ_TAG,
     _ADMIN_CLIENT_REF,
     _acc_ui_state,
     _chmod_private,
@@ -388,12 +387,12 @@ class AdminBot:
             # فیکس مهم: قبلاً این پنل (وقتی زیرِ saas_bot.py اجرا می‌شد،
             # یعنی از طریق دکمه‌ی «🛠 مدیریت اکانت‌های سلف/مشتریان»)
             # هیچ راهی برای برگشت به منوی اصلی نقش‌محور نداشت — تنها راه
-            # خروج زدن دوباره‌ی /start بود. این باعث می‌شد این پنل از دید
+            # خروج زدن دوباره‌ی /start بود. این باعث می‌شد این پنل از دیدِ
             # کاربر کاملاً جدا و «قدیمی» به نظر برسد، چون رفتارش با بقیه‌ی
-            # ربات (که همه‌جا دکمه‌ی برگشت دارد) یکی نبود. دکمه‌ی زیر از
-            # callback مشترک back_role_menu استفاده می‌کند که خودِ
-            # saas_bot.py آن را هندل می‌کند و به منوی نقش (OWNER/ADMIN/
-            # RESELLER) برمی‌گرداند.
+            # ربات (که همه‌جا دکمه‌ی برگشت دارد) یکی نبود. ردیفِ زیر
+            # (UI.nav_row → دکمهٔ 🏠 با callback مشترکِ nav:home) توسط
+            # saas_bot.py هندل می‌شود و به منوی نقش (OWNER/ADMIN/RESELLER)
+            # برمی‌گرداند.
             buttons.append(UI.nav_row(back=False))
         return buttons
 
@@ -450,17 +449,12 @@ class AdminBot:
         )
 
     @staticmethod
-    def _safe_uptime(bot) -> str:
-        try:
-            return bot._uptime()
-        except Exception:
-            return "—"
 
     # ─────────────────────────────────────────────────────
     #  جزئیات و مدیریت یک اکانت — همه‌ی قابلیت‌های سلف اینجا کنترل می‌شوند
     # ─────────────────────────────────────────────────────
 
-    async def _show_account_detail(self, event, tag: str, back_data: bytes = None):
+    async def _show_account_detail(self, event, tag: str):
         """
         صفحه‌ی اصلی مدیریت یک اکانت (هاب). همه‌ی قابلیت‌های سلف به بخش‌های
         دسته‌بندی‌شده منتقل شدند تا این صفحه شلوغ نباشد:
@@ -472,13 +466,9 @@ class AdminBot:
           📊 وضعیت کامل      → گزارش فقط‌خواندنی
 
         عملیات حساس (توقف / حذف کامل) جدا از قابلیت‌های عادی، پایین صفحه
-        هستند و حذف کامل confirmation دارد.
-
-        back_data: دیگر استفاده نمی‌شود و فقط برای سازگاریِ امضای
-        فراخوان‌های قدیمی نگه داشته شده. مسیر بازگشت از پشته‌ی ناوبری
-        (self.nav) می‌آید — یعنی همان مسیری که کاربر واقعاً طی کرده،
-        نه یک مقصدِ ازپیش‌تعیین‌شده که با ورود از مسیرِ دیگر کهنه می‌شد.
-        """
+        هستند و حذف کامل confirmation دارد. مسیر بازگشت از پشته‌ی ناوبری
+        (self.nav) می‌آید — یعنی همان مسیری که کاربر واقعاً طی کرده.
+        """        # v2.23.0 (AUDIT-40): پارامترِ بلااستفادهٔ back_data حذف شد.
         cfg = self.sb.load_config()
         if tag not in cfg or not self._account_visible(cfg[tag]):
             # پیام یکسان برای «وجود ندارد» و «دسترسی نداری» عمداً است — تا
@@ -675,18 +665,6 @@ class AdminBot:
                     pass
         return allowed, reason
 
-    def _can_view_security_tools(self, tag: str, sender_id: int) -> bool:
-        """
-        آیا این کاربر *می‌بیند* که ابزارهای امنیتی برای این اکانت وجود
-        دارند؟ (برای پنهان‌کردن کامل از دیدِ کاربرانِ غیرمجاز). فقط داشتنِ
-        مجوز کافی است — دامنه در زمانِ کلیک دوباره چک می‌شود.
-        """
-        if self._viewer_is_main_owner(sender_id):
-            return True
-        try:
-            return bool(get_active_grants(sender_id, CAP_ACCOUNT_SECURITY))
-        except Exception:
-            return False
 
 
     def _viewer_owns_account(self, acc: dict, sender_id: int) -> bool:
@@ -719,9 +697,6 @@ class AdminBot:
         owner = acc.get("owner_user_id")
         return owner is not None and owner == sender_id
 
-    # نامِ قدیمی برای سازگاری — عملِ نشست‌ها همان معیارِ مالکیت را دارد.
-    def _can_wipe_sessions(self, acc: dict, sender_id: int) -> bool:
-        return self._viewer_owns_account(acc, sender_id)
 
     @staticmethod
     def _sess_line(s) -> str:
@@ -2793,11 +2768,11 @@ class AdminBot:
         # ادمین/نماینده‌ای که از پنل مدیریت وارد شده)، نباید بعد از لغو،
         # منوی کامل مدیریت اکانت‌ها (که چنین کاربری اصلاً نباید ببیند)
         # نمایش داده شود — به‌جایش یک دکمه‌ی «🏠 منوی اصلی» نشان داده
-        # می‌شود که callback مشترک back_role_menu را دارد و saas_bot.py
-        # آن را به منوی نقش‌محور (USER) برمی‌گرداند؛ یعنی کاربر عادی بعد
-        # از لغوِ لاگین، بی‌درنگ می‌تواند دوباره از همان منو «🔐 لاگین به
-        # اکانت» را بزند و از نو امتحان کند. (در حالت standalone کاربر
-        # عادی وجود ندارد و این شاخه هرگز اجرا نمی‌شود.)
+        # می‌شود (callback مشترکِ nav:home) که saas_bot.py آن را به منوی
+        # نقش‌محور (USER) برمی‌گرداند؛ یعنی کاربر عادی بعد از لغوِ لاگین،
+        # بی‌درنگ می‌تواند دوباره از همان منو «📱 لاگین اکانتِ من» را
+        # بزند و از نو امتحان کند. (v2.23.0: ارجاعِ قدیمی به
+        # back_role_menu اصلاح شد — دکمه از nav:home استفاده می‌کند.)
         is_plain_user = bool(wiz and "owner_user_id" in wiz.get("data", {}))
         # «افزودن SelfBot» برای یک کاربر خاص (از داخل مدیریت کاربر): بعد از
         # لغو، به لیست SelfBotهای همان کاربر برگردیم — نه منوی کلی پنل.
@@ -3285,22 +3260,9 @@ class AdminBot:
             await self._finish_proxy(event, data)
             return
 
-        if state == WIZ_TAG:
-            cfg = self.sb.load_config()
-            if not re.fullmatch(r"[A-Za-z0-9_\-]{2,32}", text):
-                await self._respond_safe(event, "❌ فقط حروف انگلیسی/عدد/خط‌تیره، بین ۲ تا ۳۲ کاراکتر. دوباره بفرست:")
-                return
-            if text in cfg or text in RESERVED_TAGS:
-                await self._respond_safe(event, "❌ این تگ قبلاً استفاده شده یا رزرو شده. یه اسم دیگه بفرست:")
-                return
-            data["tag"] = text
-            wiz["state"] = WIZ_PHONE
-            await self._respond_safe(
-                event,
-                "شماره تلفن رو با کد کشور بفرست (مثلاً `+989123456789`):",
-                buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
-            )
-            return
+        # v2.23.0 (AUDIT-40 · 40-c#9): شاخهٔ مرده‌ی WIZ_TAG حذف شد —
+        # مرحلهٔ «تگِ دستی» در v2.15.3 حذف شده بود و دیگر هیچ مسیری state
+        # را WIZ_TAG نمی‌کرد؛ ثابتِ WIZ_TAG هم از core پاک شد.
 
         if state == WIZ_PHONE:
             if not re.fullmatch(r"\+\d{7,15}", text):
@@ -4005,9 +3967,6 @@ class AdminBot:
                     return True
                 uid = safe_callback_int(data.split(":", 1)[1], 0)
                 await self._remove_admin(event, uid)
-            elif data == "back":
-                self.wizards.pop(event.sender_id, None)
-                await self._show_main_menu(event.chat_id, edit_event=event)
             elif data == "cancel_wizard":
                 await self._cancel_wizard(event.sender_id, notify_event=event)
             # v2.15.3 (LOGIN-UX): دکمه‌های ویزارد لاگین

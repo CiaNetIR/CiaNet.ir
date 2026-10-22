@@ -259,7 +259,6 @@ from cianet.core import (
     ticket_message_count,
     trial_days,
     trial_enabled,
-    trial_plan_name,
     toggle_discount_code,
     unblock_saas_user,
     unlink_customer,
@@ -359,10 +358,6 @@ class SaaSBot:
         # به‌جایش یک نسخه‌ی تازه ارسال شود؛ بدون این، هر پیامِ متنیِ کاربرِ
         # بسته‌شده یک کپیِ جدیدِ روی‌هم از پیام گیت می‌سازد.
         self._gate_msg_id: dict = {}
-        # BUG-25 (§10.1): تا این timestamp ارسال‌های broadcast همگانی بعد از
-        # FloodWait تلگرام مکث کرده‌اند — مختصِ هماهنگیِ داخلیِ همین کلاس
-        # (SelfBotها stateِ خودشان را دارند).
-        self._flood_until = 0.0
         self._expiry_task = None
         # قفل دسترسی به پنل مدیریت (یک نمونه‌ی مشترک بین همه‌ی کاربران است و
         # scope آن قبل از هر فراخوانی بازنویسی می‌شود). بدون این قفل، یک رویداد
@@ -1035,12 +1030,8 @@ class SaaSBot:
         if sub:
             # زیر ۳ روز مانده → زرد، تا کاربر قبل از قطع‌شدن ببیند.
             sub_state = "warn" if (days_left is not None and days_left <= 3) else "active"
-            sub_note = (f"پلن «{sub['plan']}» — {days_left} روز باقی‌مانده"
-                        if days_left is not None
-                        else f"پلن «{sub['plan']}» تا {sub['expire_date']}")
         else:
             sub_state = "none"
-            sub_note = "اشتراک فعالی نداری"
 
         has_account = self._user_has_logged_in_account(uid)
         n_bots, n_active, _ = self._user_selfbot_stats(uid)
@@ -1722,25 +1713,6 @@ class SaaSBot:
         except Exception:
             return 0
 
-    def _user_has_pending_reseller(self, uid: int) -> bool:
-        """
-        آیا این کاربر قبلاً درخواست نمایندگی ثبت کرده؟ (v2.0)
-
-        استفاده: در پنل کاربر اگه قبلاً درخواست داده، دیگه دکمه‌ی
-        «🤝 نمایندگی سلف» نشون داده نمی‌شه.
-        """
-        try:
-            with _conn() as c:
-                row = c.execute(
-                    "SELECT status FROM reseller_applications WHERE user_id = ? "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (uid,)
-                ).fetchone()
-            if not row:
-                return False
-            return row["status"] in ("pending", "approved")
-        except Exception:
-            return False
 
     # v2.11: خرید ربات اختصاصی
     async def _start_dedicated_bot_purchase(self, event):
@@ -2080,13 +2052,6 @@ class SaaSBot:
             buttons=buttons,
         )
 
-    def _orphan_count(self) -> int:
-        """تعداد سلف‌هایی که owner_user_id ندارند (به کاربری وصل نیستند)."""
-        try:
-            cfg = self.sb.load_config()
-            return sum(1 for tag, acc in cfg.items() if account_is_orphan(acc, tag))
-        except Exception:
-            return 0
 
     # ─────────────────────────────────────────────────────
     #  هاب‌های دسته‌بندی‌شده‌ی پنل OWNER/ADMIN (فقط UI/Navigation — هر
@@ -2867,24 +2832,6 @@ class SaaSBot:
             buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
         )
 
-    async def _show_user_search_results(self, event, query: str, back_data: bytes):
-        results = search_users(query)
-        if not results:
-            await event.edit(
-                f"❌ هیچ کاربری با «{query}» پیدا نشد.",
-                buttons=[[UI.go("🔍 جستجوی دوباره", b"user_search_start")],
-                         UI.nav_row()],
-            )
-            return
-        if len(results) == 1:
-            await self._show_user_management_panel(event, results[0]["user_id"], back_data=back_data)
-            return
-        buttons = []
-        for u in results[:20]:
-            label = u.get("username") or str(u["user_id"])
-            buttons.append([UI.go(f"👤 {label}", f"user_manage:{u['user_id']}".encode())])
-        buttons.append(UI.nav_row())
-        await event.edit(f"🔍 {len(results)} کاربر با «{query}» پیدا شد:", buttons=buttons)
 
     def _build_user_management_view(self, target_user_id: int, back_data: bytes,
                                     viewer_role: str = None):
@@ -3567,79 +3514,9 @@ class SaaSBot:
     #  «🤖 سلف من» — UI اختصاصی کاربر عادی (نه پنل کامل ادمین)
     # ─────────────────────────────────────────────────────
 
-    def _build_my_bots_view(self, uid: int):
-        """🤖 سلف من — متن و دکمه‌های لیست SelfBotهای خودِ کاربر. مالکیتِ
-        SelfBot معیار نمایش این بخش است (نه اشتراک)؛ دکمه‌ی «➕ افزودن
-        SelfBot» فقط با اشتراک فعال نمایش داده می‌شود."""
-        cfg = self.sb.load_config()
-        mine = accounts_of_user(cfg, uid)
-        total, active, stopped = self._user_selfbot_stats(uid)
-        body = []
-        buttons = []
-        if not mine:
-            body.append(f"{UI.GRAY} هنوز هیچ اکانتی نداری.")
-        else:
-            for tag, acc in mine.items():
-                state, note = _acc_ui_state(acc, tag)
-                body.append(f"{UI.state_dot(state)} `{tag}` — {note}")
-                buttons.append([UI.item(tag, state, f"my_acc:{tag}")])
-        has_sub = self._user_sub_status(uid)["active"]
-        # افزودن SelfBot جدید با اشتراک فعال یا نقشِ admin/owner.
-        # PATCH (admin/owner login): قبلاً فقط با اشتراک فعال، این دکمه
-        # نمایش داده می‌شد — یعنی ADMIN/OWNER که اشتراک ندارند هیچ‌وقت
-        # نمی‌توانستند از این مسیر اکانت اضافه کنند. حالا اگه نقش admin/
-        # owner است، این دکمه هم نشان داده می‌شود و handler هم از gate
-        # عبور می‌دهد.
-        is_privileged = self._role(uid) in (ROLE_OWNER, ROLE_ADMIN)
-        if has_sub or is_privileged:
-            buttons.append([UI.go("➕ افزودن SelfBot", "user_my_add_bot", primary=True, tone="success")])
-        buttons.append(UI.nav_row())
-        text = UI.screen(
-            "🤖 سلف من",
-            body=body,
-            subtitle=(f"{UI.GREEN} {active} فعال   {UI.RED} {stopped} متوقف"
-                      if total else None),
-            hint=("روی هر اکانت بزن تا قابلیت‌هایش را کنترل کنی."
-                  if total else "برای ساختن اولین سلف، اشتراک فعال لازم است."),
-        )
-        return text, buttons
 
-    async def _show_user_own_bots(self, event):
-        """نمایش «🤖 سلف من» — فقط خودِ کاربر (role USER) و فقط اکانت‌های خودش.
-        scope پنل (owner_filter) هم قبل از هر چیز روی همین کاربر تنظیم می‌شود
-        تا رندر لیست و عملیات بعدی با scope کهنه‌ی کاربرِ دیگری برخورد نکنند."""
-        async with self._panel_lock:
-            self._sync_admin_panel_scope(event.sender_id)
-            text, buttons = self._build_my_bots_view(event.sender_id)
-        await event.edit(text, buttons=buttons)
 
-    async def _show_my_acc(self, event, tag: str):
-        """⚙️ مدیریت یک SelfBot خودِ کاربر — همان هاب کامل مدیریت اکانت
-        (قابلیت‌ها/ظاهر/ابزارها/اتصال/وضعیت/توقف/حذف). «بازگشت» طبق پشته‌ی
-        ناوبری به «سلف من» برمی‌گردد."""
-        cfg = self.sb.load_config()
-        acc = cfg.get(tag)
-        if not account_belongs_to(acc, tag, event.sender_id):
-            await self._nav_heal(event, "این اکانت متعلق به تو نیست یا وجود ندارد.")
-            return
-        async with self._panel_lock:
-            self._sync_admin_panel_scope(event.sender_id)
-            await self.admin_panel._show_account_detail(event, tag)
 
-    async def _user_my_add_bot(self, event):
-        """➕ افزودن SelfBot توسط خودِ کاربر — Backend: اشتراک فعال یا نقش
-        admin/owner. (حذف دکمه از UI کافی نیست؛ callback دستی هم باید رد شود.)"""
-        # PATCH (admin/owner login): قبلاً فقط اشتراک فعال قبول می‌شد؛
-        # ADMIN/OWNER که اشتراک ندارند، این مسیر براشون بسته بود. حالا
-        # نقشِ admin/owner هم از gate عبور می‌کند.
-        if not self._user_sub_status(event.sender_id)["active"] \
-           and self._role(event.sender_id) not in (ROLE_OWNER, ROLE_ADMIN):
-            await event.answer("❌ برای افزودن SelfBot باید اشتراک فعال داشته باشید.", alert=True)
-            return
-        await self._clear_admin_panel_wizard(event.sender_id)
-        async with self._panel_lock:
-            self._sync_admin_panel_scope(event.sender_id)
-            await self.admin_panel.start_login_wizard_for_user(event, event.sender_id)
 
 
 
@@ -3882,12 +3759,10 @@ class SaaSBot:
             login_url = f"{panel_url}/app/login.html"
             dashboard_url = f"{panel_url}/app/dashboard.html"
             docs_url = f"{panel_url}/api/docs"
-            url_source = "PANEL_URL"
         else:
             login_url = f"{backend_url}/app/login.html"
             dashboard_url = f"{backend_url}/app/dashboard.html"
             docs_url = f"{backend_url}/api/docs"
-            url_source = "PANEL_BACKEND_URL (default)"
 
         # وضعیت service cianet-panel (اگه هست)
         panel_status = "نامشخص"
@@ -4260,8 +4135,6 @@ class SaaSBot:
             except Exception as _e:
                 print(f"⚠️ [auto_update] spawn loop ناموفق: {_e}")
 
-        # v2.8.13 C7: استفاده از نام سرویس واقعی
-        svc_name = os.environ.get("CIANET_SERVICE_NAME", "selfbot")
         msg = "🟢 آپدیت خودکار فعال شد" if new_value == "1" else "⚫ آپدیت خودکار خاموش شد"
         if new_value == "1":
             msg += "\n\n✅ loop هم‌اکنون شروع شد — نیازی به restart نیست."
@@ -4474,7 +4347,6 @@ class SaaSBot:
             backup_path = versions_dir / backup_name
             versions_dir.mkdir(parents=True, exist_ok=True)
             _shutil.copy2(main_py, backup_path)
-            backup_str = str(backup_path)
         except Exception as e:
             await event.edit(
                 f"❌ backup main.py قبل از rollback ناموفق: {e}",
@@ -5657,7 +5529,6 @@ class SaaSBot:
                 await self.client.send_message(uid, text)
                 sent_ok += 1
             except errors.FloodWaitError as e:
-                self._flood_until = time.time() + e.seconds + 2
                 await asyncio.sleep(e.seconds + 2)
                 failed += 1
             except Exception:
@@ -6230,7 +6101,6 @@ class SaaSBot:
         if not uid or scope not in _SCOPE_LABELS:
             await event.answer("درخواست نامعتبر است.", alert=True)
             return
-        scope_id = str(uid) if scope == SCOPE_RESELLER else None
         scope_lbl = _SCOPE_LABELS.get(scope, scope)
         body = [
             f"{UI.AMBER} در حال اعطای یک مجوز قدرتمند:",
@@ -9424,15 +9294,6 @@ class SaaSBot:
                     await event.answer()
                     await self._show_admin_hub(event, role)
                     return
-                if data == "goto_admin_panel":
-                    if role not in (ROLE_OWNER, ROLE_ADMIN, ROLE_RESELLER):
-                        await event.answer("⛔ دسترسی نداری", alert=True)
-                        return
-                    self.wizards.pop(event.sender_id, None)
-                    async with self._panel_lock:
-                        self._sync_admin_panel_scope(event.sender_id)
-                        await self.admin_panel._show_main_menu(event.chat_id, edit_event=event)
-                    return
                 if data == "back_role_menu":
                     self.wizards.pop(event.sender_id, None)
                     # گیت عضویت کانال — ورود مجدد به منوی اصلی هم باید چک شود
@@ -9757,9 +9618,6 @@ class SaaSBot:
                     return
                 if data.startswith("dedicated_delete_go:") and role in (ROLE_OWNER, ROLE_ADMIN):
                     await self._dedicated_bot_delete_go(event, safe_callback_int(data.split(":", 1)[1], 0))
-                    return
-                if data == "admin_users" and role in (ROLE_OWNER, ROLE_ADMIN):
-                    await self._admin_show_users_hub(event, role)
                     return
                 if data == "admin_finance" and role in (ROLE_OWNER, ROLE_ADMIN):
                     await self._admin_show_finance_hub(event, role)
@@ -11060,34 +10918,6 @@ class SaaSBot:
         # (کاربر/اکانت/ربات حذف شده) و نباید کاربر روی یک صفحه‌ی مرده
         # با یک alert گیر کند.
         self._router = callback_h
-
-        # هندل کردن state ساده‌ی "role_add" که مستقیم در _handle_text_wizard
-        # نبود (چون به وضعیت خاص owner نیاز دارد) — با wrap کردن تابع اصلی
-        orig_handle_text_wizard = self._handle_text_wizard
-
-        async def patched_handle_text_wizard(event, wiz):
-            if wiz["state"] == "role_add":
-                # PATCH (P1-3 BUG-34): این شاخه بدون چکِ نقش بود و می‌توانست
-                # ADMIN/RESELLER اضافه کند — طبق §5.2 قوانین RBAC، ارتقای
-                # کاربر فقط برای OWNER مجاز است (الگوی چک همان WIZ_ANNOUNCE).
-                if self._role(event.sender_id) != ROLE_OWNER:
-                    self.wizards.pop(event.sender_id, None)
-                    await event.respond("❌ این عملیات فقط برای مالک مجاز است")
-                    return True
-                text = (event.raw_text or "").strip()
-                try:
-                    new_id = int(text)
-                except ValueError:
-                    await event.respond("❌ یه آیدی عددی معتبر بفرست:")
-                    return True
-                role_to_add = wiz["data"]["role"]
-                self.wizards.pop(event.sender_id, None)
-                add_admin_or_reseller(new_id, role_to_add, added_by=event.sender_id)
-                await event.respond(f"✅ آیدی `{new_id}` به‌عنوان {role_to_add} اضافه شد.")
-                return True
-            return await orig_handle_text_wizard(event, wiz)
-
-        self._handle_text_wizard = patched_handle_text_wizard
 
 
 # ══════════════════════════════════════════════════════════════════════

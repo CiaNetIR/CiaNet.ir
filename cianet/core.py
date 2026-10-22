@@ -25,7 +25,6 @@ import hashlib
 import json
 import logging
 import os
-import random
 import shutil
 import re
 import secrets
@@ -42,21 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from telethon import TelegramClient, events, Button, errors
-from telethon.tl.functions.account import (
-    UpdateProfileRequest, UpdateStatusRequest,
-    GetAuthorizationsRequest, ResetAuthorizationRequest,
-    GetPasswordRequest, ResetPasswordRequest, DeclinePasswordResetRequest,
-)
-from telethon.tl.functions.auth import ResetAuthorizationsRequest
-from telethon.tl.functions.users import GetFullUserRequest
-from telethon.tl.functions.photos import UploadProfilePhotoRequest
-from telethon.tl.functions.contacts import BlockRequest, UnblockRequest
-from telethon.tl.functions.updates import GetStateRequest
-from telethon.tl.types import InputMediaDice, PeerUser
-from telethon.tl.types.account import (
-    ResetPasswordOk, ResetPasswordRequestedWait, ResetPasswordFailedWait,
-)
+from telethon import TelegramClient, Button, errors
 
 
 def _project_dir() -> str:
@@ -333,143 +318,18 @@ def db_init_db():
 
 # ========== توابع عمومی کاربران (از helper.py) ==========
 
-def add_or_update_user(user):
-    """ثبت یا به‌روزرسانی کاربر در جدول users (با استفاده از شیء User از pyrogram)"""
-    try:
-        with _bot_db(commit=True) as conn:
-            c = conn.cursor()
-            now = datetime.now().isoformat()
-            c.execute('''
-                INSERT INTO users (user_id, username, first_name, last_name, joined_at, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    username = excluded.username,
-                    first_name = excluded.first_name,
-                    last_name = excluded.last_name,
-                    last_seen = excluded.last_seen
-            ''', (user.id, user.username or "", user.first_name or "", user.last_name or "", now, now))
-    except Exception as e:
-        print(f"Error adding user {user.id}: {e}")
 
-def increment_messages_count(user_id: int):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('UPDATE users SET messages_count = messages_count + 1 WHERE user_id = ?', (user_id,))
 
-def is_user_banned(user_id: int) -> bool:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT 1 FROM banned_users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        return result is not None
 
-def ban_user(user_id: int, reason: str = ""):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO banned_users (user_id, banned_at, reason) VALUES (?, ?, ?)',
-                  (user_id, datetime.now().isoformat(), reason))
 
-def unban_user(user_id: int):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('DELETE FROM banned_users WHERE user_id = ?', (user_id,))
 
-def get_banned_users_list() -> list:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT user_id, banned_at, reason FROM banned_users')
-        result = c.fetchall()
-        return result
 
-def get_all_users(offset=0, limit=20) -> list:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, first_name, last_seen, messages_count FROM users LIMIT ? OFFSET ?', (limit, offset))
-        result = c.fetchall()
-        return result
 
-def get_total_users_count() -> int:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users')
-        count = c.fetchone()[0]
-        return count
 
-def get_user_by_username(username: str) -> Optional[dict]:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, first_name, last_name, joined_at, last_seen, messages_count FROM users WHERE username = ?', (username,))
-        row = c.fetchone()
-        if row:
-            return {
-                "user_id": row[0],
-                "username": row[1],
-                "first_name": row[2],
-                "last_name": row[3],
-                "joined_at": row[4],
-                "last_seen": row[5],
-                "messages_count": row[6]
-            }
-        return None
 
-def get_user_info(user_id: int) -> Optional[dict]:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, first_name, last_name, joined_at, last_seen, messages_count FROM users WHERE user_id = ?', (user_id,))
-        row = c.fetchone()
-        if row:
-            return {
-                "user_id": row[0],
-                "username": row[1],
-                "first_name": row[2],
-                "last_name": row[3],
-                "joined_at": row[4],
-                "last_seen": row[5],
-                "messages_count": row[6]
-            }
-        return None
 
-def get_stats() -> dict:
-    with _bot_db(commit=False) as conn:
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users')
-        total_users = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM banned_users')
-        banned_count = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM broadcasts')
-        total_broadcasts = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM messages')
-        total_messages = c.fetchone()[0]
-        today = datetime.now().date().isoformat()
-        c.execute('SELECT COUNT(*) FROM users WHERE DATE(last_seen) = ?', (today,))
-        active_today = c.fetchone()[0]
-        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
-        c.execute('SELECT COUNT(*) FROM users WHERE last_seen >= ?', (week_ago,))
-        active_week = c.fetchone()[0]
-        return {
-            "total_users": total_users,
-            "banned_count": banned_count,
-            "total_broadcasts": total_broadcasts,
-            "total_messages": total_messages,
-            "active_today": active_today,
-            "active_week": active_week
-        }
 
-def save_broadcast_log(admin_id: int, content_type: str, content: str, success: int, fail: int):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO broadcasts (admin_id, content_type, content, sent_at, success_count, fail_count)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (admin_id, content_type, content[:500], datetime.now().isoformat(), success, fail))
 
-def save_message(from_user: int, to_user: int, text: str, direction: str):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO messages (from_user_id, to_user_id, message, direction, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (from_user, to_user, text[:500], direction, datetime.now().isoformat()))
 
 # ========== توابع state (برای سلف‌بات) ==========
 
@@ -504,113 +364,17 @@ def clear_state(tag: str):
 
 # ========== توابع فروش‌بات ==========
 
-def add_sales_user(user_id: int):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        now = datetime.now().isoformat()
-        c.execute('''
-            INSERT OR IGNORE INTO sales_users (user_id, created_at)
-            VALUES (?, ?)
-        ''', (user_id, now))
 
-def get_sales_user(user_id: int) -> dict:
-    with _bot_db() as conn:
-        c = conn.cursor()
-        c.execute('SELECT user_id, balance, plan_expiry, created_at FROM sales_users WHERE user_id = ?', (user_id,))
-        row = c.fetchone()
-    if row:
-        return {"user_id": row[0], "balance": row[1], "plan_expiry": row[2], "created_at": row[3]}
-    return None
 
-# ⚠️ WARNING: this function is never called anywhere in the project (dead
-# code — grep "update_balance(" only matches this definition). Real
-# payment/credit changes go through a different path: activate_license /
-# pay_order_trc20_atomic / approve_card_payment_atomic operating on the
-# orders/payments/subscriptions tables, not through sales_users.balance.
-# Before using this function in new code, confirm you actually want this
-# legacy wallet path and not the current payment flow.
-def update_balance(user_id: int, amount: int):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('UPDATE sales_users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
 
-def set_plan_expiry(user_id: int, expiry: str):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('UPDATE sales_users SET plan_expiry = ? WHERE user_id = ?', (expiry, user_id))
 
-def add_purchase(user_id: int, plan_id: int, amount: int, receipt: str = ""):
-    # کانکشن همیشه بسته می‌شود (try/finally) — بدون Connection Leak، حتی اگر
-    # INSERT یا commit خطا بدهد.
-    with _db_lock:
-        conn = get_db()
-        try:
-            c = conn.cursor()
-            now = datetime.now().isoformat()
-            c.execute('''
-                INSERT INTO purchases (user_id, plan_id, amount, receipt, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, plan_id, amount, receipt, now))
-            conn.commit()
-            return c.lastrowid
-        except Exception:
-            try:
-                conn.rollback()
-            except sqlite3.Error:
-                pass
-            raise
-        finally:
-            conn.close()
 
-def approve_purchase(purchase_id: int, admin_note: str = ""):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        now = datetime.now().isoformat()
-        c.execute('''
-            UPDATE purchases SET status = 'approved', approved_at = ?, admin_note = ?
-            WHERE id = ?
-        ''', (now, admin_note, purchase_id))
 
-def reject_purchase(purchase_id: int, admin_note: str = ""):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('''
-            UPDATE purchases SET status = 'rejected', admin_note = ?
-            WHERE id = ?
-        ''', (admin_note, purchase_id))
 
-def get_plans() -> list:
-    with _bot_db() as conn:
-        c = conn.cursor()
-        c.execute('SELECT id, name, duration_days, price FROM plans ORDER BY price')
-        rows = c.fetchall()
-    return [{"id": r[0], "name": r[1], "duration_days": r[2], "price": r[3]} for r in rows]
 
-def add_plan(name: str, duration_days: int, price: int):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('INSERT INTO plans (name, duration_days, price) VALUES (?, ?, ?)', (name, duration_days, price))
 
-def add_self_account(user_id: int, tag: str, api_id: int, api_hash: str, phone: str = None, bot_token: str = None, account_type: str = "user"):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        now = datetime.now().isoformat()
-        c.execute('''
-            INSERT INTO self_accounts (user_id, tag, api_id, api_hash, phone, bot_token, account_type, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, tag, api_id, api_hash, phone, bot_token, account_type, now))
 
-def get_self_accounts(user_id: int) -> list:
-    with _bot_db() as conn:
-        c = conn.cursor()
-        c.execute('SELECT id, tag, api_id, api_hash, phone, bot_token, account_type, expiry, created_at FROM self_accounts WHERE user_id = ?', (user_id,))
-        rows = c.fetchall()
-    return [{"id": r[0], "tag": r[1], "api_id": r[2], "api_hash": r[3], "phone": r[4], "bot_token": r[5], "account_type": r[6], "expiry": r[7], "created_at": r[8]} for r in rows]
 
-def update_self_account_expiry(account_id: int, expiry: str):
-    with _bot_db(commit=True) as conn:
-        c = conn.cursor()
-        c.execute('UPDATE self_accounts SET expiry = ? WHERE id = ?', (expiry, account_id))
 
 # ══════════════════════════════════════════════════════════════════════
 # ═══ بخش saas_db.py (ادغامشده) ═══
@@ -663,12 +427,6 @@ PROVISION_SUBSCRIPTION = "subscription"
 # زده نمی‌شود که «دستی» بوده؛ فقط legacy ثبت می‌شود.
 PROVISION_LEGACY = "legacy"
 
-SUB_STATUS_ACTIVE = "active"
-SUB_STATUS_EXPIRED = "expired"
-SUB_STATUS_PENDING = "pending"
-# اشتراکی که با خرید/تمدید جدید جایگزین شده (نه به‌خاطر گذشتِ زمان)، تا با
-# 'expired' واقعی (که یعنی زمانش تمام شده) اشتباه گرفته نشود
-SUB_STATUS_SUPERSEDED = "superseded"
 
 PAYMENT_STATUS_PENDING = "pending"
 PAYMENT_STATUS_APPROVED = "approved"
@@ -687,9 +445,6 @@ USDT_TOMAN_FALLBACK = 60000
 DEDICATED_BOT_PLAN = "ربات اختصاصی"
 DEDICATED_BOT_PRICE_DEFAULT = 2000000
 
-# v2.17.0: اشتراک آزمایشی ۷ روزه برای کاربران جدید (قابل روشن/خاموش توسط مالک)
-TRIAL_PLAN = "آزمایشی ۷ روزه"
-TRIAL_DAYS = 7
 TRIAL_SETTING_KEY = "trial_enabled"  # "1" = روشن (پیش‌فرض)
 # v2.22.0 (OWNER-REQUEST): طولِ دورهٔ آزمایشی هم قابلِ تنظیمِ مالک شد
 # (۱ تا ۳۰ روز؛ پیش‌فرض همان ۷ روزِ قبلی — بدونِ تغییرِ رفتار تا وقتی
@@ -711,8 +466,6 @@ GROUP_SUB_SETTING_KEY = "group_sub_enabled"               # "1" = روشن (پی
 GROUP_DISCOUNT_SETTING_KEY = "group_sub_discount_percent"  # پیش‌فرض ۱۵٪
 GROUP_DISCOUNT_DEFAULT = 15
 
-TICKET_STATUS_OPEN = "open"
-TICKET_STATUS_CLOSED = "closed"
 
 # فرمت‌های تاریخ ذخیره‌شده در دیتابیس — timezone-aware، همیشه UTC
 _DATE_FMT = "%Y-%m-%d"
@@ -1015,13 +768,6 @@ def _fmt_dt_local(dt=None) -> str:
         pass
     return (f"{jalali_long(dt)} · {fa_digits(dt.strftime('%H:%M'))}")
 
-
-def fa_money(n) -> str:
-    """مبلغ با جداکننده‌ی هزارگان و ارقام فارسی: ۱۰۰٬۰۰۰"""
-    try:
-        return fa_digits(f"{int(n):,}").replace(",", "٬")
-    except (TypeError, ValueError):
-        return fa_digits(n)
 
 
 def safe_callback_int(value, default=None):
@@ -1855,10 +1601,6 @@ def get_role(user_id: int, owner_id: int) -> str:
         return row["role"]
     return ROLE_USER
 
-
-def is_admin_or_above(user_id: int, owner_id: int) -> bool:
-    """OWNER یا ADMIN — برای اینکه admin_bot.py بتواند بدون قوانین جدا چک کند."""
-    return get_role(user_id, owner_id) in (ROLE_OWNER, ROLE_ADMIN)
 
 
 def add_admin_or_reseller(user_id: int, role: str, added_by: int, reseller_max_users=None) -> None:
@@ -3333,12 +3075,6 @@ def toggle_discount_code(code: str, actor_id: int) -> dict:
     return {"ok": True, "is_active": bool(new_active)}
 
 
-def get_discount_code(code: str) -> dict:
-    """گرفتن کد تخفیف با کد."""
-    with _conn() as c:
-        row = c.execute("SELECT * FROM discount_codes WHERE code = ? AND is_active = 1", (code,)).fetchone()
-    return dict(row) if row else None
-
 
 def apply_discount_code(code: str, original_amount: int) -> dict:
     """اعمال کد تخفیف — مبلغ بعد از تخفیف رو برمی‌گردونه.
@@ -3708,17 +3444,6 @@ def find_auto_reply(tag: str, text: str, user_id: int = None) -> str:
 
 # v2.9.9: affiliate commission
 
-def get_broadcast_daily_count(owner_key: str) -> int:
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    try:
-        with _conn() as c:
-            row = c.execute(
-                "SELECT count FROM broadcast_counters WHERE owner_id = ? AND date = ?",
-                (str(owner_key), today_str),
-            ).fetchone()
-            return int(row["count"]) if row else 0
-    except Exception:
-        return 0
 
 
 def increment_broadcast_daily_count(owner_key: str, delta: int = 1, cap: int = 200) -> bool:
@@ -3879,28 +3604,6 @@ def list_all_users() -> list:
         rows = c.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
     return [dict(r) for r in rows]
 
-
-def list_active_bot_users() -> list:
-    """v2.14.5: فقط کاربرانی که ربات را /start کرده‌اند (در bot_data.db هستند).
-
-    این تابع برای broadcast/announce استفاده می‌شه تا فقط به کاربرانی که
-    واقعاً ربات رو start کردن پیام بفرستیم — نه همه‌ی ثبت‌شده‌ها. این کار
-    FloodWait رو کم می‌کنه و پیام به کاربرانی که ربات رو بلاک کردن یا
-    start نکردن ارسال نمی‌شه.
-
-    Returns:
-        list of dicts with user_id, username, first_name, last_seen
-    """
-    try:
-        with _bot_db() as c:
-            rows = c.execute(
-                "SELECT user_id, username, first_name, last_seen "
-                "FROM users ORDER BY last_seen DESC"
-            ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        print(f"⚠️ [list_active_bot_users] fallback به list_all_users: {e}")
-        return list_all_users()
 
 
 def search_users(query: str) -> list:
@@ -4614,28 +4317,6 @@ def get_license(code: str):
     return dict(row) if row else None
 
 
-def is_license_usable(lic: dict) -> bool:
-    if not lic or not lic.get("is_active"):
-        return False
-    return lic["used_count"] < lic["max_uses"]
-
-
-def redeem_license_atomic(code: str) -> bool:
-    """
-    فقط اگر لایسنس هنوز فعال و used_count < max_uses باشد، used_count را
-    یکی زیاد می‌کند و True برمی‌گرداند — همه در یک UPDATE اتمیک، بدون
-    فاصله‌ی زمانی بین «چک‌کردن» و «مصرف‌کردن». این جلوی race condition
-    را می‌گیرد که در نسخه‌ی قبلی (get_license جدا + redeem_license جدا)
-    باعث می‌شد دو نفر هم‌زمان بتوانند یک لایسنس با max_uses=1 را با هم
-    مصرف کنند.
-    """
-    with _conn() as c:
-        cur = c.execute(
-            "UPDATE licenses SET used_count = used_count + 1 "
-            "WHERE code = ? AND is_active = 1 AND used_count < max_uses",
-            (code,),
-        )
-        return cur.rowcount > 0
 
 
 def deactivate_license(code: str, actor_id: int = None) -> bool:
@@ -4957,15 +4638,6 @@ def get_payment(payment_id: int):
     return dict(row) if row else None
 
 
-def cleanup_stale_approved_payments() -> int:
-    with _conn_immediate() as c:
-        cur = c.execute(
-            "UPDATE orders SET status = 'paid', pay_method = 'card', paid_at = COALESCE(paid_at, ?) "
-            "WHERE status = 'pending' AND payment_id IN (SELECT id FROM payments WHERE status = 'approved')",
-            (_now(),),
-        )
-        return cur.rowcount
-
 
 def list_pending_payments() -> list:
     with _conn() as c:
@@ -5170,11 +4842,6 @@ def get_order(order_id: int):
     return dict(row) if row else None
 
 
-def get_order_by_payment(payment_id: int):
-    with _conn() as c:
-        row = c.execute("SELECT * FROM orders WHERE payment_id = ?", (payment_id,)).fetchone()
-    return dict(row) if row else None
-
 
 def list_user_orders(user_id: int, limit: int = 10) -> list:
     with _conn() as c:
@@ -5305,15 +4972,6 @@ def cancel_order(order_id: int, user_id: int) -> None:
                 print(f"⚠️ [cancel_order] discount rollback failed: {_e}")
 
 
-def mark_order_paid(order_id: int, pay_method: str, txid: str = None, payment_id: int = None) -> None:
-    with _conn() as c:
-        c.execute(
-            "UPDATE orders SET status = 'paid', pay_method = ?, txid = ?, "
-            "payment_id = COALESCE(?, payment_id), paid_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (pay_method, txid, payment_id, _now(), order_id),
-        )
-
 
 def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
     """
@@ -5437,101 +5095,9 @@ def set_order_payment_id(order_id: int, payment_id: int, user_id: int = None, re
 #  بکاپ/بازیابی دیتابیس و config — ماژول‌سطح و قابل‌تست
 # ─────────────────────────────────────────────────────
 
-def _validate_db_file(path: str) -> tuple:
-    """بررسی فایل دیتابیس قبل از جایگزینی: (ok, message)."""
-    import sqlite3
-    try:
-        con = sqlite3.connect(path)
-        try:
-            row = con.execute("PRAGMA integrity_check").fetchone()
-            if not row or str(row[0]).lower() != "ok":
-                return False, "فایل دیتابیس خراب است (integrity check رد شد)"
-            tables = {r[0] for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
-            if not {"users", "subscriptions", "pricing"} <= tables:
-                return False, "این فایل دیتابیسِ این ربات نیست (جدول‌های اصلی را ندارد)"
-        finally:
-            con.close()
-        return True, "ok"
-    except Exception as e:
-        return False, f"فایل معتبر نیست: {str(e)[:60]}"
 
 
-def build_db_backup_zip(zip_path: str) -> bool:
-    """
-    [Legacy wrapper] بکاپ دیتابیس + config.json — برای سازگاریِ call site های
-    قدیمی/تست‌ها نگه داشته شده. خروجی: بکاپ کاملِ معتبر با همان engine واحد
-    (build_backup_zip) — یعنی manifest + checksum + سشن‌ها هم داخلش هست؛
-    چون این تابع قدیمی فقط «آیا ساخته شد» را برمی‌گرداند، تفاوت رفتاری
-    ندارد، فقط بکاپ کامل‌تر و قابل Restore با سیستم جدید است.
-    """
-    return build_backup_zip(zip_path)
 
-
-def restore_db_from_file(file_path: str) -> tuple:
-    """
-    [Legacy] بازیابی از یک فایل دیتابیسِ قدیمیِ بدون manifest — **دیگر هرگز
-    مستقیم os.replace روی DB اصلی انجام نمی‌شود**: فایل در یک بکاپِ معتبر
-    (با manifest) بسته‌بندی و به Engine مرکزیِ Restore
-    (restore_backup_from_zip با stale_cleanup=False) داده می‌شود — یعنی
-    emergency backup + validation + rollback همان‌جا انجام می‌شود و فقط همین
-    DB جایگزین می‌شود (config/سشن‌های فعلی دست نمی‌خورند).
-    """
-    ok, msg = _validate_db_file(file_path)
-    if not ok:
-        return False, msg
-    try:
-        tmp_dir = tempfile.mkdtemp(prefix="legacy_restore_", dir=DATA_DIR)
-        tmp_zip = os.path.join(tmp_dir, "legacy_restore.zip")
-        try:
-            main_arc = _main_db_arc()
-            manifest = {
-                "project": BACKUP_PROJECT_NAME,
-                "backup_version": BACKUP_VERSION,
-                "schema_version": BACKUP_SCHEMA_VERSION,
-                "created_at": _now(),
-                "files": [{"name": main_arc, "size": os.path.getsize(file_path),
-                            "sha256": _sha256_file(file_path)}],
-            }
-            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(file_path, arcname=main_arc)
-                zf.writestr(BACKUP_MANIFEST,
-                            json.dumps(manifest, ensure_ascii=False))
-            ok_r, msg_r = restore_backup_from_zip(tmp_zip, stale_cleanup=False)
-            return ok_r, msg_r
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-    except Exception as e:
-        return False, f"خطا در بازیابی: {str(e)[:80]}"
-
-
-def restore_db_from_zip(zip_path: str) -> tuple:
-    """
-    [Legacy wrapper] بازیابی از بکاپ zip — همیشه به Engine مرکزی:
-      - بکاپ با manifest (قالب جدید) → restore_backup_from_zip (Snapshot کامل)
-      - بکاپ قدیمیِ فقط-دیتابیس → restore_db_from_file (که خودش manifest می‌سازد
-        و به همان Engine می‌رود؛ فقط DB جایگزین می‌شود)
-    هیچ مسیر مستقیمی به فایل DB اصلی وجود ندارد.
-    """
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = set(zf.namelist())
-            if BACKUP_MANIFEST in names:
-                return restore_backup_from_zip(zip_path)
-            db_entry = next((n for n in names if n.endswith(".db")), None)
-            if not db_entry:
-                return False, "در بکاپ، فایل دیتابیس پیدا نشد"
-            data = zf.read(db_entry)
-        tmp_dir = tempfile.mkdtemp(prefix="legacy_extract_", dir=DATA_DIR)
-        try:
-            tmp = os.path.join(tmp_dir, os.path.basename(db_entry))
-            with open(tmp, "wb") as f:
-                f.write(data)
-            return restore_db_from_file(tmp)
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-    except Exception as e:
-        return False, f"خطا در بازیابی: {str(e)[:80]}"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -5580,9 +5146,6 @@ def _sha256_file(path: str) -> str:
 def _backup_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
 
-
-def _backup_file_name() -> str:
-    return f"backup_{_backup_timestamp()}.zip"
 
 
 def _bot_db_arc() -> str:
@@ -7168,35 +6731,6 @@ def get_active_grants(subject_user_id: int, capability: str = CAP_ACCOUNT_SECURI
     return [dict(r) for r in rows if r]
 
 
-def has_capability(subject_user_id: int, capability: str = CAP_ACCOUNT_SECURITY,
-                   main_owner_id: int = None) -> bool:
-    """
-    آیا این کاربر مجوزِ این ظرفیت را دارد (در هر محدوده‌ای)؟
-
-    توجه: این تابع *فقط* وجودِ مجوز را چک می‌کند — برای عملیاتِ واقعی روی
-    یک اکانت، باید از authorize_sensitive_account_action استفاده کنی که
-    مالکیت/دامنه را هم اعتبارسنجی می‌کند.
-
-    main_owner_id فقط در نمونه‌ی اصلی پاس داده می‌شود. اگر None باشد،
-    owner bypass وجود ندارد (حالتِ پیش‌فرضِ امن).
-    """
-    if _capability_subject_is_main_owner(subject_user_id, main_owner_id):
-        return True
-    try:
-        return bool(get_active_grants(subject_user_id, capability))
-    except Exception:
-        # هر شکست در خواندنِ مجوزها → DENY (fail-closed). این یعنی اگر
-        # دیتابیس اصلی از یک نمونه‌ی فرعی قابل خواندن نباشد، ابزارهای حساس
-        # آنجا کار نمی‌کنند تا زمانی که دسترسی برقرار شود.
-        return False
-
-
-def get_grant_by_id(grant_id: int):
-    with _conn() as c:
-        row = c.execute(
-            "SELECT * FROM permission_grants WHERE id = ?", (grant_id,)
-        ).fetchone()
-    return dict(row) if row else None
 
 
 def list_capability_grants(capability: str = CAP_ACCOUNT_SECURITY,
@@ -7577,7 +7111,8 @@ else:
     BACKUP_HOURS_IRAN = [0, 12]  # [ساعت ۱, ساعت ۲, ...] — به وقت ایران
 
 # مراحل ویزارد «افزودن اکانت»
-WIZ_TAG = "awaiting_tag"
+# v2.23.0 (AUDIT-40): WIZ_TAG حذف شد — مرحلهٔ «تگِ دستی» از v2.15.3
+# وجود ندارد و هیچ‌جا ست نمی‌شد.
 WIZ_PHONE = "awaiting_phone"
 WIZ_CODE = "awaiting_code"
 WIZ_PASSWORD = "awaiting_password"
@@ -7803,42 +7338,6 @@ def bot_error_alert_text(exc: Exception, is_owner: bool = False,
     return f"{base}\n🔍 {name}: {detail}" if detail else f"{base}\n🔍 {name}"
 
 
-async def run_admin_bot_forever(selfbot_module):
-    """
-    سوپروایزر ساده برای ربات مدیریت مستقل: اگر به هر دلیلی قطع/کرش کند،
-    دوباره راه‌اندازی می‌شود. این تابع فقط برای اجرای admin_bot.py به‌تنهایی
-    استفاده می‌شود (standalone=True، پیش‌فرض)، نه وقتی زیرِ saas_bot.py است.
-    """
-    consecutive_failures = 0
-    MAX_BACKOFF = 300
-    # PATCH (P1-1 BUG-24): بک‌آف فقط وقتی ریست می‌شود که اتصال مدتی (۳۰۰s)
-    # پایدار مانده باشد. قبلاً هر قطعِ تمیز بک‌آف را صفر می‌کرد؛ اگر سرورِ
-    # تلگرام به‌طور مکرر (و تمیز) قطع می‌کرد، ری‌استارت فوری و بدون فاصله
-    # اتفاق می‌افتاد. قطعِ تمیزِ زودهنگام حالا مثل خطا شمرده می‌شود.
-    STABLE_UPTIME_SEC = 300
-    while True:
-        try:
-            admin = AdminBot(selfbot_module, standalone=True)
-            await admin.start()
-            connected_at = time.monotonic()
-            await admin.client.run_until_disconnected()
-            if time.monotonic() - connected_at >= STABLE_UPTIME_SEC:
-                # اتصال پایدار بود → ریست بک‌آف (رفتار سالمِ قبلی)
-                consecutive_failures = 0
-            else:
-                # قطعِ تمیزِ زودهنگام → بک‌آف حفظ/افزایش می‌شود
-                consecutive_failures += 1
-                wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-                print(f"⚠️ [admin_bot] قطع تمیز پیش از {STABLE_UPTIME_SEC}s — تلاش مجدد در {wait_time}s")
-                await asyncio.sleep(wait_time)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            consecutive_failures += 1
-            wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
-            print(f"⚠️ [admin_bot] قطع/خطا: {e} — تلاش مجدد در {wait_time}s")
-            await asyncio.sleep(wait_time)
-
 # ══════════════════════════════════════════════════════════════════════
 # ═══ بخش saas_bot.py (ادغامشده) ═══
 # ══════════════════════════════════════════════════════════════════════
@@ -8025,10 +7524,6 @@ WIZ_DEDICATED_EXTEND_DAYS = "awaiting_dedicated_extend_days"
 WIZ_ORPHAN_ASSIGN = "awaiting_orphan_owner"
 WIZ_USER_SEARCH = "awaiting_user_search"
 WIZ_USER_EXTEND_DAYS = "awaiting_extend_days"
-# TEST-G6-SYSTEM: ویزارد announce — OWNER متن پیام همگانی را می‌فرستد،
-# بعد روی «ارسال» تأیید می‌کند (callback announce_send:).
-WIZ_ANNOUNCE = "awaiting_announce_text"
-WIZ_ANNOUNCE_CONFIRM = "awaiting_announce_confirm"
 # ویزاردِ اعطای مجوزِ حساس: منتظرِ آیدیِ کاربر.
 WIZ_CAP_USER_ID = "awaiting_cap_user_id"
 
@@ -8428,17 +7923,6 @@ async def run_saas_bot_forever(selfbot_module):
 # ═══ بخش main.py (ادغامشده) ═══
 # ══════════════════════════════════════════════════════════════════════
 
-# ماژول resource فقط روی یونیکس/لینوکس موجود است (نه ویندوز). چون workflow
-# معمول این پروژه شامل لاگین اولیه‌ی interactive روی ویندوز است (طبق همان
-# روش قبلی: لاگین لوکال با SOCKS5 و انتقال .session به هاست)، این import را
-# با try/except محافظت می‌کنیم تا اجرای main.py روی ویندوز برای لاگین اولیه
-# خراب نشود؛ لاگ مصرف حافظه صرفاً روی لینوکس (هاست واقعی) فعال خواهد بود.
-try:
-    import resource
-except ImportError:
-    resource = None
-
-
 # ══════════════════════════════════════════════════════════
 #  تشخیص خطاهای احراز هویت غیرقابل‌بازیابی (fatal auth errors)
 # ══════════════════════════════════════════════════════════
@@ -8595,7 +8079,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.22.2"
+BUILD_VERSION = "2026-10-23-v2.23.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -9337,22 +8821,6 @@ SHUTTING_DOWN = False
 _START_LOCKS: dict = {}
 
 
-def _runtime_caller(depth: int = 2) -> str:
-    """نام تقریبی فراخوانِ runtime (برای لاگ [TAG][RUNTIME][REQUEST])."""
-    try:
-        import traceback as _tb3
-        frames = _tb3.extract_stack()
-        if len(frames) > depth:
-            fr = frames[-1 - depth]
-            return f"{os.path.basename(fr.filename)}:{fr.name}"
-    except Exception:
-        pass
-    return "?"
-
-
-def get_runtime(tag: str):
-    """Runtime فعلی (RunningAccount) یا None."""
-    return ACCOUNTS.get(tag)
 
 
 def is_running(tag: str) -> bool:
@@ -9384,10 +8852,6 @@ def _active_runtime_tags() -> list:
             tags.append(t)
     return tags
 
-
-async def wait_ready(tag: str, timeout: float = ACCOUNT_START_POLL_TIMEOUT) -> tuple:
-    """همان _await_account_ready — منتظر READY واقعی."""
-    return await _await_account_ready(tag, timeout)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -11557,10 +11021,11 @@ async def _run_all_accounts(cfg: dict) -> None:
 
     # ربات مدیریت کاملاً اختیاری و **مستقل از عمر SelfBotها**: به‌عنوان یک
     # تسکِ جدا نگه داشته می‌شود و در «صبر برای سیگنال خاموشی» هیچ نقشی
-    # ندارد — غیبت/شکستِ آن (ImportError یا پایانِ حلقه) هرگز نباید باعث
-    # برگشتِ _run_all_accounts و بسته‌شدنِ حلقه‌ی رویداد شود وگرنه تسک‌های
-    # Runtimeِ SelfBotها cancel می‌شوند. ترجیح با saas_bot.py است؛ اگر آن
-    # فایل هنوز آپلود نشده، به admin_bot.py برمی‌گردد.
+    # ندارد — غیبت/شکستِ آن هرگز نباید باعث برگشتِ _run_all_accounts و
+    # بسته‌شدنِ حلقه‌ی رویداد شود وگرنه تسک‌های Runtimeِ SelfBotها cancel
+    # می‌شوند. (v2.23.0 · AUDIT-40: شاخهٔ fallback به admin_bot از زمانِ
+    # ادغام v2.16 غیرقابل‌دسترس بود — هر دو runner در همان ماژول‌اند و
+    # create_task هرگز ImportError نمی‌دهد؛ حذف شد.)
     mgmt_task = None
     # PATCH (v2.6.5 CRITICAL): ربات مدیریت باید همیشه استارت بشه، حتی اگه
     # هیچ اکانتی در config نباشه — تا OWNER بتونه از ربات تلگرام اکانت
@@ -11568,13 +11033,6 @@ async def _run_all_accounts(cfg: dict) -> None:
     # (cfg = {} → if cfg: → False). حالا همیشه اجرا می‌شه.
     try:
         mgmt_task = asyncio.create_task(run_saas_bot_forever(sys.modules[__name__]))
-    except ImportError:
-        try:
-            mgmt_task = asyncio.create_task(run_admin_bot_forever(sys.modules[__name__]))
-        except ImportError:
-            pass
-        except Exception as e:
-            print(f"⚠️ راه‌اندازی ربات مدیریت ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
     except Exception as e:
         print(f"⚠️ راه‌اندازی ربات CiaNetSelf ناموفق بود (بقیه‌ی سیستم عادی ادامه می‌دهد): {e}")
 
@@ -12058,52 +11516,35 @@ async def _scheduled_message_loop():
 # ماژول‌های cianet.bots.* این نام‌ها را با «from cianet.core import ...»
 # مصرف می‌کنند؛ __all__ هم مصرفِ مجدد را برای linterها روشن می‌کند.
 __all__ = [
-    'ACCOUNTS',
-    'ACCOUNT_DELETE_JOURNAL_FILE',
-    'ACCOUNT_START_POLL_TIMEOUT',
     'ACTIVATION_HELP_TEXT',
     'ADMIN_BOT_SESSION_NAME',
     'ADMIN_BOT_TOKEN',
     'ADMIN_ID',
     'ADMIN_LIST_FILE',
-    'BACKUP_HOURS_IRAN',
     'BACKUP_MANIFEST',
-    'BACKUP_PROJECT_NAME',
-    'BACKUP_SCHEMA_VERSION',
-    'BACKUP_VERSION',
     'BATCH_LICENSE_MAX',
-    'BOT_STATUS',
     'BUILD_VERSION',
-    'BUTTON_STYLE_SUPPORTED',
-    'BlockRequest',
     'Button',
     'CAP_ACCOUNT_SECURITY',
     'CIANET_LANG',
-    'CONFIG_FILE',
-    'CONFIG_INVALID',
-    'CONFIG_MISSING',
     'CONFIG_VALID',
     'DATA_DIR',
-    'DB_NAME',
     'DB_PATH',
     'DEBUG',
-    'DEDICATED_BOT_ID',
     'DEDICATED_BOT_PLAN',
-    'DEDICATED_BOT_PRICE_DEFAULT',
     'DEDICATED_UI_STATE',
     'DEFAULT_CARD_HOLDER',
     'DEFAULT_CARD_NUMBER',
     'DOWNLOADS_DIR',
-    'DeclinePasswordResetRequest',
     'ENEMY_REPLIES',
     'FEATURE_LABELS',
     'FLOOD_RECOVER_GRACE',
     'FONT_CHOICES',
-    'FONT_FA',
-    'GetAuthorizationsRequest',
-    'GetFullUserRequest',
-    'GetPasswordRequest',
-    'GetStateRequest',
+    'GROUP_DISCOUNT_DEFAULT',
+    'GROUP_DISCOUNT_SETTING_KEY',
+    'GROUP_PLAN_PREFIX',
+    'GROUP_SEATS_CHOICES',
+    'GROUP_SUB_SETTING_KEY',
     'HELPER_BOT_TOKEN',
     'HELPER_HOME_EN',
     'HELPER_HOME_FA',
@@ -12111,10 +11552,7 @@ __all__ = [
     'HELPER_SESSION_NAME',
     'HELPER_TOPICS_EN',
     'HELPER_TOPICS_FA',
-    'HELPER_TRIGGERS',
     'HELP_TEXT',
-    'IS_DEDICATED_BOT',
-    'InputMediaDice',
     'LICENSE_TYPE_ACCOUNT',
     'LICENSE_TYPE_ADMIN',
     'LICENSE_TYPE_RESELLER',
@@ -12124,68 +11562,54 @@ __all__ = [
     'NAV_BACK',
     'NAV_HOME',
     'NAV_NOOP',
-    'ORDER_EXPIRE_HOURS',
     'ORDER_STATUS_CANCELLED',
     'ORDER_STATUS_EXPIRED',
     'ORDER_STATUS_PAID',
     'ORDER_STATUS_PENDING',
-    'ORPHAN_SESSION_GRACE',
     'OUT_COOLDOWN_SEC',
     'OUT_DAILY_MAX',
     'OWNER_ID',
-    'OWNER_IDS',
     'Optional',
-    'PAYMENT_STATUS_APPROVED',
-    'PAYMENT_STATUS_PENDING',
-    'PAYMENT_STATUS_REJECTED',
-    'PROVISION_LEGACY',
     'PROVISION_LICENSE',
     'PROVISION_MANUAL',
     'PROVISION_SUBSCRIPTION',
-    'PeerUser',
     'REFERRAL_GOAL',
     'REFERRAL_REWARD_DAYS',
-    'REQUIRED_BOTDATA_TABLES',
-    'REQUIRED_SAAS_TABLES',
+    'REPORTER_CAP_DEFAULT',
+    'REPORTER_CAP_MAX',
+    'REPORTER_CAP_MIN',
+    'REPORTER_CAP_SETTING',
+    'REPORTER_DUP_MAX',
+    'REPORTER_DUP_MIN',
+    'REPORTER_DUP_SETTING',
+    'REPORTER_ENABLED_SETTING',
+    'REQUIRED_CHATS_MAX',
     'RESERVED_TAGS',
     'ROLE_ADMIN',
     'ROLE_OWNER',
     'ROLE_RESELLER',
     'ROLE_USER',
-    'ResetAuthorizationRequest',
-    'ResetAuthorizationsRequest',
-    'ResetPasswordFailedWait',
-    'ResetPasswordOk',
-    'ResetPasswordRequest',
-    'ResetPasswordRequestedWait',
     'RunningAccount',
-    'SCOPE_ACCOUNT',
     'SCOPE_DEDICATED_BOT',
     'SCOPE_RESELLER',
     'SECURITY_ROUTES',
+    'SELF_BACKUP_ENABLED_SETTING',
+    'SELF_BACKUP_GROUP_SETTING',
     'SELF_FEATURE_LIST',
     'SESSIONS_DIR',
-    'SHUTTING_DOWN',
     'SIMPLE_BOOL_FEATURES',
-    'SUB_STATUS_ACTIVE',
-    'SUB_STATUS_EXPIRED',
-    'SUB_STATUS_PENDING',
-    'SUB_STATUS_SUPERSEDED',
     'SUPPORT_UNITS',
-    'StaleDeletionError',
     'TELEGRAM_SERVICE_ID',
-    'TICKET_STATUS_CLOSED',
-    'TICKET_STATUS_OPEN',
     'TRACKER_MEDIA_DIR',
-    'TRC20_USDT_CONTRACT',
+    'TRIAL_DAYS_DEFAULT',
+    'TRIAL_DAYS_MAX',
+    'TRIAL_DAYS_MIN',
+    'TRIAL_DAYS_SETTING',
+    'TRIAL_SETTING_KEY',
     'TelegramClient',
     'UI_STATES_NEED_DOT',
     'UI_STATE_STYLE',
     'USDT_TOMAN_FALLBACK',
-    'UnblockRequest',
-    'UpdateProfileRequest',
-    'UpdateStatusRequest',
-    'UploadProfilePhotoRequest',
     'WARMUP_DURATION_SEC',
     'WARMUP_RATE_MULTIPLIER',
     'WARN_NOTIFY_THRESHOLD',
@@ -12195,8 +11619,6 @@ __all__ = [
     'WIZ_2FA_NEW_PASS',
     'WIZ_2FA_OLD_PASS',
     'WIZ_ADD_ADMIN',
-    'WIZ_ANNOUNCE',
-    'WIZ_ANNOUNCE_CONFIRM',
     'WIZ_CAP_USER_ID',
     'WIZ_CL_BATCH_MAX_USES',
     'WIZ_CL_BATCH_QTY',
@@ -12227,14 +11649,19 @@ __all__ = [
     'WIZ_PROXY_PASSWORD',
     'WIZ_PROXY_PORT',
     'WIZ_PROXY_USERNAME',
+    'WIZ_REPORTER_CAP',
+    'WIZ_REPORTER_DUP',
+    'WIZ_REPORTER_FLOW',
+    'WIZ_REPORTER_TARGET',
+    'WIZ_SELF_BACKUP_GROUP',
     'WIZ_SEND_MSG_TARGET',
     'WIZ_SEND_MSG_TEXT',
     'WIZ_SET_CARD',
     'WIZ_SET_CHANNEL',
     'WIZ_SET_WALLET',
-    'WIZ_TAG',
     'WIZ_TICKET_MSG',
     'WIZ_TICKET_UNIT',
+    'WIZ_TRIAL_DAYS',
     'WIZ_TRX_HASH',
     'WIZ_USER_EXTEND_DAYS',
     'WIZ_USER_SEARCH',
@@ -12242,85 +11669,26 @@ __all__ = [
     'WIZ_WALLET_CREDIT_REASON',
     'WIZ_WALLET_DEBIT_AMOUNT',
     'WIZ_WALLET_DEBIT_REASON',
-    '_ADMIN_CLIENT_REF',
-    '_ANTIBAN_PENDING',
-    '_ANTIBAN_TTL',
     '_AUTO_UPDATE_TASK',
     '_BG_TASKS',
-    '_CONFIG_CACHE',
-    '_CONFIG_CACHE_MTIME',
     '_DATETIME_FMT',
-    '_DATE_FMT',
-    '_DICE_MAP',
     '_DICE_SAFETY_CEILING',
-    '_EMBED_PANEL_TASK',
-    '_ERROR_MAP',
-    '_FATAL_AUTH_ERROR_TYPES',
-    '_FA_TO_EN_DIGITS',
-    '_FONT_DIGITS',
-    '_FOREIGN_CC_HINTS',
     '_GATE_RETRY_COOLDOWN',
     '_IRAN_TZ',
-    '_JALALI_MONTHS',
-    '_LICENSE_ERROR_TEXT',
     '_MAINTENANCE_MODE',
-    '_NOBITEX_COINS',
-    '_PENDING_STARTS',
-    '_PERMANENT_BAN_TYPES',
-    '_PRICE_MAP',
-    '_REFERRAL_RATE_WINDOW',
-    '_RESTORE_LOCK',
-    '_RUNTIME_TASKS',
     '_SAAS_BOT_REF',
-    '_SAVE_CONFIG_LOCK',
-    '_SCHEDULED_MESSAGE_LOOP_TASK',
     '_SCOPE_LABELS',
-    '_SESSION_EXPIRED_TYPES',
-    '_SIDECAR_MANIFEST_NAME',
-    '_START_LOCKS',
-    '_STATUS_HUMAN',
-    '_STOP_INFLIGHT',
-    '_STRINGS',
-    '_T',
-    '_TAG_LOCKS',
     '_TYPE_NAMES',
-    '_UI_STATE_BY_ICON',
-    '_WALLEX_PAIRS',
-    '_WEEKDAYS_FA',
-    '_acc_status_icon_note',
     '_acc_ui_state',
-    '_active_runtime_tags',
-    '_admin_id_raw',
-    '_auto_fix_file_ownership',
     '_auto_update_loop_wrapper',
-    '_await_account_ready',
-    '_backup_file_name',
-    '_backup_hours_env',
-    '_backup_timestamp',
     '_bot_db',
-    '_bot_db_arc',
-    '_capability_subject_is_main_owner',
-    '_checkpoint_and_clean',
     '_checkpoint_and_clean_session',
     '_chmod_private',
-    '_code_callback',
-    '_coingecko_irr',
-    '_collect_backup_files',
-    '_config_state',
     '_conn',
     '_conn_immediate',
-    '_data_dir',
-    '_db_integrity_ok',
-    '_db_lock',
-    '_db_schema_ok',
-    '_dbid_raw',
     '_disable_all_accounts_for_update',
-    '_do_restore_locked',
-    '_embed_web_panel',
-    '_exir_toman',
     '_fetch_crypto_price',
     '_fetch_gold_iran',
-    '_fetch_gold_price',
     '_file_is_sqlite',
     '_first_account_creds',
     '_fmt_dt_local',
@@ -12328,134 +11696,72 @@ __all__ = [
     '_fmt_vol',
     '_format_date',
     '_friendly_error',
-    '_generate_discount_code',
     '_generate_license_code',
-    '_get_toman_price',
     '_get_usd_toman_rate',
-    '_graceful_shutdown_all',
-    '_grants_conn',
     '_helper_is_trigger',
     '_helper_normalize',
-    '_inspect',
-    '_install_signal_handlers',
     '_is_fatal_auth_error',
     '_is_nav_action',
     '_is_permanent_ban_error',
     '_is_safe_proxy_host',
-    '_is_sensitive_setting_key',
-    '_is_session_expired_error',
     '_license_batch_result_text',
-    '_license_created_text',
     '_license_result_text',
     '_load_account_delete_journal',
-    '_main_db_arc',
-    '_main_grants_db_path',
-    '_mark_pending_start',
-    '_migrate_provision_sources',
-    '_migrate_schema',
-    '_navasan_repo_gold',
-    '_nobitex_toman',
     '_normalize_channel',
     '_notify_user_async',
     '_now',
     '_now_date',
-    '_orphan_user_selfbots',
-    '_owner_id_warning_shown',
-    '_owner_ids_raw',
     '_owner_notify_async',
     '_parse_date',
-    '_post_restore_validate',
-    '_price_binance',
-    '_price_bybit',
-    '_price_coingecko',
-    '_price_http_get',
-    '_price_kucoin',
     '_process_alive',
     '_project_dir',
-    '_purge_old_2fa_plaintext',
     '_read_pidfile',
-    '_read_sidecar_manifest',
-    '_recover_account_delete_journal',
-    '_recover_delete_journal',
     '_reenable_all_accounts_after_update',
     '_remove_session_files',
-    '_remove_stale_restore_files',
-    '_restore_dest_for',
-    '_rollback_from_emergency',
     '_run_all_accounts',
     '_run_forever',
-    '_run_single_account_cli',
-    '_runtime_caller',
-    '_runtime_offline_status',
     '_save_account_delete_journal',
     '_save_last_2fa_password',
-    '_scheduled_message_loop',
     '_security_main_owner_id',
     '_session_file_for',
     '_set_bot_status',
     '_set_lang',
-    '_sha256_file',
-    '_shutdown_event',
-    '_snapshot_db_to_temp',
-    '_snapshot_session_to_temp',
     '_spawn_bg',
     '_spawn_dedicated_bot',
     '_status_human',
     '_stop_process_by_pid',
     '_subscription_days_left',
-    '_tabdeal_toman',
-    '_table_check_constraint_text',
-    '_table_columns',
     '_to_int',
     '_update_reseller_application',
-    '_validate_db_file',
-    '_validate_saas_env',
-    '_validate_saas_env_or_exit',
     '_verify_last_2fa_password',
-    '_verify_rebuilt_table',
     '_verify_trc20_transfer',
-    '_wallex_toman',
-    '_write_sidecar_manifest',
-    '_zip_member_is_safe',
     'account_belongs_to',
     'account_is_orphan',
     'accounts_of_user',
     'activate_license',
-    'add_account',
     'add_admin_or_reseller',
-    'add_or_update_user',
-    'add_plan',
-    'add_purchase',
-    'add_sales_user',
-    'add_self_account',
+    'add_reporter_log',
     'add_ticket_message',
     'affiliate_stats',
     'antiban_consume',
     'antiban_guarded_action',
-    'antiban_request_confirmation',
     'apply_discount_code',
     'apply_font',
     'approve_card_payment_atomic',
-    'approve_purchase',
     'asyncio',
     'attach_referrer',
     'authorize_sensitive_account_action',
     'auto_renew_subscription',
-    'ban_user',
+    'block_saas_user',
     'build_backup_zip',
-    'build_db_backup_zip',
+    'build_sessions_backup_zip',
     'cancel_order',
     'capability_grant_exists',
     'check_session_health',
     'claim_referral_rewards',
-    'cleanup_orphan_sessions',
-    'cleanup_stale_approved_payments',
-    'cleanup_stale_tracker_files',
     'clear_state',
     'close_ticket',
     'config_state',
-    'contextmanager',
-    'create_affiliate_commission',
     'create_auto_reply',
     'create_dedicated_bot',
     'create_discount_code',
@@ -12468,7 +11774,6 @@ __all__ = [
     'create_ticket',
     'create_zarinpal_payment',
     'create_zibal_payment',
-    'dataclass',
     'datetime',
     'db_init_db',
     'deactivate_license',
@@ -12477,76 +11782,55 @@ __all__ = [
     'delete_auto_reply',
     'delete_license',
     'delete_scheduled_message',
-    'delete_user_completely',
     'delete_user_completely_async',
-    'ensure_referral_schema',
+    'ensure_block_schema',
+    'ensure_reporter_schema',
     'ensure_started',
     'ensure_stopped',
-    'ensure_wallet_schema',
     'errors',
-    'events',
     'expire_order',
     'expire_subscription',
     'extend_order',
     'fa_digits',
-    'fa_money',
     'fa_weekday',
-    'field',
     'find_auto_reply',
     'get_active_grants',
     'get_active_subscription',
     'get_all_state',
-    'get_all_users',
     'get_auto_renew_enabled',
-    'get_banned_users_list',
-    'get_broadcast_daily_count',
     'get_db',
     'get_dedicated_bot',
-    'get_discount_code',
-    'get_grant_by_id',
     'get_license',
     'get_open_ticket',
     'get_order',
-    'get_order_by_payment',
     'get_payment',
     'get_pending_dedicated_bot_for_reseller',
-    'get_plans',
     'get_pricing',
+    'get_required_chats',
     'get_reseller_application',
     'get_role',
-    'get_runtime',
-    'get_sales_user',
-    'get_self_accounts',
     'get_setting',
-    'get_stats',
     'get_ticket',
-    'get_total_users_count',
     'get_user',
-    'get_user_by_username',
-    'get_user_info',
     'get_wallet_balance',
     'grant_capability',
-    'grant_matches_account',
-    'has_capability',
+    'grant_trial_if_eligible',
+    'group_plan_label',
+    'group_sub_discount_percent',
+    'group_sub_enabled',
     'hashlib',
     'inc_setting',
     'increment_broadcast_daily_count',
-    'increment_messages_count',
     'init_db',
     'iran_now',
-    'is_admin_or_above',
     'is_dangerous_account',
-    'is_iranian_phone',
-    'is_license_usable',
+    'is_group_plan',
     'is_owner_bypass',
     'is_running',
-    'is_starting',
-    'is_stopping',
-    'is_user_banned',
+    'is_user_blocked',
     'jalali_date',
     'jalali_long',
     'json',
-    'list_active_bot_users',
     'list_active_dedicated_bots',
     'list_admins_and_resellers',
     'list_affiliate_commissions',
@@ -12564,6 +11848,7 @@ __all__ = [
     'list_pending_reseller_applications',
     'list_pricing',
     'list_recent_orders',
+    'list_reporter_logs',
     'list_scheduled_messages',
     'list_ticket_messages',
     'list_user_orders',
@@ -12574,49 +11859,45 @@ __all__ = [
     'log_action',
     'logging',
     'main',
-    'mark_order_paid',
     'mark_warned',
+    'maybe_fulfill_group_order',
     'normalize_card_number',
-    'normalize_phone',
     'os',
     'parse_referral_arg',
     'pay_order_trc20_atomic',
     'pay_order_wallet_atomic',
     'phone_country_hint',
-    'random',
     're',
-    'redeem_license_atomic',
     'referral_link',
     'referral_stats',
-    'register_account',
-    'reject_purchase',
+    'register_group_plan',
     'remove_admin_or_reseller',
+    'reporter_daily_cap',
+    'reporter_dup_hours',
+    'reporter_enabled',
+    'reporter_quota_left',
+    'reporter_recently_reported',
+    'reporter_stats',
+    'reporter_today_count',
     'reseller_max_users',
     'reseller_user_count',
-    'resource',
     'restart',
-    'restore_backup_from_zip',
     'restore_backup_from_zip_async',
-    'restore_db_from_file',
-    'restore_db_from_zip',
     'review_payment_atomic',
     'revoke_capability',
-    'run_admin_bot_forever',
     'run_bot',
-    'run_helper_bot_forever',
     'run_saas_bot_forever',
     'safe_callback_int',
-    'safe_input',
-    'save_broadcast_log',
     'save_config',
-    'save_message',
     'search_users',
     'secrets',
+    'self_backup_enabled',
+    'self_backup_group',
     'set_active_subscription_expired',
     'set_auto_renew_enabled',
     'set_order_payment_id',
-    'set_plan_expiry',
     'set_pricing',
+    'set_required_chats',
     'set_setting',
     'set_state',
     'shutil',
@@ -12625,86 +11906,23 @@ __all__ = [
     'string',
     'sys',
     'tempfile',
-    'threading',
-    'grant_trial_if_eligible',
-    'group_plan_label',
-    'group_sub_discount_percent',
-    'group_sub_enabled',
-    'is_group_plan',
-    'is_user_blocked',
-    'block_saas_user',
-    'unblock_saas_user',
-    'ensure_block_schema',
-    'maybe_fulfill_group_order',
-    'register_group_plan',
-    'trial_enabled',
-    'trial_days',
-    'trial_plan_name',
-    'TRIAL_DAYS_SETTING',
-    'TRIAL_DAYS_MIN',
-    'TRIAL_DAYS_MAX',
-    'TRIAL_DAYS_DEFAULT',
-    'get_required_chats',
-    'set_required_chats',
-    'REQUIRED_CHATS_SETTING',
-    'REQUIRED_CHATS_MAX',
-    'self_backup_group',
-    'self_backup_enabled',
-    'SELF_BACKUP_GROUP_SETTING',
-    'SELF_BACKUP_ENABLED_SETTING',
-    'build_sessions_backup_zip',
-    'WIZ_TRIAL_DAYS',
-    'WIZ_SELF_BACKUP_GROUP',
     'ticket_message_count',
-    'ensure_reporter_schema',
-    'reporter_enabled',
-    'reporter_daily_cap',
-    'reporter_today_count',
-    'reporter_quota_left',
-    'reporter_dup_hours',
-    'reporter_recently_reported',
-    'add_reporter_log',
-    'list_reporter_logs',
-    'reporter_stats',
-    'REPORTER_ENABLED_SETTING',
-    'REPORTER_CAP_SETTING',
-    'REPORTER_CAP_DEFAULT',
-    'REPORTER_CAP_MIN',
-    'REPORTER_CAP_MAX',
-    'REPORTER_DUP_HOURS',
-    'REPORTER_DUP_SETTING',
-    'REPORTER_DUP_MIN',
-    'REPORTER_DUP_MAX',
-    'WIZ_REPORTER_TARGET',
-    'WIZ_REPORTER_FLOW',
-    'WIZ_REPORTER_CAP',
-    'WIZ_REPORTER_DUP',
     'time',
     'timedelta',
     'timezone',
-    'to_jalali',
     'toggle_discount_code',
-    'TRIAL_DAYS',
-    'TRIAL_PLAN',
-    'TRIAL_SETTING_KEY',
-    'GROUP_PLAN_PREFIX',
-    'GROUP_SEATS_CHOICES',
-    'GROUP_SUB_SETTING_KEY',
-    'GROUP_DISCOUNT_SETTING_KEY',
-    'GROUP_DISCOUNT_DEFAULT',
-    'unban_user',
+    'trial_days',
+    'trial_enabled',
+    'trial_plan_name',
+    'unblock_saas_user',
     'unlink_customer',
-    'unregister_account',
-    'update_balance',
     'update_dedicated_bot_status',
-    'update_self_account_expiry',
     'upsert_user',
     'validate_backup_zip',
     'verify_zarinpal_payment',
     'verify_zibal_payment',
-    'wait_ready',
     'wallet_credit',
     'wallet_debit',
     'wallet_pay_from_balance',
-    'zipfile',
+    'zipfile'
 ]

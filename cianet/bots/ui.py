@@ -55,13 +55,10 @@ class UI:
     AMBER = "🟡"
     GRAY = "⚪"
     BLUE = "🔵"
-    AQUA = "🟦"
     PAUSED = "⏸"
 
     # نشانگرهای نقشِ دکمه
     OK = "✅"
-    NO = "❌"
-    DANGER = "🗑"
     BACK = "⬅️"
     HOME = "🏠"
     REFRESH = "🔄"
@@ -222,10 +219,6 @@ class UI:
     def refresh(route: str):
         return UI.btn(f"{UI.REFRESH} بروزرسانی", route, style="primary")
 
-    @staticmethod
-    def cancel(route: str = NAV_BACK):
-        return UI.neutral(UI.L_CANCEL, route)
-
     # ── ردیف ناوبری ───────────────────────────────────────────────────
 
     @staticmethod
@@ -288,20 +281,7 @@ class UI:
             row.append(UI.btn(f"{UI.HOME} {UI.L_HOME}", NAV_HOME, style="primary"))
         return row
 
-    @staticmethod
-    def pager(route_fmt: str, page: int, total_pages: int) -> list:
-        """
-        ردیفِ صفحه‌بندیِ یکسان. route_fmt یک رشته با {page} است، مثلاً
-        "users_list:active:{page}".
-        """
-        row = []
-        if page > 0:
-            row.append(UI.btn(f"{UI.PREV} قبلی", route_fmt.format(page=page - 1)))
-        if total_pages > 1:
-            row.append(UI.btn(f"{page + 1}/{total_pages}", NAV_NOOP))
-        if page < total_pages - 1:
-            row.append(UI.btn(f"بعدی {UI.NEXT}", route_fmt.format(page=page + 1)))
-        return row
+    # v2.23.0 (AUDIT-40): pager حذف شد — saas.py صفحه‌بندی را inline می‌سازد.
 
     # ── متنِ صفحه ─────────────────────────────────────────────────────
 
@@ -369,20 +349,7 @@ class UI:
         # و answer بیاد — handler ما این رو هندل می‌کنه)
         return UI.btn(text, f"hdr:{num}", style=None)
 
-    @staticmethod
-    def section_title(num: int, label: str, hint: str = "") -> str:
-        """
-        عنوان یک بخش از پنل ادمین. ساختار:
-            Ⅰ  فروش
-            مدیریت پرداخت، قیمت‌گذاری و لایسنس
-
-        شماره‌ی رومی + label، با hint یک‌خطی در زیرش. این الگو در
-        همه‌ی ۵ بخش تکرار می‌شه و کاربر با دیدن «Ⅰ» می‌فهمه کجاست.
-        """
-        n = UI.NUM[num] if 0 <= num < len(UI.NUM) else f"{num+1}."
-        if hint:
-            return f"{n}  {label}\n{hint}"
-        return f"{n}  {label}"
+    # v2.23.0 (AUDIT-40): section_title حذف شد — هیچ مصرف‌کننده‌ای نداشت.
 
     @staticmethod
     def admin_section_buttons(num: int, items: list) -> list:
@@ -411,16 +378,10 @@ class UI:
         قبلاً هر صفحه متنِ خودش را می‌نوشت («همه چیز مرتبه»، «سالم ✓»)
         که باعث می‌شد لحن یکدست نباشه.
         """
+        # v2.23.0 (AUDIT-40): فقط کلیدهای مصرف‌شده نگه داشته شدند
+        # (ok_all + section_hint) — بقیه هیچ‌جا خوانده نمی‌شدند.
         return {
             "ok_all":         "✓ همه چیز مرتبه",
-            "n_pending":      "{n} کارِ معوق",
-            "n_users":        "{n} کاربر فعال",
-            "n_tickets":      "{n} تیکت باز",
-            "n_payments":     "{n} پرداخت در انتظار",
-            "no_data":        "موردی نیست",
-            "back":           "بازگشت",
-            "home":           "منوی اصلی",
-            "cancel":         "انصراف",
             "section_hint": {
                 "sales":      "سفارش، قیمت، لایسنس",
                 "users":      "کاربران و دسترسی‌ها",

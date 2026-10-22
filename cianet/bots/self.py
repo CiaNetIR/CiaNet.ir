@@ -87,10 +87,17 @@ from cianet.core import (
     increment_broadcast_daily_count,
     iran_now,
     load_config,
-    resource,
     save_config,
     set_state,
 )
+
+# v2.23.0 (AUDIT-40): ماژول resource فقط روی یونیکس/لینوکس موجود است؛
+# قبلاً از طریقِ re-exportِ cianet.core (که حذف شد) می‌آمد — حالا مستقیم
+# با همان گاردِ سازگاریِ ویندوز ایمپورت می‌شود.
+try:
+    import resource
+except ImportError:
+    resource = None
 
 # کلاس‌های هم‌خانواده / توابعِ جابه‌جا‌شده
 from cianet.bots.saas import _deliver_via_bot

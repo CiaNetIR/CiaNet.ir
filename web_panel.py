@@ -142,7 +142,6 @@ ALLOWED_ORIGINS = os.environ.get("PANEL_CORS_ORIGINS", "http://localhost:3000").
 
 DATA_DIR = _main().DATA_DIR if hasattr(_main(), 'DATA_DIR') else (_PROJECT_DIR / "data")
 SAAS_DB = _main().DB_PATH if hasattr(_main(), 'DB_PATH') else (DATA_DIR / "saas.db")
-BOT_DB = _main().DB_NAME if hasattr(_main(), 'DB_NAME') else (DATA_DIR / "bot_data.db")
 
 
 # ─── Session store (in-memory) ───────────────────────────────────────
@@ -224,17 +223,6 @@ def _create_user_session(user_id: int) -> str:
     _user_sessions[token] = {"user_id": user_id, "created_at": time.time()}
     return token
 
-def _valid_user_session(request: Request) -> bool:
-    token = request.cookies.get("cianet_user_session")
-    if not token:
-        return False
-    s = _user_sessions.get(token)
-    if not s:
-        return False
-    if time.time() - s["created_at"] > USER_SESSION_TTL_SEC:
-        _user_sessions.pop(token, None)
-        return False
-    return True
 
 def _get_user_id_from_session(request: Request) -> Optional[int]:
     token = request.cookies.get("cianet_user_session")
@@ -2590,11 +2578,6 @@ async def list_sched_msgs(request: Request):
 async def create_sched_msg(request: Request, _: None = Depends(require_user_csrf)):
     """ساخت پیام زمان‌بندی‌شده."""
     from pydantic import BaseModel
-    class SchedMsgReq(BaseModel):
-        tag: str
-        chat_id: int
-        text: str
-        scheduled_at: str
     uid = require_user_auth(request)
     m = _main()
     req = await request.json()
