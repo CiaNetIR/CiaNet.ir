@@ -84,3 +84,18 @@ config.json.bak
 versions/main.py.pre-auto-update.*
 versions/main.py.pre-rollback.*
 versions/main.py.pre-update.*
+
+# v2.22.1 (AUDIT-39/e#6): DB snapshots / agent state — هیچ‌وقت commit نشوند
+*.db.bak.*
+*.db.bak
+agentdb.rvf
+agentdb.rvf.lock
+saas.db
+saas.db-*
+
+# Local agent/tooling state
+.claude*/
+.agents/
+.swarm/
+.mcp.json
+CLAUDE.md

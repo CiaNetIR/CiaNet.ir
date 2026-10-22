@@ -26,6 +26,8 @@ from datetime import timezone
 from cianet.core import (
     ACCOUNTS,
     ADMIN_BOT_SESSION_NAME,
+    HELPER_SESSION_NAME,
+    SESSIONS_DIR,
     ADMIN_BOT_TOKEN,
     ADMIN_ID,
     ADMIN_LIST_FILE,
@@ -2457,6 +2459,19 @@ class AdminBot:
         group = self_backup_group()
         if not group or not self_backup_enabled():
             return
+        # v2.22.1 (AUDIT-39/a#5 + c#8): پوشهٔ سشن‌ها خالی است → هیچ چیزی
+        # برایِ بکاپ نیست؛ بی‌صدا رد شو (قبلاً هر ساعت «ساخت ناموفق» لاگ
+        # می‌شد — ۲۴ بارِ روزانهٔ نویز روی استقرارهایِ بدونِ اکانت).
+        try:
+            _has_sessions = any(
+                f.endswith(".session")
+                for f in os.listdir(SESSIONS_DIR)
+                if f not in (f"{ADMIN_BOT_SESSION_NAME}.session",
+                             f"{HELPER_SESSION_NAME}.session"))
+        except Exception:
+            _has_sessions = False
+        if not _has_sessions:
+            return
         backup_pass = os.environ.get("CIANET_BACKUP_PASS", "").strip()
         if not backup_pass:
             print("⛔ [admin_bot] CIANET_BACKUP_PASS تنظیم نشده است — بکاپِ"
@@ -2465,12 +2480,50 @@ class AdminBot:
         _fd_sbk, path = tempfile.mkstemp(prefix="cianet_selfbkp_", suffix=".zip")
         os.close(_fd_sbk)
         try:
-            ok = await asyncio.wait_for(
-                asyncio.to_thread(build_sessions_backup_zip, path, backup_pass),
-                timeout=60.0,
-            )
-            if not ok:
+            # v2.22.1 (AUDIT-39/a#2 + c#2): الگوی shield + پاک‌سازیِ به‌تعویق‌
+            # افتاده — to_thread قابلِ cancel نیست؛ قبلاً بعد از timeoutِ ۶۰s،
+            # threadِ رهاشده فایل را دوباره می‌ساخت (os.replace) و یک بکاپِ
+            # رمزشدهٔ یتیم در /tmp می‌ماند و آن ساعت بی‌صدا از دست می‌رفت.
+            # حالا: بعد از تمامِ کارِ thread (هر وقت تمام شد) فایل پاک می‌شود
+            # و مالک با خبر می‌شود.
+            build_fut = asyncio.ensure_future(
+                asyncio.to_thread(build_sessions_backup_zip, path, backup_pass))
+            build_ok = False
+            try:
+                build_ok = await asyncio.wait_for(asyncio.shield(build_fut),
+                                                  timeout=60.0)
+            except asyncio.TimeoutError:
+                def _purge_late(_f, _p=path):
+                    try:
+                        os.remove(_p)
+                    except OSError:
+                        pass
+                build_fut.add_done_callback(_purge_late)
+                print("⏰ [admin_bot] ساختِ بکاپِ ساعتیِ سلف بیش از ۶۰ ثانیه"
+                      " طول کشید — این نوبت رد شد.")
+                try:
+                    await self.client.send_message(
+                        ADMIN_ID,
+                        "⏰ ساختِ بکاپِ ساعتیِ سلف‌ها بیش از ۶۰ ثانیه طول"
+                        " کشید و این نوبت ارسال نشد — اگر تکرار شد، حجمِ"
+                        " سشن‌ها یا فشارِ دیسک را بررسی کن.",
+                    )
+                except Exception:
+                    pass
+                return
+            if not build_ok:
                 print("⚠️ [admin_bot] ساخت بکاپِ ساعتیِ سلف ناموفق بود — ارسال نشد.")
+                # v2.22.1 (AUDIT-39/c#5): خطای ساخت هم به مالک می‌رسد —
+                # قبلاً فقط خطای ارسال اطلاع می‌داد و خرابیِ پایدارِ بکاپ
+                # بی‌صدا می‌ماند.
+                try:
+                    await self.client.send_message(
+                        ADMIN_ID,
+                        "⚠️ ساختِ بکاپِ ساعتیِ سلف‌ها ناموفق بود — لاگِ سرویس"
+                        " را ببین (journalctl -u selfbot).",
+                    )
+                except Exception:
+                    pass
                 return
             file_size = os.path.getsize(path)
             now = self.sb.iran_now()
@@ -2502,10 +2555,13 @@ class AdminBot:
         except Exception as e:
             print(f"⚠️ [admin_bot] خطای کلی در بکاپِ ساعتیِ سلف: {type(e).__name__}: {e}")
         finally:
-            if os.path.exists(path):
+            # پاک‌سازیِ فوریِ مسیرهایِ موقت (اگر threadِ دیرهنگام هنوز در حالِ
+            # کار است، add_done_callbackِ بالا کارِ باقی را می‌کند).
+            for _p in (path, path + ".enc.tmp"):
                 try:
-                    os.remove(path)
-                except Exception:
+                    if os.path.exists(_p):
+                        os.remove(_p)
+                except OSError:
                     pass
 
     async def _daily_backup_loop(self):

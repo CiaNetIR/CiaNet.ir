@@ -2108,6 +2108,10 @@ def get_required_chats() -> list:
     (required_channel) تنظیم شده باشد، همان به‌عنوانِ تک‌عضویِ لیست
     برگردد — استقرارهایِ قدیمی بدونِ دست‌زدنِ مالک همین‌طور کار می‌کنند.
     خروجی همیشه dedupe شده و سقفش REQUIRED_CHATS_MAX است.
+
+    v2.22.1 (AUDIT-39/a#4): آیتمِ با u غیرِاسکالر (dict/list — فقط از طریقِ
+    دست‌کاریِ مستقیمِ DB ممکن است) نادیده گرفته می‌شود تا گیت برایِ همه
+    fail-closed نشود.
     """
     raw = (get_setting(REQUIRED_CHATS_SETTING) or "").strip()
     chats = []
@@ -2117,7 +2121,10 @@ def get_required_chats() -> list:
             if isinstance(data, list):
                 for it in data:
                     if isinstance(it, dict):
-                        u = str(it.get("u") or "").strip()
+                        u = it.get("u")
+                        if not isinstance(u, (str, int)) or isinstance(u, bool):
+                            continue
+                        u = str(u).strip()
                         if u:
                             chats.append({"u": u,
                                           "t": str(it.get("t") or "").strip(),
@@ -2132,7 +2139,7 @@ def get_required_chats() -> list:
                       "l": ""}]
     seen, out = set(), []
     for ch in chats:
-        key = ch["u"].lower()
+        key = ch["u"].lower().lstrip("@")
         if key not in seen:
             seen.add(key)
             out.append(ch)
@@ -2152,10 +2159,13 @@ def set_required_chats(chats: list) -> None:
     for it in chats or []:
         if not isinstance(it, dict):
             continue
-        u = str(it.get("u") or "").strip()
-        if not u or u.lower() in seen:
+        u = it.get("u")
+        if not isinstance(u, (str, int)) or isinstance(u, bool):
             continue
-        seen.add(u.lower())
+        u = str(u).strip()
+        if not u or u.lower().lstrip("@") in seen:
+            continue
+        seen.add(u.lower().lstrip("@"))
         clean.append({"u": u,
                       "t": str(it.get("t") or "").strip(),
                       "l": str(it.get("l") or "").strip()})
@@ -5872,6 +5882,13 @@ def _file_is_sqlite(path: str) -> bool:
     database» می‌شکند و کل بکاپ را رد می‌کند. پس هدرِ واقعی SQLite
     ("SQLite format 3\0") هم چک می‌شود؛ فایلِ ۰ بایتی (سشنِ تازه‌ساخته‌شده‌ی
     خالی) معتبر است.
+
+    v2.22.1 (AUDIT-39/c#4): «database is locked/busy» دیگر «غیر-SQLite»
+    تفسیر نمی‌شود — قبلاً OperationalErrorِ قفلِ نوشتن هم زیرِ چترِ
+    DatabaseError می‌آمد و False برمی‌گشت و نتیجه‌اش بایگانیِ خامِ یک سشنِ
+    وسطِ نوشتن در بکاپ بود (به‌ویژه در بکاپِ ساعتیِ سلف‌ها که فاصله‌ی
+    زدنی با سشن‌های فعال دارد). حالا قفل = خطا (fail-closed): caller یا
+    retry می‌کند یا بکاپ را رد می‌کند — هرگز کپیِ خامِ ناسالم نمی‌سازد.
     """
     # (به‌صورت غیر-لیترال ساخته می‌شود تا اسکنرهای استاتیکِ دکمه‌های بایت‌ای
     # آن را با callback data اشتباه نگیرند)
@@ -5887,6 +5904,12 @@ def _file_is_sqlite(path: str) -> bool:
         finally:
             con.close()
         return True
+    except sqlite3.OperationalError as e:
+        msg = str(e).lower()
+        if "locked" in msg or "busy" in msg:
+            # قفلِ نوشتنِ یک سشنِ واقعی — placeholder نیست؛ fail-closed
+            raise
+        return False
     except (sqlite3.DatabaseError, OSError):
         return False
 
@@ -5940,7 +5963,15 @@ def build_sessions_backup_zip(zip_path: str, password: Optional[str] = None) -> 
 
     همان قواعدِ امنیتیِ build_backup_zip، بدونِ دیتابیس‌ها و config:
       - هر سشن با API backup خودِ SQLite snapshot می‌شود (نه کپیِ خام)
-        و sidecarهای -wal/-shm هرگز به‌صورتِ مستقل داخل نمی‌روند؛
+        و sidecarهای -wal/-shm هرگز به‌صورتِ مستقل داخل نمی‌روند؛ سشنِ
+        قفل‌شده (وسطِ نوشتنِ یک کلاینتِ فعال) با خطا رد می‌شود (fail-closed
+        — v2.22.1/AUDIT-39: کپیِ خامِ سشنِ قفل‌شده ممنوع)؛
+      - سشن‌های خودِ ربات‌ها (_admin_bot و helper_bot) داخلش نمی‌روند
+        (v2.22.1/AUDIT-39/c#9): این بکاپ «سلف‌ها» است و هر ساعت به یک
+        گروه می‌رود — سشنِ پنلِ مدیریت نباید شعاعِ انفجارش را وسع دهد؛
+        در بکاپِ کاملِ روزانه (که به DM مالک می‌رود) همچنان هستند؛
+      - هر snapshot با integrity_check اعتبارسنجی می‌شود (v2.22.1) —
+        فایلِ پاره داخل ZIP نمی‌رود؛
       - manifest با sha256 همان بایت‌هایی که داخل ZIP می‌روند ساخته می‌شود
         (نشانِ kind="sessions-only" تا از بکاپِ کامل قابلِ تشخیص باشد)؛
       - قبل از تحویل، خودِ ZIP باز و تست می‌شود (testzip + manifest)؛
@@ -5955,12 +5986,28 @@ def build_sessions_backup_zip(zip_path: str, password: Optional[str] = None) -> 
         for fname in sorted(os.listdir(SESSIONS_DIR)):
             full = os.path.join(SESSIONS_DIR, fname)
             if os.path.isfile(full) and fname.endswith(".session"):
+                # v2.22.1: سشن‌های ربات‌های خودِ سیستم — در بکاپِ ساعتیِ
+                # «سلف‌ها» جایی ندارند (در بکاپِ کاملِ روزانه هستند).
+                if fname in (f"{ADMIN_BOT_SESSION_NAME}.session",
+                             f"{HELPER_SESSION_NAME}.session"):
+                    continue
                 files[os.path.join("sessions", fname)] = full
         if not files:
             return False
         for arc, real in files.items():
             s = _snapshot_session_to_temp(real)
             if s is not None:
+                # v2.22.1 (AUDIT-39/c#4): اعتبارسنجیِ هر snapshot قبل از
+                # بایگانی — همان استانداردِ بکاپِ کامل (validate_backup_zip)
+                # که نسخهٔ فقط-سشن قبلاً از آن بی‌بهره بود.
+                if not _db_integrity_ok(s):
+                    print(f"⛔ [backup] snapshot سشن {real} integrity_check"
+                          " را پاس نکرد — بکاپِ ساعتی رد شد (fail-closed).")
+                    try:
+                        os.remove(s)
+                    except Exception:
+                        pass
+                    return False
                 snaps[arc] = s
         manifest = {
             "project": BACKUP_PROJECT_NAME,
@@ -7657,6 +7704,14 @@ NAV_ACTION_PREFIXES = (
     # the nav stack so Back works correctly.
     "update_check:", "update_apply:",
     "owner_db_backup_go:", "channel_clear:",
+    # v2.22.1 (AUDIT-39): عمل‌های v2.22.0 که صفحه را دوباره رندر می‌کنند —
+    # بدونِ این‌ها، اولین «بازگشت» بعد از ذخیره، ویزاردِ مُرده را دوباره
+    # باز می‌کرد به‌جای صفحهٔ والد (یافتهٔ 39-d #5).
+    "channel_remove:", "self_backup_confirm_save",
+    "owner_self_backup_toggle", "owner_self_backup_clear",
+    # v2.22.1 (AUDIT-39): toggle آزمایشی هم عمل است (صفحهٔ آزمایشی را
+    # دوباره رندر می‌کند، مثل owner_toggle_group_sub).
+    "owner_toggle_trial", "owner_trial_days",
     "setting_save:", "announce_send:", "announce_cancel",
 )
 
@@ -7979,7 +8034,13 @@ WIZ_CAP_USER_ID = "awaiting_cap_user_id"
 
 # فاصله‌ی مجاز بین دو کلیکِ «بررسی عضویت» (ثانیه) — هر کلیک یک چکِ
 # force با تماس شبکه است و اسپمِ کلیک نباید آن را آزاد بگذارد.
-_GATE_RETRY_COOLDOWN = 5
+_GATE_RETRY_COOLDOWN = 20
+# v2.22.1 (AUDIT-39/e#3): از ۵ ثانیه به ۲۰ ثانیه رفت — گیتِ چندچتی با هر
+# کلیکِ «بررسی عضویت» تا ۱۰ تماسِ GetParticipant می‌زند (force=True، بدونِ
+# کش)؛ cooldownِ ۵ ثانیه‌ای یعنی یک کاربر می‌توانست ~۱۲۰ تماس در دقیقه
+# تحمیل کند و FloodWait اکانتِ ربات را برای همه بگیرد. ۲۰ ثانیه این پنجره
+# را ۴ برابر کوچک می‌کند و UX را هم خراب نمی‌کند (چکِ عضویت بعد از
+# عضو‌شدن نتیجهٔ همان کلیک را می‌گیرد).
 
 
 
@@ -8326,6 +8387,7 @@ async def run_saas_bot_forever(selfbot_module):
         # فقط بعد از uptime پایدار (≥۳۰۰s) ریست می‌شود (همان الگوی
         # run_admin_bot_forever).
         _started_at = time.monotonic()
+        bot = None
         try:
             bot = SaaSBot(selfbot_module)
             await bot.start()
@@ -8351,6 +8413,16 @@ async def run_saas_bot_forever(selfbot_module):
                 if _last:
                     print(f"   └─ {_last[-1].strip()}")
             await asyncio.sleep(wait_time)
+        finally:
+            # v2.22.1 (AUDIT-39/c#3): تسک‌های پس‌زمینه‌ی این نمونه (expiry +
+            # بکاپِ روزانه + بکاپِ ساعتیِ سلف) قبل از ساختِ نمونهٔ بعدی لغو
+            # می‌شوند — قبلاً با هر سیکلِ reconnect، تسک‌هایِ نمونهٔ قبلی
+            # زنده می‌ماندند (نشت + بکاپِ تکراری از کلاینتِ کهنه).
+            if bot is not None:
+                try:
+                    await bot._cancel_bg_tasks()
+                except Exception:
+                    pass
 
 # ══════════════════════════════════════════════════════════════════════
 # ═══ بخش main.py (ادغامشده) ═══
@@ -8523,7 +8595,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-22-v2.22.0"
+BUILD_VERSION = "2026-10-22-v2.22.1"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -12287,7 +12359,6 @@ __all__ = [
     '_notify_user_async',
     '_now',
     '_now_date',
-    '_oid',
     '_orphan_user_selfbots',
     '_owner_id_warning_shown',
     '_owner_ids_raw',

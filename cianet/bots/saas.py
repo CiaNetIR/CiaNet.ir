@@ -470,9 +470,44 @@ class SaaSBot:
             self._expiry_task = asyncio.create_task(self._expiry_loop())
         if self.admin_panel._backup_task is None or self.admin_panel._backup_task.done():
             self.admin_panel._backup_task = asyncio.create_task(self.admin_panel._daily_backup_loop())
+        # v2.22.1 (AUDIT-39/a#1 + c#1 · CRITICAL): بکاپِ ساعتیِ سلف‌ها هم در
+        # مسیرِ اصلی production اسپاون می‌شود. این حلقه قبلاً فقط در
+        # AdminBot.start() (مسیرِ fallbackِ standalone) ساخته می‌شد — یعنی
+        # فیچرِ پرچمدارِ v2.22.0 در production کاملاً مرده بود: مالک گروه را
+        # تنظیم می‌کرد، «روشن» می‌دید و هیچ بکاپی نمی‌گرفت. (الگویِ همان
+        # دو خطِ بالا که مسیرِ درست را نشان می‌داد.)
+        if (self.admin_panel._self_backup_task is None
+                or self.admin_panel._self_backup_task.done()):
+            self.admin_panel._self_backup_task = asyncio.create_task(
+                self.admin_panel._self_backup_loop())
 
         print("🤖 ربات CiaNetSelf (نقش‌محور) با موفقیت روشن شد.")
         return self.client
+
+    async def _cancel_bg_tasks(self):
+        """
+        v2.22.1 (AUDIT-39/c#3): لغوِ تمیزِ تسک‌های پس‌زمینه‌ی این نمونه —
+        expiry + بکاپِ روزانه + بکاپِ ساعتیِ سلف‌ها.
+
+        چرا لازم است: حلقه‌های forever در هر سیکلِ reconnect یک شیءِ تازهٔ
+        ربات می‌سازند؛ guardِ None/done روی نمونهٔ تازه پاس می‌شود در حالی که
+        تسک‌های نمونهٔ قبلی هنوز زده‌اند و تا ابد زنده می‌مانند (نشتِ تسک +
+        ارسالِ بکاپِ تکراری از کلاینتِ کهنه که ممکن است خودش را دوباره وصل
+        کند). run_saas_bot_forever بعد از هر قطعی این متد را صدا می‌زند.
+        """
+        tasks = [self._expiry_task,
+                 self.admin_panel._backup_task,
+                 self.admin_panel._self_backup_task]
+        for t in tasks:
+            if t is not None and not t.done():
+                t.cancel()
+        for t in tasks:
+            if t is None:
+                continue
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
 
     def _role(self, user_id: int) -> str:
         return get_role(user_id, OWNER_ID)
@@ -688,6 +723,11 @@ class SaaSBot:
         for ch in chats:
             is_id = ch["u"].lstrip("-").isdigit()
             label = ch["t"] or (f"@{ch['u']}" if not is_id else ch["u"])
+            # v2.22.1 (AUDIT-39/b#11): سقفِ برچسبِ دکمه در تلگرام ۶۴ نویسه
+            # است — عنوانِ بلندِ چت، کلِ پیامِ گیت را بی‌صدا می‌شکست و کاربرِ
+            # بسته‌شده بدونِ هیچ پیامی می‌ماند. کوتاه‌سازیِ دفاعی همین‌جا.
+            if len(label) > 48:
+                label = label[:47] + "…"
             if ch["l"]:
                 link = ch["l"]
             elif not is_id:
@@ -714,15 +754,16 @@ class SaaSBot:
                 f"{UI.GRAY} «{lbl}» (لینک ندارد — از مدیرِ ربات بخواه)"
                 for lbl in unlinked)
         buttons.append([UI.go("🔍 بررسی عضویت", b"channel_retry")])
-        # چتِ تمیز: قبل از ارسالِ پیامِ جدید، پیامِ گیتِ قبلیِ همین کاربر را
-        # (اگر هنوز سر جایش است) حذف کن — بدون این، هر پیامِ متنیِ کاربرِ
-        # بسته‌شده یک کپیِ جدیدِ روی‌هم از پیام گیت می‌سازد.
-        await self._try_delete_gate_message(event.sender_id, event.chat_id)
-        # تشخیص CallbackQuery با `event.query` (قابل‌اطمینان) نه `hasattr(respond)`
-        # — چون telethon به CallbackQuery هم متد respond می‌دهد (پیامِ جدید
-        # می‌فرستد) و استفاده از hasattr باعث می‌شد روی دکمه‌ها به‌جای edit،
-        # پیامِ جدیدِ گیت ساخته شود و چت روی هم انباشته شود.
-        if getattr(event, "query", None) is None:
+        # چتِ تمیز: قبل از ارسالِ پیامِ جدید (مسیرِ متنی)، پیامِ گیتِ قبلیِ
+        # همین کاربر حذف می‌شود — ولی در مسیرِ CallbackQuery (دکمهٔ «بررسی
+        # عضویت» که رد شده) هرگز! آن پیام همان پیامی است که دکمهٔ کلیک‌شده
+        # را حمل می‌کند؛ حذفش + editِ بعدی یعنی کاربر هیچ بازخوردی نمی‌گیرد
+        # (v2.22.1 · AUDIT-39/b#2 + d#1: پیام خورده می‌شد و چت خالی می‌ماند).
+        # تشخیص CallbackQuery با `event.query` (قابل‌اطمینان) نه
+        # `hasattr(respond)` — چون telethon به CallbackQuery هم respond می‌دهد.
+        is_callback = getattr(event, "query", None) is not None
+        if not is_callback:
+            await self._try_delete_gate_message(event.sender_id, event.chat_id)
             try:
                 msg = await event.respond(text, buttons=buttons)
                 mid = getattr(msg, "id", None)
@@ -986,13 +1027,11 @@ class SaaSBot:
 
         # ── وضعیت واقعی کاربر (مبنای رنگ‌ها، ترتیب دکمه‌ها و جمله‌ی راهنما) ──
         sub = get_active_subscription(uid)
-        days_left = None
-        if sub:
-            try:
-                expire = _parse_date(sub["expire_date"])
-                days_left = max(0, (expire - datetime.now(timezone.utc)).days)
-            except Exception:
-                days_left = None
+        # v2.22.1 (AUDIT-39/d#2): همان محاسبهٔ استانداردِ همهٔ جای دیگر
+        # (کارتِ حساب/لیست‌های ادمین) — قبلاً اینجا (expire-now).days خام
+        # بود که با گرد‌کردنِ به پایین، روزِ اولِ اشتراکِ ۳روزه «۲ روز»
+        # و اشتراکِ ۱روزه «۰ روز» (به‌ظاهر منقضی!) نشان می‌داد.
+        days_left = _subscription_days_left(sub) if sub else None
         if sub:
             # زیر ۳ روز مانده → زرد، تا کاربر قبل از قطع‌شدن ببیند.
             sub_state = "warn" if (days_left is not None and days_left <= 3) else "active"
@@ -1041,14 +1080,20 @@ class SaaSBot:
             expiry_text = "انقضای سلف: نامحدود"
         buttons.append([UI.item(expiry_text, sub_state, "user_sub_status")])
 
-        # ── ردیف ۳ (شرطی): اشتراک داره/ادمینه → دوتایی؛ عادی → تکی
+        # ── ردیف ۲ (شرطی): اشتراک داره/ادمینه → دوتایی؛ عادی → تکی
         has_active_or_admin = bool(sub) or (not needs_sub) or has_account or n_bots > 0
         if has_active_or_admin:
-            # لاگین کردن سلف + خرید سلف
-            buttons.append([
-                UI.confirm("📱 لاگین کردن سلف", "user_login_account"),
-                UI.confirm("🛒 خرید سلف", "user_renew"),
-            ])
+            if needs_sub:
+                # لاگین کردن سلف + خرید سلف
+                buttons.append([
+                    UI.confirm("📱 لاگین کردن سلف", "user_login_account"),
+                    UI.confirm("🛒 خرید سلف", "user_renew"),
+                ])
+            else:
+                # v2.22.1 (AUDIT-39/d#8): OWNER/ADMIN اشتراک لازم ندارند —
+                # «🛒 خرید سلف» برایشان فقط نویز است (کدِ قدیمی خودش این را
+                # می‌گفت ولی باز هم دکمهٔ خرید را نشان می‌داد).
+                buttons.append([UI.confirm("📱 لاگین کردن سلف", "user_login_account")])
         else:
             # فقط خرید سلف
             buttons.append([UI.confirm("🛒 خرید سلف", "user_renew")])
@@ -1077,10 +1122,13 @@ class SaaSBot:
 
         # ── ردیف ۴ (v2.22.0 MENU-REORG · OWNER-REQUEST): حساب کاربری —
         # «👥 نمایندگی» از داخلِ کارتِ حساب به جایگاهِ خودش در منوی اصلی
-        # آمد (هر بخش در جایِ شخصیِ خودش) و برای USER عادی کنارِ حساب
-        # می‌نشیند؛ نماینده‌های فعلی و نقش‌های مدیریتی فقط حساب می‌بینند
-        # (پنلِ نمایندگیِ خودشان جای دیگری است).
-        if role == ROLE_USER and not self._user_has_pending_reseller(uid):
+        # آمد (هر بخش در جایِ شخصیِ خودش).
+        # v2.22.1 (AUDIT-39/d#3): برای **همهٔ** USERها دیده می‌شود — درخواست‌دهندهٔ
+        # در حالِ بررسی هم باید بتواند وضعیتِ درخواستش را ببیند («⏳ در حال
+        # بررسی» در _show_reseller_info)؛ قبلاً دکمه برایش پنهان بود و پس از
+        # حذفِ دکمهٔ داخلِ کارتِ حساب، صفحهٔ وضعیت برایِ دقیقاً مخاطبِ اصلی‌اش
+        # غیرقابل‌دسترس شده بود.
+        if role == ROLE_USER:
             buttons.append([
                 UI.go("👤 حساب کاربری", "user_account"),
                 UI.go("🤝 نمایندگی سلف", "user_reseller_info"),
@@ -1099,26 +1147,11 @@ class SaaSBot:
                 label = f"🎛 ادمین · {fa_digits(todo)} کارِ معوق"
             buttons.append([UI.item(label, "pending" if todo else "active", "admin_hub")])
 
-        # بدنه‌ی صفحه: خلاصه‌ی وضعیت (انقضا + تعداد سلف)
-        body = []
-        if needs_sub:
-            if sub and days_left is not None:
-                if days_left > 7:
-                    body.append(f"{UI.GREEN} اشتراک فعال — {fa_digits(days_left)} روز مانده")
-                elif days_left > 0:
-                    body.append(f"{UI.AMBER} ⚠️ فقط {fa_digits(days_left)} روز تا انقضا")
-                else:
-                    body.append(f"{UI.RED} ❌ اشتراک منقضی شده")
-            else:
-                body.append(f"{UI.RED} ❌ اشتراک نداری — از «🛒 خرید سلف» شروع کن")
-        else:
-            body.append(f"{UI.GREEN} دسترسی نامحدود (ادمین)")
-        if n_bots:
-            body.append(f"{UI.dot(n_active > 0)} سلف: {fa_digits(n_active)} فعال از {fa_digits(n_bots)}")
-        elif has_account:
-            body.append(f"{UI.GREEN} اکانتت لاگین شده")
-        else:
-            body.append(f"{UI.GRAY} هنوز اکانتی لاگین نکرده‌ای")
+        # v2.22.1 (AUDIT-39/d#6): بلوکِ bodyِ مرده حذف شد — از v2.0 ساخته
+        # می‌شد ولی هرگز رندر نمی‌شد (متنِ منو فقط greeting + status_line
+        # است). راهنمای «قدم بعدی» (hint) که همان بلوک محاسبه‌اش را داشت
+        # حالا واقعاً به متن اضافه می‌شود — کاربرِ تازه دقیقاً یک جملهٔ
+        # «حالا چه کنم» می‌بیند.
 
         # راهنمای «قدم بعدی» — همیشه دقیقاً یک جمله، بر اساس وضعیتِ واقعی.
         if needs_sub and not sub:
@@ -1153,11 +1186,13 @@ class SaaSBot:
         if needs_sub and not sub:
             status_line = f" · {UI.AMBER} بدون اشتراک"
 
-        # متن کوتاه — دو خط، نه بلوک
+        # متن کوتاه — دو خط، نه بلوک (+ یک خطِ راهنمای قدمِ بعدی)
         text = (
             f"**سلام {first}** 👋\n"
             f"به سلف‌ساز CiaNet خوش آمدی.{status_line}"
         )
+        if hint:
+            text += f"\n\n💡 {hint}"
 
         if edit_event is not None:
             await edit_event.edit(text, buttons=buttons)
@@ -5048,9 +5083,11 @@ class SaaSBot:
                 body.append(f"{fa_digits(i + 1)}. {name} — {kind}"
                             + (f" (`{ch['u']}`)" if is_id else ""))
                 if is_owner:
+                    # v2.22.1: callback هویتِ چت را هم حمل می‌کند —
+                    # channel_remove:{index}:{u} (رفع حذفِ اشتباه از صفحهٔ کهنه)
                     buttons.append([
                         UI.danger(f"🗑 حذف {fa_digits(i + 1)}",
-                                  f"channel_remove:{i}"),
+                                  f"channel_remove:{i}:{ch['u']}"),
                     ])
             body += [
                 "",
@@ -5076,12 +5113,22 @@ class SaaSBot:
             UI.screen(f"📢 کانال‌های اجباری عضویت ({fa_digits(len(chats))})",
                       body=body,
                       subtitle="کانال و گروه — تا ۱۰ چت؛ عضویت در همه الزامی است.",
-                      hint="«➕ افزودن» یوزرنیم/لینک/آیدی عددی می‌پذیرد."),
+                      hint=("«➕ افزودن» یوزرنیم/لینک/آیدی عددی می‌پذیرد."
+                            if is_owner else
+                            "نمایندگیِ فقط-خواندنی — تغییرات فقط با مالک.")),
             buttons,
         )
 
     async def _owner_check_channel(self, event):
-        """بررسی زندهٔ همهٔ چت‌های ذخیره‌شده با تلگرام — بدون تغییر چیزی."""
+        """بررسی زندهٔ همهٔ چت‌های ذخیره‌شده با تلگرام — بدون تغییر چیزی.
+
+        v2.22.1 (AUDIT-39/b#1 + e#2): ترمیمِ عنوان‌ها فقط با الگویِ
+        read-merge-write ایمن انجام می‌شود — لیستِ تازه از DB خوانده و
+        فقط عنوان‌هایِ ترمیم‌شده روی آن merge می‌شود تا افزودنِ هم‌زمانِ
+        مالکِ دیگر (در پنجرهٔ چندثانیه‌ایِ resolveهایِ شبکه) گم نشود.
+        ذخیره‌سازی فقط برای OWNER؛ ADMIN فقط گزارشِ خواندنی می‌بیند
+        (قابلِ اعتماد بودنِ write-path، هم‌راستا با بقیهٔ تنظیماتِ گیت).
+        """
         chats = get_required_chats()
         is_owner = self._role(event.sender_id) == ROLE_OWNER
         if not chats:
@@ -5094,26 +5141,35 @@ class SaaSBot:
         await event.edit("🔄 در حال بررسی چت‌ها با تلگرام…")
         lines = ["نتیجهٔ بررسیِ چت‌ها:"]
         n_ok = 0
+        healed_titles = {}
         for ch in chats:
             ok, info, norm, _ni = await self._resolve_channel(ch["u"])
             name = ch["t"] or ch["u"]
             if ok:
                 n_ok += 1
-                # خود-ترمیمی عنوان: اگر چت بعد از ذخیره تغییر نام داده باشد
-                updated = None
-                for c2 in chats:
-                    if c2["u"].lower() == ch["u"].lower() and info and info != c2["t"]:
-                        c2["t"] = info
-                        updated = info
-                lines.append(f"{UI.GREEN} {name} — سالم"
-                             + (f" (عنوان تازه شد: {info})" if updated else ""))
+                if info and info != ch["t"]:
+                    healed_titles[ch["u"].lower()] = info
+                    lines.append(f"{UI.GREEN} {name} — سالم"
+                                 f" (عنوان تازه شد: {info})")
+                else:
+                    lines.append(f"{UI.GREEN} {name} — سالم")
             else:
                 lines.append(f"{UI.RED} {name} — پیدا نشد ({info})")
-        # ذخیرهٔ عناوینِ ترمیم‌شده (اگر تغییری بوده)
-        try:
-            set_required_chats(chats)
-        except Exception:
-            pass
+        # v2.22.1: mergeِ ایمن — لیستِ تازه از DB + فقط عنوان‌ها؛ هیچ
+        # تغییری که در فاصلهٔ resolveها روی لیست آمده گم نمی‌شود.
+        if is_owner and healed_titles:
+            try:
+                fresh = get_required_chats()
+                changed = False
+                for f in fresh:
+                    t = healed_titles.get(f["u"].lower())
+                    if t and t != f["t"]:
+                        f["t"] = t
+                        changed = True
+                if changed:
+                    set_required_chats(fresh)
+            except Exception:
+                pass
         lines += [
             "",
             f"{fa_digits(n_ok)} از {fa_digits(len(chats))} چت سالم.",
@@ -6972,11 +7028,12 @@ class SaaSBot:
     async def _user_support_end(self, event):
         wiz = self.wizards.pop(event.sender_id, None)
         if wiz:
-            ticket_id = wiz["data"]["ticket_id"]
-            # فقط اگر واقعاً پیامی رد و بدل شده، تیکت را ببند؛ وگرنه یک
-            # تیکت خالی (که هیچ‌وقت پیامی نداشته) در دیتابیس رها نکن —
-            # کاربر می‌تواند بعداً با «📞 پشتیبانی» همان تیکت باز را ادامه دهد.
-            if ticket_message_count(ticket_id) > 0:
+            # v2.22.1 (AUDIT-39/d#4): «پایان گفتگو» قبل از اولین پیام (بلافاصله
+            # بعد از انتخابِ واحد) → ticket_id هنوز ساخته نشده — قبلاً
+            # KeyError("ticket_id") می‌خورد و کاربر پیامِ «خطایی رخ داد» +
+            # از دستِ دادنِ ویزارد می‌گرفت. حالا get با پیش‌فرض.
+            ticket_id = (wiz.get("data") or {}).get("ticket_id")
+            if ticket_id and ticket_message_count(ticket_id) > 0:
                 close_ticket(ticket_id)
         # فیکس v1.7.1: نقش واقعی کاربر رو بگیر، نه ROLE_USER رو hardcode کن.
         # قبلاً اینجا همیشه ROLE_USER پاس داده می‌شد — یعنی اگه OWNER یا
@@ -7361,6 +7418,19 @@ class SaaSBot:
         state = wiz["state"]
         data = wiz["data"]
         text = (event.raw_text or "").strip()
+
+        # v2.22.1 (AUDIT-39/e#5): ویزاردهای تنظیمیِ مالک فقط در چتِ خصوصی
+        # مصرف می‌شوند — تکمیلِ ویزارد در گروه، صفحه‌هایِ تنظیماتِ مالک را
+        # در همان گروه پاس می‌داد. دامنهٔ محدود به سه ویزاردِ تازه (نکته‌ای
+        # تغییرِ رفتار برای ویزاردهایِ قدیمی نمی‌کنیم). پیش‌فرضِ نبودِ
+        # attribute (رویدادهایِ غیرِاستاندارد/تست) = مجاز.
+        if state in (WIZ_SET_CHANNEL, WIZ_TRIAL_DAYS, WIZ_SELF_BACKUP_GROUP) \
+                and getattr(event, "is_private", True) is False:
+            await event.respond(
+                "⚠️ این تنظیم فقط در چتِ خصوصیِ ربات قابلِ انجام است —"
+                " همین پیام را در PV بفرست.",
+            )
+            return True
 
         # v2.12.9 (QA-USER): کاربر تو حالِ انتظارِ رسید (عکس) بود ولی متن
         # فرستاد. قبلاً این پیام سایلنت no-op می‌شد و کاربر گیر می‌کرد. حالا
@@ -8065,13 +8135,26 @@ class SaaSBot:
             data = data or {}
             if data.get("phase") == "invite":
                 link = (text or "").strip()
-                if not re.search(r"(?:t|telegram)\.me/", link, re.IGNORECASE):
+                # v2.22.1 (AUDIT-39/b#3 + e#1): فقط لینکِ دعوتِ واقعی پذیرفته
+                # می‌شود — قبلاً هر URLای که «t.me» در آن بود (حتی
+                # evil.com/?t.me/x یا لینکِ کانالِ عمومیِ دیگر) می‌گذشت؛ لینکِ
+                # عمومیِ اشتباه = کارتِ گیتِ غلط = قفلِ دائمیِ کاربران.
+                s = link
+                for _pref in ("https://", "http://"):
+                    if s.lower().startswith(_pref):
+                        s = s[len(_pref):]
+                        break
+                s = s.strip().rstrip("/")
+                if not re.fullmatch(
+                        r"(?:t\.me|telegram\.me)/(?:\+[A-Za-z0-9_-]{3,}|"
+                        r"joinchat[/][A-Za-z0-9_-]{3,})",
+                        s, re.IGNORECASE):
                     await event.respond(
-                        "❌ این یک لینکِ دعوت نیست. لینکِ دعوتِ گروه را بفرست "
+                        "❌ این یک لینکِ دعوتِ گروه نیست. لینکِ دعوت را بفرست "
                         "(مثل `https://t.me/+AbCdEf` یا `t.me/joinchat/...`):"
                     )
                     return True
-                data["l"] = link
+                data["l"] = f"https://{s}"
                 self.wizards[event.sender_id] = {
                     "state": WIZ_SET_CHANNEL, "data": data, "_ts": time.time(),
                 }
@@ -8096,13 +8179,39 @@ class SaaSBot:
                     " عددی‌اش را (ربات باید عضوِ گروه باشد):"
                 )
                 return True
-            existing = {c["u"].lower() for c in get_required_chats()}
+            existing = {c["u"].lower().lstrip("@")
+                        for c in get_required_chats()}
+            # v2.22.1 (AUDIT-39/b#8): dedupe بر اساسِ هویتِ entity — چتی که
+            # با آیدیِ عددی ذخیره شده، اگر با یوزرنیمِ عمومی‌اش دوباره
+            # اضافه شود، قبلاً رد نمی‌شد و دو ورودیِ هم‌مقصد می‌ساخت (برعکسش
+            # گرفته می‌شد). آیدیِ entityِ چتِ تازه با آیدی‌هایِ موجود مقایسه
+            # می‌شود (resolve دوباره ارزان است — entity کش می‌شود).
+            try:
+                _new_ent = await self._chat_entity(norm)
+                _new_eid = abs(int(getattr(_new_ent, "id", 0) or 0))
+            except Exception:
+                _new_eid = 0
             if norm.lower() in existing:
                 await event.respond(
                     "⚠️ این چت از قبل در لیست هست.",
                     buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
                 )
                 return True
+            if _new_eid:
+                for c in get_required_chats():
+                    if not c["u"].lstrip("-").isdigit():
+                        continue
+                    try:
+                        _e2 = await self._chat_entity(c["u"])
+                        if abs(int(getattr(_e2, "id", 0) or 0)) == _new_eid:
+                            await event.respond(
+                                "⚠️ این چت از قبل در لیست هست "
+                                "(با آیدیِ عددی ذخیره شده).",
+                                buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                            )
+                            return True
+                    except Exception:
+                        continue
             if len(existing) >= REQUIRED_CHATS_MAX:
                 await event.respond(
                     f"⚠️ لیست پر است (سقف: {fa_digits(REQUIRED_CHATS_MAX)} چت). "
@@ -8146,7 +8255,10 @@ class SaaSBot:
             # نمی‌سوزاند و کاربر بدونِ شروعِ دوباره تصحیح می‌کند).
             raw = (text or "").strip()
             s = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
-            if not s.isdigit():
+            # v2.22.1 (AUDIT-39/b#7 + e#8): isdecimal به‌جای isdigit —
+            # «²».isdigit() هم True است ولی int() رویش ValueError می‌دهد و
+            # ویزارد با خطای عمومی می‌سوخت؛ isdecimal فقط رقم‌های واقعی.
+            if not s.isdecimal():
                 await event.respond(
                     f"❌ فقط یک عدد بفرست (بین {fa_digits(TRIAL_DAYS_MIN)} و"
                     f" {fa_digits(TRIAL_DAYS_MAX)}):"
@@ -8996,18 +9108,10 @@ class SaaSBot:
                             _spawn_bg(self._notify_referrer(ref), "referral")
                     except Exception as e:
                         print(f"⚠️ [referral] ثبت دعوت ناموفق: {type(e).__name__}")
-                # v2.17.0 (TRIAL): کاربرِ تازه → اشتراک آزمایشی ۷ روزه
-                # (روشن/خاموش از «⚙️ تنظیمات» → «🎁 اشتراک آزمایشی»؛ فقط
-                # مالک). اعطا فقط یک‌بار در طول عمرِ کاربر است و منو
-                # وضعیتش را خودش نشان می‌دهد.
-                try:
-                    grant_trial_if_eligible(event.sender_id)
-                except Exception as e:
-                    print(f"⚠️ [trial] اعطای اشتراک آزمایشی ناموفق: {type(e).__name__}: {e}")
-            # گیت عضویت کانال: همه به‌جز ادمین اصلی باید عضو کانالِ تنظیم‌شده
-            # توسط مالک باشند تا بتوانند از ربات استفاده کنند. اگر عضو نباشد،
-            # پیام /start او حذف و پیام گیت (کادر شیشه‌ای کانال + بررسی عضویت)
-            # فرستاده می‌شود.
+            # گیت عضویت کانال/گروه‌ها: همه به‌جز ادمین اصلی باید عضوِ همهٔ
+            # چت‌هایِ تنظیم‌شده توسط مالک باشند تا بتوانند از ربات استفاده
+            # کنند. اگر عضو نباشند، پیام /start او حذف و پیام گیت (کادرهای
+            # شیشه‌ای + بررسی عضویت) فرستاده می‌شود.
             if not await self._channel_gate(event.sender_id):
                 try:
                     await event.message.delete()
@@ -9015,6 +9119,16 @@ class SaaSBot:
                     pass
                 await self._send_channel_gate_message(event)
                 return
+            # v2.22.1 (AUDIT-39/d#7): اعطای آزمایشی بعد از گیت — قبلاً قبل
+            # از گیت اعطا می‌شد و کاربرِ بیرونِ کانال، روزهایِ آزمایشی‌اش را
+            # بی‌استفاده می‌سوزاند. حالا فقط کاربری که از گیت رد شده آزمایشی
+            # می‌گیرد؛ کاربرِ گیت‌خورده بعد از عضویت، در مسیرِ «بررسی عضویت»
+            # همین اعطا را (idempotent — فقط یک‌بار در طول عمر) می‌گیرد.
+            if is_new:
+                try:
+                    grant_trial_if_eligible(event.sender_id)
+                except Exception as e:
+                    print(f"⚠️ [trial] اعطای اشتراک آزمایشی ناموفق: {type(e).__name__}: {e}")
             # دوباره‌عضو‌شده‌ای که /start می‌زند: پیامِ گیتِ کهنه‌اش پاک
             # می‌شود تا چت تمیز بماند
             if event.sender_id in self._gate_blocked:
@@ -9076,7 +9190,19 @@ class SaaSBot:
             wiz = self.wizards.get(event.sender_id)
             if wiz:
                 try:
-                    if event.photo:
+                    # v2.22.1 (AUDIT-39/b#4): فورواردِ رسانه‌ای (عکس/فایل) از
+                    # گروه، برای ویزاردِ «گروهِ بکاپِ ساعتی» هم مسیرِ متنی
+                    # می‌گیرد — قبلاً فقط پیام‌هایِ متنیِ فورواردی کار می‌کردند
+                    # و فورواردِ عکس (رایج‌ترین شکلِ پیام در گروه‌ها) سایلنت
+                    # بی‌اثر می‌شد. شاخهٔ WIZ_SELF_BACKUP_GROUP آیدی را از
+                    # fwd_from می‌خواند و به متن نیاز ندارد.
+                    _is_media_fwd = bool(
+                        getattr(event.message, "fwd_from", None)
+                        and (event.photo or getattr(event, "document", None))
+                        and wiz.get("state") == WIZ_SELF_BACKUP_GROUP)
+                    if _is_media_fwd:
+                        handled = await self._handle_text_wizard(event, wiz)
+                    elif event.photo:
                         handled = await self._handle_photo_wizard(event, wiz)
                     elif getattr(event, "document", None):
                         # فایل (مثلاً بکاپ دیتابیس برای بازیابی)
@@ -9310,6 +9436,14 @@ class SaaSBot:
                     self._gate_retry_ts[event.sender_id] = now
                     if await self._channel_gate(event.sender_id, force=True):
                         self.wizards.pop(event.sender_id, None)
+                        # v2.22.1 (AUDIT-39/d#7): کاربرِ گیت‌خورده‌ای که حالا
+                        # عضو شده، آزمایشی‌اش را همین‌جا می‌گیرد (اگر سهمش
+                        # نبود — اعطا idempotent است و فقط یک‌بار در طول عمر
+                        # اتفاق می‌افتد؛ در /start دیگر به دستش نمی‌رسید).
+                        try:
+                            grant_trial_if_eligible(event.sender_id)
+                        except Exception:
+                            pass
                         if event.sender_id in self._gate_blocked:
                             # دوباره‌عضو‌شده: پیام خوشامد + آزاد شدن از لیستِ بسته‌ها
                             self._gate_blocked.discard(event.sender_id)
@@ -9326,6 +9460,13 @@ class SaaSBot:
                             event.chat_id, self._role(event.sender_id), edit_event=event
                         )
                     else:
+                        # v2.22.1: بازخوردِ فوریِ کلیک (پیامِ گیتِ رد شده با
+                        # edit روی همان پیام رندر می‌شود و بدونِ answer، چرخشِ
+                        # loading در کلاینت می‌ماند).
+                        try:
+                            await event.answer()
+                        except Exception:
+                            pass
                         await self._send_channel_gate_message(event, denied=True)
                     return
                 if data == "owner_channel" and role in (ROLE_OWNER, ROLE_ADMIN):
@@ -9344,14 +9485,21 @@ class SaaSBot:
                     # v2.22.0: افزودن به لیستِ چندچتی (کلید‌های ویزارد:
                     # u/t/l). تکراری و سقفِ ۱۰ چت اینجا هم چک می‌شود —
                     # دفاعِ دوم بعد از ویزارد.
-                    wiz = self.wizards.pop(event.sender_id, None)
+                    # v2.22.1 (AUDIT-39/b#5): اعتبارسنجی قبل از pop — قبلاً
+                    # ویزارد اول pop می‌شد و در شاخهِٔ «تکراری/سقف» داده‌ها
+                    # می‌سوخت و کاربر باید کل جریان را از نو تایپ می‌کرد؛
+                    # شاخهٔ سقف هم صفحه را دوباره رندر نمی‌کرد.
+                    wiz = self.wizards.get(event.sender_id) or {}
                     wd = (wiz or {}).get("data", {}) or {}
                     u = (wd.get("u") or "").strip()
                     if not u:
+                        self.wizards.pop(event.sender_id, None)
                         await event.answer("چتی در انتظار تایید نیست.", alert=True)
                         return
                     chats = get_required_chats()
-                    if any(c["u"].lower() == u.lower() for c in chats):
+                    if any(c["u"].lower().lstrip("@") == u.lower().lstrip("@")
+                           for c in chats):
+                        self.wizards.pop(event.sender_id, None)
                         await event.answer("⚠️ این چت از قبل در لیست هست.", alert=True)
                         await self._owner_show_channel_settings(event)
                         return
@@ -9359,7 +9507,9 @@ class SaaSBot:
                         await event.answer(
                             f"⚠️ سقفِ {fa_digits(REQUIRED_CHATS_MAX)} چت پر است.",
                             alert=True)
+                        await self._owner_show_channel_settings(event)
                         return
+                    self.wizards.pop(event.sender_id, None)
                     chats.append({"u": u, "t": (wd.get("t") or "").strip(),
                                   "l": (wd.get("l") or "").strip()})
                     set_required_chats(chats)
@@ -9369,16 +9519,35 @@ class SaaSBot:
                     await self._owner_show_channel_settings(event)
                     return
                 if data.startswith("channel_remove:") and role == ROLE_OWNER:
-                    # v2.22.0: حذفِ یک چت از لیست (ایندکسِ ردیفِ دکمه).
+                    # v2.22.0: حذفِ یک چت از لیست. v2.22.1 (AUDIT-39/b#6 +
+                    # e#7): callback علاوه بر ایندکس، «هویت» چت (u) را هم
+                    # حمل می‌کند — کلیک روی صفحهٔ کهنه (لیستِ تغییرکرده)
+                    # دیگر بی‌صدا چتِ اشتباه را حذف نمی‌کند؛ یا همان چت را
+                    # (اگر جابه‌جا شده) حذف می‌کند یا هشدارِ تازگیِ صفحه می‌دهد.
+                    _parts = data.split(":", 2)
+                    if len(_parts) < 3:
+                        await event.answer("❌ فرمت نامعتبر.", alert=True)
+                        return
                     try:
-                        idx = int(data.split(":", 1)[1])
+                        idx = int(_parts[1])
                     except ValueError:
                         await event.answer("❌ ایندکس نامعتبر.", alert=True)
                         return
+                    target_u = _parts[2]
                     chats = get_required_chats()
-                    if not (0 <= idx < len(chats)):
-                        await event.answer("⚠️ این چت دیگر در لیست نیست.", alert=True)
-                        return
+                    # تطابقِ هویت: اول ایندکس، بعد جست‌وجوی u (جابه‌جاشدگی)
+                    if not (0 <= idx < len(chats)) \
+                            or chats[idx]["u"] != target_u:
+                        target_i = next(
+                            (i for i, c in enumerate(chats)
+                             if c["u"] == target_u), None)
+                        if target_i is None:
+                            await event.answer(
+                                "⚠️ این چت دیگر در لیست نیست — صفحه را"
+                                " دوباره باز کن.", alert=True)
+                            await self._owner_show_channel_settings(event)
+                            return
+                        idx = target_i
                     removed = chats.pop(idx)
                     set_required_chats(chats)
                     self._reset_gate_state()
@@ -9509,10 +9678,16 @@ class SaaSBot:
                     _key, _val = _parts[1], _parts[2]
                     _SETTING_SAVE_WHITELIST = {
                         "card_number", "usdt_wallet", "zarinpal_merchant",
-                        "zibal_merchant", "required_channel",
-                        "required_channel_title",
+                        "zibal_merchant",
                         "pay_zarinpal_enabled", "pay_zibal_enabled",
                         "pay_card_enabled", "pay_trc20_enabled",
+                        # v2.22.1 (AUDIT-39/a#3): required_channel و
+                        # required_channel_title از لیست حذف شدند — گیتِ
+                        # عضویت حالا لیستِ JSONِ ساخت‌یافته (required_chats)
+                        # است و نوشتنِ مستقیمِ کلیدِ legacy از پشتِ آن، بعد از
+                        # خالی‌کردنِ لیست توسط مالک، گیت را به‌صورتِ خاموش
+                        # «احیا» می‌کرد (نه مسیرِ UI و نه شمارشِ سقف). هیچ
+                        # دکمه‌ای این کلیدها را از این مسیر نمی‌نویسد.
                     }
                     if _key not in _SETTING_SAVE_WHITELIST:
                         await event.answer(
