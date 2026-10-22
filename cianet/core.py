@@ -691,6 +691,15 @@ DEDICATED_BOT_PRICE_DEFAULT = 2000000
 TRIAL_PLAN = "آزمایشی ۷ روزه"
 TRIAL_DAYS = 7
 TRIAL_SETTING_KEY = "trial_enabled"  # "1" = روشن (پیش‌فرض)
+# v2.22.0 (OWNER-REQUEST): طولِ دورهٔ آزمایشی هم قابلِ تنظیمِ مالک شد
+# (۱ تا ۳۰ روز؛ پیش‌فرض همان ۷ روزِ قبلی — بدونِ تغییرِ رفتار تا وقتی
+# مالک دست نزند). نامِ پلنِ ذخیره‌شده داینامیک است و تشخیصِ «قبلاً
+# آزمایشی گرفته» با پیشوندِ «آزمایشی» انجام می‌شود تا تغییرِ تعدادِ
+# روزها باعثِ اعطای دوباره به همان کاربر نشود.
+TRIAL_DAYS_SETTING = "trial_days"
+TRIAL_DAYS_MIN = 1
+TRIAL_DAYS_MAX = 30
+TRIAL_DAYS_DEFAULT = 7
 
 # v2.17.0: اشتراک دسته‌جمعی — یک پرداخت، چند صندلی با تخفیف برای گروه
 # پلنِ دسته‌جمعی با همین پیشوند در جدول pricing ثبت می‌شود تا همه‌ی مسیرهای
@@ -2023,13 +2032,39 @@ def trial_enabled() -> bool:
     return str(get_setting(TRIAL_SETTING_KEY, "1")).strip() == "1"
 
 
+def trial_days() -> int:
+    """
+    v2.22.0 (OWNER-REQUEST): تعدادِ روزهایِ اشتراکِ آزمایشی — قابلِ تنظیمِ
+    مالک از «🎁 اشتراک آزمایشی» (۱ تا ۳۰). مقدارِ خارج از بازه به نزدیک‌ترین
+    لبه می‌چسبد و مقدارِ خراب به پیش‌فرضِ ۷ روزِ همیشگی برمی‌گردد؛ هیچ
+    ورودی‌ای نمی‌تواند اعطای آزمایشی را کاملاً غیرممکن (۰ روز) یا غیرواقعی
+    کند.
+    """
+    try:
+        v = int(str(get_setting(TRIAL_DAYS_SETTING, str(TRIAL_DAYS_DEFAULT))).strip())
+    except (TypeError, ValueError):
+        return TRIAL_DAYS_DEFAULT
+    return max(TRIAL_DAYS_MIN, min(TRIAL_DAYS_MAX, v))
+
+
+def trial_plan_name(days: int = None) -> str:
+    """نامِ پلنِ آزمایشی برای ذخیره در subscriptions — «آزمایشی N روزه».
+
+    برای days=7 دقیقاً همان رشتهٔ تاریخیِ «آزمایشی ۷ روزه» را می‌سازد
+    (fa_digits) تا ردیف‌های قدیمی و کوئری‌های موجود هم‌خوان بمانند.
+    """
+    d = trial_days() if days is None else int(days)
+    return f"آزمایشی {fa_digits(d)} روزه"
+
+
 def grant_trial_if_eligible(user_id: int) -> bool:
-    """اعطای اشتراک آزمایشی ۷ روزه — صرفاً یک‌بار در طول عمرِ هر کاربر.
+    """اعطای اشتراکِ آزمایشیِ چندروزه — صرفاً یک‌بار در طول عمرِ هر کاربر.
     شرط‌ها: آزمایشی روشن باشد؛ کاربر نقش مدیریتی نداشته باشد؛ اشتراک
-    فعالی نداشته باشد؛ قبلاً آزمایشی نگرفته باشد (حتی منقضی‌شده).
-    True یعنی اعطا شد. فراخوانی‌اش فقط از مسیرِ ثبتِ کاربرِ تازه (/start
-    با is_new) است — کاربرانِ قدیمی که از قبل users دارند هرگز شامل
-    نمی‌شوند."""
+    فعالی نداشته باشد؛ قبلاً آزمایشی نگرفته باشد (حتی منقضی‌شده — با
+    پیشوندِ «آزمایشی»، مستقل از تعدادِ روزهایِ دوره‌های مختلف). تعدادِ
+    روزها از تنظیمِ مالک (trial_days) خوانده می‌شود. True یعنی اعطا شد.
+    فراخوانی‌اش فقط از مسیرِ ثبتِ کاربرِ تازه (/start با is_new) است —
+    کاربرانِ قدیمی که از قبل users دارند هرگز شامل نمی‌شوند."""
     if not trial_enabled():
         return False
     if get_role(user_id, ROLE_USER) in (ROLE_OWNER, ROLE_ADMIN):
@@ -2042,14 +2077,125 @@ def grant_trial_if_eligible(user_id: int) -> bool:
         if active:
             return False
         prior_trial = c.execute(
-            "SELECT 1 FROM subscriptions WHERE user_id = ? AND plan = ? LIMIT 1",
-            (user_id, TRIAL_PLAN),
+            "SELECT 1 FROM subscriptions WHERE user_id = ? AND plan LIKE 'آزمایشی%' "
+            "LIMIT 1",
+            (user_id,),
         ).fetchone()
         if prior_trial:
             return False
-    create_subscription(user_id, TRIAL_PLAN, TRIAL_DAYS)
-    log_action(user_id, "trial_granted", f"days={TRIAL_DAYS}")
+    days = trial_days()
+    create_subscription(user_id, trial_plan_name(days), days)
+    log_action(user_id, "trial_granted", f"days={days}")
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  v2.22.0 (OWNER-REQUEST): عضویت اجباریِ چندکاناله/چندگروهی
+#  (لیستِ JSON در settings؛ سازگار با تک‌کانالِ قدیمی required_channel)
+# ══════════════════════════════════════════════════════════════════════
+
+REQUIRED_CHATS_SETTING = "required_chats"  # JSON: [{"u","t","l"}, ...]
+REQUIRED_CHATS_MAX = 10
+
+
+def get_required_chats() -> list:
+    """لیستِ کانال‌ها/گروه‌هایِ عضویتِ اجباری.
+
+    ساختارِ هر آیتم: {"u": یوزرنیمِ نرمال‌شده یا آیدیِ عددیِ چت,
+                      "t": عنوانِ ذخیره‌شده، "l": لینکِ دعوت (چتِ خصوصی)}.
+
+    مهاجرتِ نرم: اگر لیستِ جدید خالی باشد ولی تنظیمِ تک‌کانالیِ قدیمی
+    (required_channel) تنظیم شده باشد، همان به‌عنوانِ تک‌عضویِ لیست
+    برگردد — استقرارهایِ قدیمی بدونِ دست‌زدنِ مالک همین‌طور کار می‌کنند.
+    خروجی همیشه dedupe شده و سقفش REQUIRED_CHATS_MAX است.
+    """
+    raw = (get_setting(REQUIRED_CHATS_SETTING) or "").strip()
+    chats = []
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                for it in data:
+                    if isinstance(it, dict):
+                        u = str(it.get("u") or "").strip()
+                        if u:
+                            chats.append({"u": u,
+                                          "t": str(it.get("t") or "").strip(),
+                                          "l": str(it.get("l") or "").strip()})
+        except Exception:
+            chats = []
+    if not chats:
+        legacy = (get_setting("required_channel") or "").strip()
+        if legacy:
+            chats = [{"u": legacy,
+                      "t": (get_setting("required_channel_title") or "").strip(),
+                      "l": ""}]
+    seen, out = set(), []
+    for ch in chats:
+        key = ch["u"].lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(ch)
+    return out[:REQUIRED_CHATS_MAX]
+
+
+def set_required_chats(chats: list) -> None:
+    """ذخیرهٔ لیستِ کانال‌ها/گروه‌هایِ اجباری (نوشتنِ کاملِ لیست).
+
+    dedupe بر اساسِ u انجام می‌شود؛ بیش از REQUIRED_CHATS_MAX آیتم
+    ValueError می‌دهد (UI قبل از رسیدن به اینجا سقف را چک می‌کند).
+    کلیدهایِ legacy هم برایِ هم‌خوانیِ مسیرهایِ قدیمی همگام می‌شوند:
+    required_channel = یوزرنیمِ اولینِ آیتمِ غیرعددی (یا خالی) و
+    required_channel_title = عنوانِ همان.
+    """
+    clean, seen = [], set()
+    for it in chats or []:
+        if not isinstance(it, dict):
+            continue
+        u = str(it.get("u") or "").strip()
+        if not u or u.lower() in seen:
+            continue
+        seen.add(u.lower())
+        clean.append({"u": u,
+                      "t": str(it.get("t") or "").strip(),
+                      "l": str(it.get("l") or "").strip()})
+    if len(clean) > REQUIRED_CHATS_MAX:
+        raise ValueError(f"max {REQUIRED_CHATS_MAX} chats")
+    set_setting(REQUIRED_CHATS_SETTING,
+                json.dumps(clean, ensure_ascii=False))
+    legacy_u, legacy_t = "", ""
+    for ch in clean:
+        if not ch["u"].lstrip("-").isdigit():
+            legacy_u, legacy_t = ch["u"], ch["t"]
+            break
+    set_setting("required_channel", legacy_u)
+    set_setting("required_channel_title", legacy_t)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  v2.22.0 (OWNER-REQUEST): بکاپِ ساعتیِ سشن‌های سلف به گروهِ شخصی
+# ══════════════════════════════════════════════════════════════════════
+
+SELF_BACKUP_GROUP_SETTING = "self_backup_group"    # آیدیِ عددیِ گروه
+SELF_BACKUP_ENABLED_SETTING = "self_backup_enabled"  # "1" = روشن (پیش‌فرض)
+
+
+def self_backup_group():
+    """آیدیِ عددیِ گروهِ مقصدِ بکاپِ ساعتی — None یعنی تنظیم نشده."""
+    raw = str(get_setting(SELF_BACKUP_GROUP_SETTING, "") or "").strip()
+    if not raw:
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return v or None
+
+
+def self_backup_enabled() -> bool:
+    """کلیدِ روشن/خاموشِ بکاپِ ساعتی (فقط وقتی معنا دارد که گروه تنظیم شده
+    باشد — حلقهٔ ارسال هر دو را چک می‌کند)."""
+    return str(get_setting(SELF_BACKUP_ENABLED_SETTING, "1")).strip() == "1"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -5745,6 +5891,134 @@ def _file_is_sqlite(path: str) -> bool:
         return False
 
 
+def _encrypt_file_inplace(path: str, password: str) -> bool:
+    """
+    رمزگذاریِ in-place فایل با PBKDF2+Fernet (فرمت CNB1).
+
+    v2.13.0 همین بلوک داخلِ build_backup_zip بود؛ v2.22.0 به‌عنوانِ هلپرِ
+    مشترک استخراج شد تا بکاپِ ساعتیِ سشن‌ها هم از همان مسیرِ امن استفاده
+    کند. False یعنی شکست (caller باید فایل را حذف کند)؛ فایلِ موفق همان
+    path با ciphertext جایگزین می‌شود.
+    """
+    tmp_enc = path + ".enc.tmp"
+    if not password:
+        return False
+    try:
+        import base64
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        salt = os.urandom(16)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100_000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
+        fernet = Fernet(key)
+        with open(path, "rb") as src:
+            plain = src.read()
+        enc = b"CNB1" + salt + fernet.encrypt(plain)
+        with open(tmp_enc, "wb") as dst:
+            dst.write(enc)
+        os.replace(tmp_enc, path)
+        _chmod_private(path)
+        return True
+    except Exception as e:
+        print(f"⛔ [backup] رمزگذاری PBKDF2+Fernet ناموفق (fail-closed): {e}")
+        try:
+            os.remove(tmp_enc)
+        except Exception:
+            pass
+        return False
+
+
+def build_sessions_backup_zip(zip_path: str, password: Optional[str] = None) -> bool:
+    """
+    v2.22.0 (OWNER-REQUEST): بکاپِ سبکِ «فقط سشن‌های سلف» برای حلقهٔ ساعتی.
+
+    همان قواعدِ امنیتیِ build_backup_zip، بدونِ دیتابیس‌ها و config:
+      - هر سشن با API backup خودِ SQLite snapshot می‌شود (نه کپیِ خام)
+        و sidecarهای -wal/-shm هرگز به‌صورتِ مستقل داخل نمی‌روند؛
+      - manifest با sha256 همان بایت‌هایی که داخل ZIP می‌روند ساخته می‌شود
+        (نشانِ kind="sessions-only" تا از بکاپِ کامل قابلِ تشخیص باشد)؛
+      - قبل از تحویل، خودِ ZIP باز و تست می‌شود (testzip + manifest)؛
+      - رمزگذاری Fernet اجباری است — بدونِ CIANET_BACKUP_PASS هیچ
+        فایلی ساخته نمی‌شود (fail-closed، مثلِ بکاپِ کامل).
+    """
+    snaps = {}
+    try:
+        if not os.path.isdir(SESSIONS_DIR):
+            return False
+        files = {}
+        for fname in sorted(os.listdir(SESSIONS_DIR)):
+            full = os.path.join(SESSIONS_DIR, fname)
+            if os.path.isfile(full) and fname.endswith(".session"):
+                files[os.path.join("sessions", fname)] = full
+        if not files:
+            return False
+        for arc, real in files.items():
+            s = _snapshot_session_to_temp(real)
+            if s is not None:
+                snaps[arc] = s
+        manifest = {
+            "project": BACKUP_PROJECT_NAME,
+            "backup_version": BACKUP_VERSION,
+            "schema_version": BACKUP_SCHEMA_VERSION,
+            "kind": "sessions-only",
+            "created_at": _now(),
+            "files": [
+                {"name": arc, "size": os.path.getsize(snaps.get(arc, real)),
+                 "sha256": _sha256_file(snaps.get(arc, real))}
+                for arc, real in sorted(files.items())
+            ],
+        }
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for arc, real in sorted(files.items()):
+                zf.write(snaps.get(arc, real), arcname=arc)
+            zf.writestr(BACKUP_MANIFEST, json.dumps(
+                manifest, ensure_ascii=False, indent=2))
+        _chmod_private(zip_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            if zf.testzip() is not None or BACKUP_MANIFEST not in zf.namelist():
+                try:
+                    os.remove(zip_path)
+                except Exception:
+                    pass
+                return False
+        if password is None:
+            password = os.environ.get("CIANET_BACKUP_PASS", "").strip()
+        if not password:
+            print("⛔ [backup] CIANET_BACKUP_PASS تنظیم نشده است — بکاپِ ساعتیِ سشن "
+                  "بدون رمزنگاری متوقف شد (fail-closed).")
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+            return False
+        if not _encrypt_file_inplace(zip_path, password):
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+            return False
+        return True
+    except Exception as e:
+        print(f"⚠️ [backup] ساخت بکاپِ سشن‌ها ناموفق: {e}")
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+        return False
+    finally:
+        for tmp in snaps.values():
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
 def build_backup_zip(zip_path: str, password: Optional[str] = None) -> bool:
     """
     بکاپ کامل و معتبر پروژه (manifest + دیتابیس‌ها + config + سشن‌ها) در
@@ -5835,30 +6109,7 @@ def build_backup_zip(zip_path: str, password: Optional[str] = None) -> bool:
                 pass
             return False
         if password:
-            try:
-                import base64
-                from cryptography.fernet import Fernet
-                from cryptography.hazmat.primitives import hashes
-                from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-                salt = os.urandom(16)
-                kdf = PBKDF2HMAC(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=salt,
-                    iterations=100_000,
-                )
-                key = base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
-                fernet = Fernet(key)
-                with open(zip_path, "rb") as src:
-                    plain = src.read()
-                enc = b"CNB1" + salt + fernet.encrypt(plain)
-                tmp_enc = zip_path + ".enc.tmp"
-                with open(tmp_enc, "wb") as dst:
-                    dst.write(enc)
-                os.replace(tmp_enc, zip_path)
-                _chmod_private(zip_path)
-            except Exception as e:
-                print(f"⛔ [backup] رمزگذاری PBKDF2+Fernet ناموفق (fail-closed): {e}")
+            if not _encrypt_file_inplace(zip_path, password):
                 try:
                     os.remove(zip_path)
                 except Exception:
@@ -7707,6 +7958,8 @@ WIZ_REPORTER_DUP = "reporter_dup"  # v2.19.2: پنجره‌ی گزارشِ مج�
 WIZ_OWNER_TICKET_REPLY = "owner_ticket_reply"
 WIZ_SET_CARD = "awaiting_card_info"
 WIZ_SET_CHANNEL = "awaiting_channel"
+WIZ_TRIAL_DAYS = "trial_days_pending"                    # v2.22.0: طولِ دورهٔ آزمایشی
+WIZ_SELF_BACKUP_GROUP = "self_backup_group_pending"      # v2.22.0: گروهِ بکاپِ ساعتیِ سلف
 WIZ_DEDICATED_TOKEN = "awaiting_dedicated_token"
 WIZ_DEDICATED_OWNER_ID = "awaiting_dedicated_owner_id"
 WIZ_DEDICATED_EXTEND_DAYS = "awaiting_dedicated_extend_days"
@@ -8270,7 +8523,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-22-v2.21.0"
+BUILD_VERSION = "2026-10-22-v2.22.0"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -12314,6 +12567,23 @@ __all__ = [
     'maybe_fulfill_group_order',
     'register_group_plan',
     'trial_enabled',
+    'trial_days',
+    'trial_plan_name',
+    'TRIAL_DAYS_SETTING',
+    'TRIAL_DAYS_MIN',
+    'TRIAL_DAYS_MAX',
+    'TRIAL_DAYS_DEFAULT',
+    'get_required_chats',
+    'set_required_chats',
+    'REQUIRED_CHATS_SETTING',
+    'REQUIRED_CHATS_MAX',
+    'self_backup_group',
+    'self_backup_enabled',
+    'SELF_BACKUP_GROUP_SETTING',
+    'SELF_BACKUP_ENABLED_SETTING',
+    'build_sessions_backup_zip',
+    'WIZ_TRIAL_DAYS',
+    'WIZ_SELF_BACKUP_GROUP',
     'ticket_message_count',
     'ensure_reporter_schema',
     'reporter_enabled',

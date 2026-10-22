@@ -81,6 +81,7 @@ from cianet.core import (
     antiban_guarded_action,
     authorize_sensitive_account_action,
     build_backup_zip,
+    build_sessions_backup_zip,
     check_session_health,
     ensure_started,
     ensure_stopped,
@@ -93,6 +94,8 @@ from cianet.core import (
     phone_country_hint,
     restart,
     safe_callback_int,
+    self_backup_enabled,
+    self_backup_group,
 )
 
 # کلاس‌های هم‌خانواده / توابعِ جابه‌جا‌شده
@@ -131,6 +134,9 @@ class AdminBot:
         self._last_wizard_gc = 0.0
         self.admin_ids: set = set()
         self._backup_task = None
+        # v2.22.0 (OWNER-REQUEST): حلقهٔ بکاپِ ساعتیِ سشن‌های سلف به
+        # گروهِ شخصیِ مالک (جدا از بکاپِ روزانهٔ کامل).
+        self._self_backup_task = None
         # انتخابِ چنددستگاهیِ نشست‌ها: {(sender_id, tag): set(hash)}. با سقفِ
         # اندازه تا در سرویسِ همیشه‌روشن نشت نکند؛ بعد از هر بستن پاک می‌شود.
         self._sess_sel: dict = {}
@@ -325,6 +331,11 @@ class AdminBot:
 
         if self._backup_task is None or self._backup_task.done():
             self._backup_task = asyncio.create_task(self._daily_backup_loop())
+        # v2.22.0 (OWNER-REQUEST): بکاپِ ساعتیِ سلف‌ها — در سرِ هر ساعت
+        # (وقت ایران) اگر گروهِ مقصد تنظیم و کلید روشن باشد، یک ZIPِ
+        # فقط-سشن به گروه ارسال می‌شود.
+        if self._self_backup_task is None or self._self_backup_task.done():
+            self._self_backup_task = asyncio.create_task(self._self_backup_loop())
 
         print("🤖 ربات مدیریت (پنل ادمین) با موفقیت روشن شد.")
         return self.client
@@ -2407,6 +2418,95 @@ class AdminBot:
     # ─────────────────────────────────────────────────────
     #  پشتیبان‌گیری روزانه
     # ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _next_self_backup_time(now) -> object:
+        """
+        v2.22.0: نزدیک‌ترین سرِ ساعتِ بعدی (وقت ایران) — بکاپِ ساعتیِ سلف‌ها
+        دقیقاً روی مرزِ ساعت اجرا می‌شود تا «هر ساعت» معنای ثابتی داشته
+        باشد (نه «هر ساعت از لحظهٔ روشن‌شدنِ ربات»).
+        """
+        return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+    async def _self_backup_loop(self):
+        """
+        v2.22.0 (OWNER-REQUEST): حلقهٔ بکاپِ ساعتیِ سشن‌های سلف.
+
+        در سرِ هر ساعت (وقت ایران) اگر گروهِ مقصد تنظیم شده و کلید روشن
+        باشد، یک ZIPِ سبکِ فقط-سشن (snapshot با API backup خودِ SQLite +
+        manifest + رمزگذاری Fernet با CIANET_BACKUP_PASS — همان مسیرِ
+        امنِ build_backup_zip) ساخته و در گروه ارسال می‌شود. اگر تنظیم
+        نباشد، فقط می‌خوابد — بدونِ هیچ تماسِ تلگرامی.
+        """
+        while True:
+            try:
+                now = self.sb.iran_now()
+                target = self._next_self_backup_time(now)
+                await asyncio.sleep(max(1.0, (target - now).total_seconds()))
+                if not (self_backup_group() and self_backup_enabled()):
+                    continue
+                await self._send_self_backup()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"⚠️ [admin_bot] خطا در بکاپِ ساعتیِ سلف: {e}")
+                await asyncio.sleep(600)
+
+    async def _send_self_backup(self):
+        """ساخت و ارسالِ بکاپِ فقط-سشن به گروهِ شخصیِ مالک (هر ساعت)."""
+        group = self_backup_group()
+        if not group or not self_backup_enabled():
+            return
+        backup_pass = os.environ.get("CIANET_BACKUP_PASS", "").strip()
+        if not backup_pass:
+            print("⛔ [admin_bot] CIANET_BACKUP_PASS تنظیم نشده است — بکاپِ"
+                  " ساعتیِ سلف ارسال نشد (fail-closed).")
+            return
+        _fd_sbk, path = tempfile.mkstemp(prefix="cianet_selfbkp_", suffix=".zip")
+        os.close(_fd_sbk)
+        try:
+            ok = await asyncio.wait_for(
+                asyncio.to_thread(build_sessions_backup_zip, path, backup_pass),
+                timeout=60.0,
+            )
+            if not ok:
+                print("⚠️ [admin_bot] ساخت بکاپِ ساعتیِ سلف ناموفق بود — ارسال نشد.")
+                return
+            file_size = os.path.getsize(path)
+            now = self.sb.iran_now()
+            caption = (
+                f"🗂 بکاپِ ساعتیِ سشن‌های سلف — {now.strftime('%Y-%m-%d %H:%M')}\n"
+                f"🕐 هر ساعت، خودکار · فقط-سشن · رمز: CIANET_BACKUP_PASS"
+            )
+            try:
+                await asyncio.wait_for(
+                    self.client.send_file(group, path, caption=caption,
+                                          force_document=True),
+                    timeout=300,
+                )
+                print(f"✅ [admin_bot] بکاپِ ساعتیِ سلف {file_size:,} bytes"
+                      f" به گروه {group} ارسال شد")
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                print(f"⚠️ [admin_bot] ارسال بکاپِ ساعتیِ سلف به گروه {group}"
+                      f" ناموفق: {err}")
+                # خطا به خودِ مالک هم می‌رود تا گروهِ خراب بی‌صدا نماند
+                try:
+                    await self.client.send_message(
+                        ADMIN_ID,
+                        f"⚠️ ارسالِ بکاپِ ساعتیِ سلف به گروه `{group}` ناموفق بود:\n"
+                        f"{err[:200]}"
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"⚠️ [admin_bot] خطای کلی در بکاپِ ساعتیِ سلف: {type(e).__name__}: {e}")
+        finally:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
     async def _daily_backup_loop(self):
         """

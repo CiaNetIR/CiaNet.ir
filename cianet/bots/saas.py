@@ -63,9 +63,14 @@ from cianet.core import (
     ROLE_USER,
     SCOPE_DEDICATED_BOT,
     SCOPE_RESELLER,
+    SELF_BACKUP_ENABLED_SETTING,
+    SELF_BACKUP_GROUP_SETTING,
     SELF_FEATURE_LIST,
     SESSIONS_DIR,
     SUPPORT_UNITS,
+    TRIAL_DAYS_MAX,
+    TRIAL_DAYS_MIN,
+    TRIAL_DAYS_SETTING,
     TRIAL_SETTING_KEY,
     USDT_TOMAN_FALLBACK,
     WHAT_IS_SELFBOT_TEXT,
@@ -94,8 +99,10 @@ from cianet.core import (
     WIZ_REPORTER_DUP,
     WIZ_REPORTER_FLOW,
     WIZ_REPORTER_TARGET,
+    WIZ_SELF_BACKUP_GROUP,
     WIZ_SET_CARD,
     WIZ_SET_CHANNEL,
+    WIZ_TRIAL_DAYS,
     WIZ_SET_WALLET,
     WIZ_TICKET_MSG,
     WIZ_TICKET_UNIT,
@@ -188,6 +195,7 @@ from cianet.core import (
     get_payment,
     get_pending_dedicated_bot_for_reseller,
     get_pricing,
+    get_required_chats,
     get_reseller_application,
     get_role,
     get_setting,
@@ -234,18 +242,24 @@ from cianet.core import (
     referral_stats,
     register_group_plan,
     remove_admin_or_reseller,
+    REQUIRED_CHATS_MAX,
     reseller_user_count,
     restore_backup_from_zip_async,
     review_payment_atomic,
     revoke_capability,
     safe_callback_int,
     search_users,
+    self_backup_enabled,
+    self_backup_group,
     set_active_subscription_expired,
     set_order_payment_id,
     set_pricing,
+    set_required_chats,
     set_setting,
     ticket_message_count,
+    trial_days,
     trial_enabled,
+    trial_plan_name,
     toggle_discount_code,
     unblock_saas_user,
     unlink_customer,
@@ -480,17 +494,30 @@ class SaaSBot:
     #  گیت عضویت کانال اجباری (همه به‌جز ادمین اصلی)
     # ─────────────────────────────────────────────────────
 
+    async def _chat_entity(self, chat: str):
+        """
+        resolve چت بر اساسِ نوعِ ورودی — v2.22.0: آیدیِ عددی (گروهِ
+        خصوصی/سوپرگروه؛ ربات باید آن را بشناسد یعنی عضو باشد) یا
+        یوزرنیم/لینک (چتِ عمومی). تنها نقطهٔ resolve گیتِ چندچتی.
+        """
+        s = str(chat or "").strip()
+        if s.lstrip("-").isdigit():
+            return await self.client.get_entity(int(s))
+        return await self.client.get_entity(s)
+
     async def _is_channel_member(self, user_id: int, channel: str) -> bool:
         """
-        چک عضویت در کانال اجباری. channel می‌تواند یوزرنیم (با/بدون @) یا
-        لینک t.me باشد (کانال باید عمومی باشد تا قابل resolve باشد).
-        هر خطا = «عضو نیست» (fail-closed): اگر کانال قابل‌حل نباشد یا چک
+        چک عضویت در یک کانال/گروهِ اجباری. channel می‌تواند یوزرنیم
+        (با/بدون @)، لینک t.me یا آیدیِ عددیِ چت باشد (v2.22.0 — گروه‌های
+        خصوصی هم پشتیبانی می‌شوند؛ ربات باید عضو باشد تا بتواند resolve
+        و چک کند).
+        هر خطا = «عضو نیست» (fail-closed): اگر چت قابل‌حل نباشد یا چک
         شکست بخورد، دسترسی داده نمی‌شود — ادمین اصلی همیشه مستثنی است و
         می‌تواند تنظیم را اصلاح کند.
         """
         from telethon.tl.functions.channels import GetParticipantRequest
         try:
-            entity = await self.client.get_entity(channel)
+            entity = await self._chat_entity(channel)
             await self.client(GetParticipantRequest(channel=entity, participant=user_id))
             return True
         except Exception:
@@ -498,19 +525,35 @@ class SaaSBot:
 
     async def _resolve_channel(self, channel: str):
         """
-        resolve واقعی کانال با تلگرام — قبل از ذخیره/بررسی کانال اجباری.
-        ورودی: یوزرنیم، @یوزرنیم یا لینک t.me. خروجی:
-        (True, title, normalized) یا (False, error, None).
+        resolve واقعی کانال/گروه با تلگرام — قبل از ذخیره/بررسی.
+        ورودی: یوزرنیم، @یوزرنیم، لینک t.me یا آیدیِ عددی (v2.22.0 — گروهِ
+        خصوصی؛ ربات باید عضو باشد). خروجی:
+        (True, title, normalized, needs_invite) یا (False, error, None, None).
+        needs_invite=True یعنی چتِ خصوصیِ بدونِ یوزرنیم است و برای کارتِ
+        لینک در پیامِ گیت به لینکِ دعوت نیاز داریم (گامِ بعدِ ویزارد).
         """
-        ch = _normalize_channel(channel)
+        s = str(channel or "").strip()
+        if s.lstrip("-").isdigit():
+            try:
+                entity = await self.client.get_entity(int(s))
+            except Exception as e:
+                return False, str(e)[:80], None, None
+            title = getattr(entity, "title", None) or s
+            username = (getattr(entity, "username", None) or "").strip().lower()
+            if username:
+                # چتی که آیدیِ عددی‌اش را فرستادیم ولی یوزرنیم عمومی دارد
+                # → مثل چتِ عمومی ذخیره می‌شود (لینک t.me سالم است)
+                return True, title, username, False
+            return True, title, str(int(s)), True
+        ch = _normalize_channel(s)
         if not ch:
-            return False, "یوزرنیم نامعتبر است", None
+            return False, "یوزرنیم نامعتبر است", None, None
         try:
             entity = await self.client.get_entity(ch)
             title = getattr(entity, "title", None) or ch
-            return True, title, ch
+            return True, title, ch, False
         except Exception as e:
-            return False, str(e)[:80], None
+            return False, str(e)[:80], None, None
 
     def _reset_gate_state(self) -> None:
         """
@@ -531,18 +574,27 @@ class SaaSBot:
         self._gate_msg_id.clear()
 
     async def _channel_gate(self, user_id: int, force: bool = False) -> bool:
-        """True = مجاز به استفاده از ربات. فقط ادمین اصلی (ADMIN_ID) مستثنی است."""
+        """True = مجاز به استفاده از ربات. فقط ادمین اصلی (ADMIN_ID) مستثنی است.
+
+        v2.22.0 (OWNER-REQUEST): همهٔ کانال‌ها و گروه‌های لیست چک می‌شوند —
+        کاربر باید عضوِ **همهٔ** آنها باشد؛ عضویت در یکی کافی نیست. نتیجهٔ
+        کل (نه هر چت) کش می‌شود — همان ۶۰ ثانیهٔ قبل.
+        """
         if user_id == ADMIN_ID:
             return True
-        channel = (get_setting("required_channel") or "").strip()
-        if not channel:
+        chats = get_required_chats()
+        if not chats:
             return True
         now = time.time()
         if not force:
             cached = self._gate_cache.get(user_id)
             if cached and now - cached[0] < 60:
                 return cached[1]
-        result = await self._is_channel_member(user_id, channel)
+        result = True
+        for ch in chats:
+            if not await self._is_channel_member(user_id, ch["u"]):
+                result = False
+                break
         self._gate_cache[user_id] = (now, result)
         self._prune_gate_state(now)
         return result
@@ -613,9 +665,10 @@ class SaaSBot:
 
     async def _send_channel_gate_message(self, event, denied: bool = False):
         """
-        پیام گیت عضویت: متن + کادر شیشه‌ایِ کانال (دکمه‌ی لینک عریض) +
-        دکمه‌ی «بررسی عضویت» زیر آن. denied=True یعنی این یک بررسیِ
-        ناموفقِ تازه است و پیام «عضو نشدید» نمایش داده می‌شود.
+        پیام گیت عضویت: متن + کادر(های) شیشه‌ایِ کانال‌ها/گروه‌ها (هر چت
+        یک دکمه‌ی لینکِ عریض — v2.22.0 چندچتی) + دکمه‌ی «بررسی عضویت»
+        زیر آنها. denied=True یعنی این یک بررسیِ ناموفقِ تازه است و پیام
+        «عضو نشدید» نمایش داده می‌شود.
         هر مسیرِ ردشدن، کاربر را به _gate_blocked اضافه می‌کند تا اگر بعداً
         عضو شد، پیام خوشامد «حالا می‌تونی استفاده کنی» بگیرد.
         """
@@ -626,28 +679,41 @@ class SaaSBot:
         # BUG-26: به‌روزرسانی مهرِ زمانی برای هرسِ TTL (ورودی‌های تازه
         # هرگز مشمول حذفِ قدیمی‌ها نمی‌شوند).
         self._gate_blocked_ts[event.sender_id] = time.time()
-        channel = (get_setting("required_channel") or "").strip()
-        username = _normalize_channel(channel)
-        link = f"https://t.me/{username}" if username else channel
-        # کادر شیشه‌ای با نام واقعی کانال (اگر هنگام تنظیم ذخیره شده باشد)،
-        # وگرنه @username
-        card_label = (get_setting("required_channel_title") or "").strip() or f"@{username}"
+        chats = get_required_chats()
+        # کادرهای شیشه‌ای: هر چت یک دکمه‌ی لینکِ عریض با نامِ واقعی
+        # (ذخیره‌شده هنگامِ تنظیم) یا @یوزرنیم. چتِ خصوصیِ بدونِ لینکِ
+        # دعوت لینک‌پذیر نیست — نامش در متن می‌آید تا کاربر گم نشود.
+        buttons = []
+        unlinked = []
+        for ch in chats:
+            is_id = ch["u"].lstrip("-").isdigit()
+            label = ch["t"] or (f"@{ch['u']}" if not is_id else ch["u"])
+            if ch["l"]:
+                link = ch["l"]
+            elif not is_id:
+                link = f"https://t.me/{ch['u']}"
+            else:
+                link = None
+            if link:
+                buttons.append([Button.url(f"💠 {label}", link)])
+            else:
+                unlinked.append(label)
         if denied:
             text = (
-                "❌ **شما هنوز عضو کانال نشدید!**\n\n"
-                "برای استفاده از خدمات ربات، ابتدا در کانال زیر عضو شوید و "
-                "سپس دکمه‌ی «بررسی عضویت» را بزنید:"
+                "❌ **شما هنوز عضوِ همه‌ی کانال‌ها/گروه‌ها نشدید!**\n\n"
+                "برای استفاده از خدمات ربات، ابتدا در چت‌های زیر عضو شو و "
+                "سپس دکمه‌ی «بررسی عضویت» را بزن:"
             )
         else:
             text = (
-                "برای استفاده از خدمات ربات، ابتدا در کانال زیر عضو شوید 👇\n\n"
-                "سپس دکمه‌ی «بررسی عضویت» را بزنید."
+                "برای استفاده از خدمات ربات، ابتدا در کانال‌ها/گروه‌های زیر "
+                "عضو شو 👇\n\nسپس دکمه‌ی «بررسی عضویت» را بزن."
             )
-        buttons = [
-            # کادر شیشه‌ای کانال: یک دکمه‌ی لینکِ عریض که مثل کارت نمایش داده می‌شود
-            [Button.url(f"💠 {card_label}", link)],
-            [UI.go("🔍 بررسی عضویت", b"channel_retry")],
-        ]
+        if unlinked:
+            text += "\n\n" + " · ".join(
+                f"{UI.GRAY} «{lbl}» (لینک ندارد — از مدیرِ ربات بخواه)"
+                for lbl in unlinked)
+        buttons.append([UI.go("🔍 بررسی عضویت", b"channel_retry")])
         # چتِ تمیز: قبل از ارسالِ پیامِ جدید، پیامِ گیتِ قبلیِ همین کاربر را
         # (اگر هنوز سر جایش است) حذف کن — بدون این، هر پیامِ متنیِ کاربرِ
         # بسته‌شده یک کپیِ جدیدِ روی‌هم از پیام گیت می‌سازد.
@@ -693,6 +759,23 @@ class SaaSBot:
         wiz = self.admin_panel.wizards.pop(user_id, None)
         if wiz:
             await self.admin_panel._cleanup_wizard_temp_client(wiz)
+
+    async def _show_page(self, event, text: str, buttons):
+        """
+        رندرِ route-agnostic صفحه (الگوی v2.19.3 در reporter.py): دکمه‌ی
+        CallbackQuery → edit همان پیام؛ پیامِ متنی (ویزارد) → respond
+        به‌عنوان پیامِ جدیدِ بات با همان دکمه‌ها. بدون این، فراخوانیِ صفحه‌های
+        مالک بعد از ذخیرهٔ ویزاردِ متنی با MessageAuthorRequiredError
+        می‌شکست (بات نویسندهٔ پیامِ کاربر نیست).
+        """
+        try:
+            from telethon import events as _tl_events
+            if isinstance(event, _tl_events.CallbackQuery.Event):
+                await event.edit(text, buttons=buttons)
+                return
+        except Exception:
+            pass
+        await event.respond(text, buttons=buttons)
 
     def _start_own_wizard(self, user_id: int, state, data: dict):
         # قبل از شروع یک ویزارد جدید ساس، ویزارد نیمه‌کاره‌ی پنل (اگر باز
@@ -927,17 +1010,17 @@ class SaaSBot:
         # نویز است. نماینده مثل کاربر عادی اشتراکِ خودش را دارد.
         needs_sub = role not in (ROLE_OWNER, ROLE_ADMIN)
 
-        # ── منوی کاربر (v2.17.0 MENU-CLEANUP): فشرده و کوتاه ──
+        # ── منوی کاربر (v2.22.0 MENU-REORG · OWNER-REQUEST): فشرده، جفت‌شده
+        # و هر بخش در جایِ خودش — ایموجی‌های ثابتِ معنادار ──
         # ردیف ۱ (تکی):    [انقضای سلف: {days} روز]
         # ردیف ۲ (شرطی):   اگه اشتراک فعال/ادمین بود: [لاگین] | [خرید سلف]
         #                  در غیر این صورت: [خرید سلف]
-        # ردیف ۳ (تکی):    [حساب کاربری] — حالا شامل کیف پول/سفارش‌ها/
-        #                  لایسنس/راهنماها هم هست (از سطح اول منتقل شدند)
-        # ردیف ۴ (شرطی):   [ریپورتر] — فقط اگر کاربر اکانتِ خودش را لاگین
-        #                  کرده باشد (v2.17.0)
+        # ردیف ۳ (تکی):    [ریپورتر] | [فعال‌سازی با لایسنس] — ابزارها
+        # ردیف ۴ (شرطی):   [حساب کاربری] | [نمایندگی سلف] برای USER؛
+        #                  [حساب کاربری] تنها برای بقیه — بخشِ نمایندگی از
+        #                  داخلِ «حساب کاربری» به جایگاهِ خودش در منوی اصلی آمد
         # ردیف ۵ (تکی):    [پشتیبانی]
         # ردیف ۶ (شرطی):   فقط برای admin/owner: [پنل مدیریت / ادمین]
-        # ردیف ۷ (شرطی):   فقط USER: [نمایندگی سلف]
         #
         # v2.17.0: «📖 راهنمای فعال‌سازی»، «ℹ️ سلف چیست؟» و «🔑 خرید با
         # لایسنس» از سطح اول حذف و به «👤 حساب کاربری» منتقل شدند — همه‌ی
@@ -972,33 +1055,41 @@ class SaaSBot:
 
         # v2.8.6 BUGFIX: دکمه‌ی «👤 حساب کاربری» اضافه شد — این دکمه
         # مسیرِ دسترسی به کیف پول، سفارش‌ها، دعوت دوستان و راهنماست.
-        # قبلاً این دکمه وجود نداشت و کدِ _show_account_card (که شامل
-        # «💰 کیف پول» است) کاملاً unreachable بود.
-        # v2.19.0 (OWNER-REQUEST): «🔑 فعال‌سازی با لایسنس» از «حساب کاربری»
-        # به همین ردیفِ منوی اصلی منتقل شد — فعال‌سازی برای کاربرِ تازه
-        # مهم‌ترین عمل است و نباید یک لایه عمیق باشد.
-        buttons.append([
-            UI.go("👤 حساب کاربری", "user_account"),
-            UI.go("🔑 فعال‌سازی با لایسنس", "user_activate_license"),
-        ])
+        # v2.19.0 (OWNER-REQUEST): «🔑 فعال‌سازی با لایسنس» به سطح اولِ منو
+        # برگشت — فعال‌سازی برای کاربرِ تازه مهم‌ترین عمل است و نباید یک
+        # لایه عمیق باشد. v2.22.0 (MENU-REORG): با ریپورتر هم‌ردیف شد.
 
         # v2.12.16 (USER-REQUEST): دکمه‌ی «🤖 سلف من» کاملاً حذف شد.
         # قبلاً برای همه‌ی نقش‌ها وجود داشت و کاربر عادی بعد از cancel به
         # پنل مدیریتِ ادمین می‌افتاد (باگ UX). v2.12.15 برای USER پنهان
         # شد ولی الان OWNER/ADMIN/RESELLER هم نمی‌خوان. کلاً حذف می‌شه.
 
+        # ── ردیف ۳ (v2.22.0 MENU-REORG): ابزارها — ریپورتر + لایسنس.
+        # ریپورتر از v2.19.2 برای **همه‌ی کاربران** نمایش داده می‌شود
+        # (خواسته‌ی مالک). الزامِ استفاده هنوز همان است: کاربر باید اکانتِ
+        # خودش را در ربات لاگین کرده باشد — گیتِ استفاده در route
+        # (user_reporter) و در خودِ ماژول چک می‌شود و کاربرِ لاگین‌نکرده
+        # صفحه‌ی راهنما با دکمه‌ی لاگین می‌بیند.
+        buttons.append([
+            UI.go("🎙 ریپورتر", "user_reporter"),
+            UI.go("🔑 فعال‌سازی با لایسنس", "user_activate_license"),
+        ])
+
+        # ── ردیف ۴ (v2.22.0 MENU-REORG · OWNER-REQUEST): حساب کاربری —
+        # «👥 نمایندگی» از داخلِ کارتِ حساب به جایگاهِ خودش در منوی اصلی
+        # آمد (هر بخش در جایِ شخصیِ خودش) و برای USER عادی کنارِ حساب
+        # می‌نشیند؛ نماینده‌های فعلی و نقش‌های مدیریتی فقط حساب می‌بینند
+        # (پنلِ نمایندگیِ خودشان جای دیگری است).
+        if role == ROLE_USER and not self._user_has_pending_reseller(uid):
+            buttons.append([
+                UI.go("👤 حساب کاربری", "user_account"),
+                UI.go("🤝 نمایندگی سلف", "user_reseller_info"),
+            ])
+        else:
+            buttons.append([UI.go("👤 حساب کاربری", "user_account")])
+
         # ── ردیف ۵ (تکی): پشتیبانی
         buttons.append([UI.go("☎️ پشتیبانی", "user_support")])
-
-        # ── ردیف ۵.۵ (v2.16.1 · v2.17.0 · v2.19.2 OWNER-REQUEST):
-        # ریپورتر — از v2.19.2 برای **همه‌ی کاربران** نمایش داده می‌شود
-        # (خواسته‌ی مالک: گزینه برای تمام کاربرا باشد). الزامِ استفاده هنوز
-        # همان است: کاربر باید اکانتِ خودش را در ربات لاگین کرده باشد —
-        # گیتِ استفاده در route (user_reporter) و در خودِ ماژول چک می‌شود
-        # و کاربرِ لاگین‌نکرده صفحه‌ی راهنما با دکمه‌ی لاگین می‌بیند.
-        # طبق درخواستِ مالک (v2.19.0) این دکمه در «منوی اصلی» است.
-        # منطق در cianet/bots/reporter.py (نقطه‌ی اتصال: user_reporter).
-        buttons.append([UI.go("🎙 ریپورتر", "user_reporter")])
 
         # ── ردیف ۶ (شرطی): فقط برای privileged
         if privileged:
@@ -1007,14 +1098,6 @@ class SaaSBot:
             if todo:
                 label = f"🎛 ادمین · {fa_digits(todo)} کارِ معوق"
             buttons.append([UI.item(label, "pending" if todo else "active", "admin_hub")])
-
-        # ── ردیف ۷ (v2.0): نمایندگی سلف — برای USER معمولی
-        # فقط برای کاربرانی که هنوز نماینده نیستن، یه پیشنهادِ نمایندگی
-        # نشون داده می‌شه. اگه قبلاً RESELLER شده، نیازی نیست (پنل ادمین
-        # خودش لینک reseller رو داره). اگه OWNER/ADMIN هستن، نمایندگی
-        # براشون معنی نداره.
-        if role == ROLE_USER and not self._user_has_pending_reseller(uid):
-            buttons.append([UI.go("🤝 نمایندگی سلف", "user_reseller_info")])
 
         # بدنه‌ی صفحه: خلاصه‌ی وضعیت (انقضا + تعداد سلف)
         body = []
@@ -1169,12 +1252,14 @@ class SaaSBot:
         ]
 
         # «حساب کاربری» حالا هابِ همه‌ی کارهای کم‌کاربرد است — تا منوی اصلی
-        # در چهار دکمه جا شود. هر دکمه‌ای که از اینجا حذف می‌شود، قبلاً یک
-        # دکمه‌ی سطحِ اول بود و منو را شلوغ می‌کرد.
+        # در چهار ردیفِ جفت‌شده جا شود. هر دکمه‌ای که از اینجا حذف می‌شود،
+        # قبلاً یک دکمه‌ی سطحِ اول بود و منو را شلوغ می‌کرد.
         # v2.8.7: آیتم‌های تکراری (که در منوی اصلی هم هستن) حذف شدند.
-        # _show_account_card حالا فقط چیزهایی رو نشون می‌ده که در منوی
-        # اصلی نیستن — یعنی کیف پول، سفارش‌ها، دعوت دوستان. این جلوی
-        # شلوغیِ منو رو می‌گیره.
+        # _show_account_card فقط چیزهایی رو نشون می‌ده که در منوی
+        # اصلی نیستن — یعنی کیف پول، سفارش‌ها، دعوت دوستان.
+        # v2.22.0 (OWNER-REQUEST · MENU-REORG): «👥 نمایندگی» از اینجا
+        # حذف شد — بخشِ نمایندگی جایِ خودش را در منوی اصلی دارد (ردیفِ
+        # «👤 حساب کاربری | 🤝 نمایندگی سلف») و اینجا دیگر تکرار نمی‌شود.
         items = [
             UI.go("💰 کیف پول", "user_wallet"),
             UI.go("🧾 سفارش‌ها", "user_orders"),
@@ -1183,16 +1268,14 @@ class SaaSBot:
         # v2.17.0 (MENU-CLEANUP): راهنماها از سطح اولِ منو به اینجا
         # منتقل شدند — routeها بدون تغییر، فقط یک لایه عمیق‌تر.
         # v2.19.0 (OWNER-REQUEST): «🔑 فعال‌سازی با لایسنس» به منوی اصلی
-        # (ردیفِ «👤 حساب کاربری») برگشت — اینجا دیگر تکرار نمی‌شود.
+        # (ردیفِ ابزارها) برگشت — اینجا دیگر تکرار نمی‌شود.
         items.append(UI.go("📖 راهنمای فعال‌سازی", "user_help"))
         items.append(UI.go("ℹ️ سلف چیست؟", "user_what_is"))
-        if self._role(uid) == ROLE_USER:
-            items.append(UI.go("👥 نمایندگی", "user_reseller_info"))
         buttons = self._pair_buttons(items)
         buttons.append(UI.nav_row())
         await event.respond(
             UI.screen("👤 حساب کاربری", body=body,
-                      subtitle="کارهای مربوط به حساب خودت اینجاست."),
+                      subtitle="کیف پول، سفارش‌ها، دعوت دوستان و راهنماها — همه اینجاست."),
             buttons=buttons,
         )
 
@@ -1453,7 +1536,9 @@ class SaaSBot:
         # PATCH (v2.0.8): دکمه‌ی «🔄 آپدیت و ورژن» فقط برای OWNER اضافه شد.
         sec4 = []
         if role == ROLE_OWNER:
-            sec4.append(UI.go("📢 کانال عضویت", "owner_channel_set", primary=True))
+            # v2.22.0: به صفحهٔ فهرستِ کانال‌ها/گروه‌ها می‌رود (نه مستقیمِ
+            # ویزاردِ افزودن) — چون لیست چندچتی است و مدیریتش آنجاست.
+            sec4.append(UI.go("📢 کانال‌های عضویت", "owner_channel", primary=True))
             sec4.append(UI.go("💾 بکاپ و بازیابی", "admin_backup"))
             sec4.append(UI.go("🔄 آپدیت و ورژن", "owner_update", primary=True, tone="success"))
             sec4.append(UI.go("🌐 پنل وب", "owner_web_panel", tone="success"))
@@ -2348,30 +2433,41 @@ class SaaSBot:
     async def _admin_show_settings_hub(self, event):
         # تنظیمات مالی (کارت/USDT/قیمت‌ها) فقط از «💰 مالی» — اینجا تکرار
         # نمی‌شوند تا مسیر تکراری/گیج‌کننده نماند (بخش ۱۸ اسپک).
-        ch = get_setting("required_channel")
+        chats = get_required_chats()
         # PATCH (v2.4.0): language toggle button
         lang_label = "🌐 زبان: فارسی" if CIANET_LANG == "fa" else "🌐 Language: English"
-        # v2.17.0: گزینه‌های مالک — آزمایشی ۷ روزه + اشتراک دسته‌جمعی
+        # v2.17.0: گزینه‌های مالک — آزمایشی + اشتراک دسته‌جمعی.
+        # v2.22.0 (OWNER-REQUEST): کانال‌های اجباری چندتایی شدند (کانال +
+        # گروه) و آزمایشی صفحهٔ مخصوصِ خودش را گرفت (روشن/خاموش + تعدادِ
+        # روزهایِ قابلِ تنظیم).
         trial_on = trial_enabled()
+        days = trial_days()
         group_on = group_sub_enabled()
         group_discount = group_sub_discount_percent()
         buttons = [
-            [UI.item("📢 کانال اجباری عضویت", "active" if ch else "none", "owner_channel")],
-            [UI.item("🎁 اشتراک آزمایشی ۷ روزه (کاربران جدید)",
-                     "active" if trial_on else "off", "owner_toggle_trial")],
+            [UI.item(f"📢 کانال‌های اجباری عضویت ({fa_digits(len(chats))})",
+                     "active" if chats else "none", "owner_channel")],
+            [UI.item(f"🎁 اشتراک آزمایشی ({fa_digits(days)} روزه)",
+                     "active" if trial_on else "off", "owner_trial")],
             [UI.item("👥 اشتراک دسته‌جمعی", "active" if group_on else "off",
                      "owner_toggle_group_sub")],
             [UI.go(lang_label, "owner_toggle_lang")],
             UI.nav_row(),
         ]
+        if chats:
+            ch_lines = " · ".join(
+                (c["t"] or f"@{c['u']}") if not c["u"].lstrip("-").isdigit()
+                else (c["t"] or c["u"])
+                for c in chats)
+        else:
+            ch_lines = "غیرفعال (همه می‌توانند وارد شوند)"
         await event.edit(
             UI.screen(
                 "⚙️ تنظیمات سیستم",
-                body=[f"{UI.dot(bool(ch))} کانال اجباری: "
-                      + (f"`{ch}`" if ch else "غیرفعال (همه می‌توانند وارد شوند)"),
+                body=[f"{UI.dot(bool(chats))} عضویت اجباری ({fa_digits(len(chats))} چت): " + ch_lines,
                       f"🌐 زبان فعلی: {'فارسی' if CIANET_LANG == 'fa' else 'English'}",
-                      f"{UI.dot(trial_on)} اشتراک آزمایشی ۷ روزه برای کاربران جدید: "
-                      + ("روشن" if trial_on else "خاموش"),
+                      f"{UI.dot(trial_on)} اشتراک آزمایشیِ کاربران جدید: "
+                      + (f"روشن — {fa_digits(days)} روزه" if trial_on else "خاموش"),
                       f"{UI.dot(group_on)} اشتراک دسته‌جمعی: "
                       + ("روشن" if group_on else "خاموش")
                       + f" (تخفیف گروهی: {fa_digits(group_discount)}٪)"],
@@ -2380,9 +2476,60 @@ class SaaSBot:
             buttons=buttons,
         )
 
+    async def _owner_show_trial_settings(self, event):
+        """
+        🎁 صفحهٔ تنظیماتِ اشتراکِ آزمایشی (v2.22.0 · OWNER-REQUEST):
+        روشن/خاموش + تعدادِ روزهایِ دوره (۱ تا ۳۰) — قبلاً فقط کلیدِ
+        روشن/خاموش با ۷ روزِ ثابت وجود داشت.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط مالک.", alert=True)
+            return
+        on = trial_enabled()
+        days = trial_days()
+        body = [
+            f"{UI.dot(on)} اعطایِ خودکار به کاربرانِ جدید: "
+            + ("روشن" if on else "خاموش"),
+            f"📅 طولِ دوره: {fa_digits(days)} روز",
+            "",
+            "کاربرِ تازه که /start بزند، یک‌بار در طول عمرش این اشتراک را"
+            " می‌گیرد (تغییرِ تعدادِ روزها باعثِ اعطایِ دوباره به همان"
+            " کاربر نمی‌شود).",
+        ]
+        buttons = [
+            [UI.toggle("اعطایِ خودکار", on, "owner_toggle_trial")],
+            [UI.go(f"📅 تعدادِ روزها: {fa_digits(days)}", "owner_trial_days")],
+            UI.nav_row(),
+        ]
+        await self._show_page(
+            event,
+            UI.screen("🎁 اشتراک آزمایشی", body=body,
+                      subtitle="دورهٔ رایگانِ کاربرانِ جدید — تعدادِ روزها"
+                               " از ۱ تا ۳۰ قابلِ تنظیم است.",
+                      hint="از «📅 تعدادِ روزها» طولِ دوره را عوض کن."),
+            buttons,
+        )
+
+    async def _start_trial_days_wizard(self, event):
+        """ویزاردِ تعدادِ روزهایِ دورهٔ آزمایشی (OWNER)."""
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_TRIAL_DAYS, {})
+        await event.edit(
+            f"طولِ دورهٔ آزمایشی چند روز باشد؟ (۱ تا {fa_digits(TRIAL_DAYS_MAX)})\n\n"
+            "یک عدد بفرست:",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+        )
+
     async def _admin_show_backup_hub(self, event):
         # PATCH (v2.3.0): نمایش وضعیت scheduled backup
         backup_hours_str = ", ".join(str(h) for h in BACKUP_HOURS_IRAN)
+        # v2.22.0 (OWNER-REQUEST): بکاپِ ساعتیِ سشن‌های سلف به گروهِ شخصی
+        grp = self_backup_group()
+        sb_on = self_backup_enabled() and bool(grp)
+        sb_state = "active" if sb_on else ("off" if grp else "none")
+        sb_line = (f"🗂 **بکاپِ ساعتیِ سلف‌ها**: هر ساعت در سرِ ساعت به «"
+                   + (f"گروه `{grp}`" if grp else "گروهِ تنظیم‌نشده")
+                   + "» — " + ("روشن" if sb_on else "خاموش"))
         body = [
             f"{UI.GREEN} **Backup** — یک فایل ZIP کامل از دیتابیس‌ها، "
             f"تنظیمات و سشن‌ها می‌سازد. کاملاً بی‌خطر.",
@@ -2390,11 +2537,14 @@ class SaaSBot:
             f"جایگزین می‌کند. قبلش یک Backup اضطراری خودکار گرفته می‌شود.",
             "",
             f"⏰ **بکاپ خودکار**: روزانه در ساعت‌های {backup_hours_str} (وقت ایران)",
-            f"{UI.GRAY} برای تغییر، در فایل env: CIANET_BACKUP_HOURS=\"0,12\"",
+            sb_line,
+            f"{UI.GRAY} برای تغییرِ برنامهٔ روزانه، در فایل env: CIANET_BACKUP_HOURS=\"0,12\"",
         ]
         buttons = [
             [UI.confirm("گرفتن Backup", "owner_backup")],
             [UI.danger("بازیابی از Backup", "owner_db_restore")],
+            [UI.item("🗂 بکاپِ ساعتیِ سلف‌ها به گروه", sb_state,
+                     "owner_self_backup")],
             UI.nav_row(),
         ]
         await event.edit(
@@ -2402,9 +2552,63 @@ class SaaSBot:
                 "💾 Backup و Restore",
                 body=body,
                 subtitle="پشتیبان‌گیری و بازیابیِ کلِ سیستم.",
-                hint="قبل از هر Restore، حتماً یک Backup تازه بگیر.",
+                hint="بکاپِ ساعتیِ سلف‌ها از «🗂» جداگانه تنظیم می‌شود.",
             ),
             buttons=buttons,
+        )
+
+    async def _owner_show_self_backup(self, event):
+        """
+        🗂 تنظیماتِ بکاپِ ساعتیِ سشن‌های سلف (v2.22.0 · OWNER-REQUEST):
+        گروهِ شخصیِ مقصد + کلیدِ روشن/خاموش. هر ساعت در سرِ ساعت، یک
+        ZIPِ سبکِ فقط-سشن (رمزگذاری‌شده با همان CIANET_BACKUP_PASS)
+        در گروه ارسال می‌شود.
+        """
+        if self._role(event.sender_id) != ROLE_OWNER:
+            await event.answer("⛔ فقط مالک.", alert=True)
+            return
+        grp = self_backup_group()
+        enabled = self_backup_enabled()
+        on = enabled and bool(grp)
+        body = [
+            "بکاپِ سبکِ **فقط سشن‌های سلف**، هر ساعت در سرِ ساعت، به یک"
+            " گروهِ شخصیِ تلگرامی — اگر سرور بیاید پایین یا فایل‌ها"
+            " از بین بروند، لاگینِ هیچ کاربری از دست نمی‌رود.",
+            "",
+            (f"{UI.GREEN} گروه مقصد: `{grp}`" if grp
+             else f"{UI.GRAY} گروه مقصد: تنظیم نشده"),
+            f"{UI.dot(on)} وضعیت: " + ("روشن" if on else "خاموش"),
+            "",
+            f"{UI.GRAY} رمزِ فایل همان CIANET_BACKUP_PASS است و فایل"
+            " فقط-سشن است (دیتابیس‌ها در بکاپِ روزانهٔ کامل می‌مانند).",
+        ]
+        buttons = []
+        if grp:
+            buttons.append([UI.toggle("ارسالِ ساعتی", on,
+                                      "owner_self_backup_toggle")])
+        buttons.append([UI.go("✏️ تنظیم گروه", "owner_self_backup_set")])
+        if grp:
+            buttons.append([UI.danger("⛔ حذف گروه", "owner_self_backup_clear")])
+        buttons.append(UI.nav_row())
+        await self._show_page(
+            event,
+            UI.screen("🗂 بکاپِ ساعتیِ سلف‌ها", body=body,
+                      subtitle="گروهِ شخصی + هر ساعت یک بکاپِ سبک از سشن‌ها.",
+                      hint="ربات باید عضوِ گروه باشد؛ آیدی عددی یا فوروارد"
+                           " از خودِ گروه کافی است."),
+            buttons,
+        )
+
+    async def _owner_start_self_backup_set(self, event):
+        """ویزاردِ تنظیمِ گروهِ بکاپِ ساعتی (OWNER) — آیدی عددی یا فوروارد."""
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self._start_own_wizard(event.sender_id, WIZ_SELF_BACKUP_GROUP, {})
+        await event.edit(
+            "آیدیِ عددیِ گروهِ مقصد را بفرست (مثل `-1001234567890`) **یا"
+            " یک پیام از همان گروه را فوروارد کن** — آیدی از رویِ فوروارد"
+            " خودکار خوانده می‌شود.\n\n"
+            "⚠️ ربات باید عضوِ آن گروه باشد.",
+            buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
         )
 
     # ─────────────────────────────────────────────────────
@@ -3078,7 +3282,9 @@ class SaaSBot:
     # ══════════════════════════════════════════════════════════════
 
     async def _owner_toggle_trial(self, event):
-        """🎁 روشن/خاموش‌کردن اشتراک آزمایشی ۷ روزه برای کاربران جدید."""
+        """🎁 روشن/خاموش‌کردنِ اعطایِ خودکارِ اشتراکِ آزمایشی به کاربرانِ جدید.
+        v2.22.0: برگشت به صفحهٔ مخصوصِ آزمایشی (نه هابِ تنظیمات) — چون
+        تعدادِ روزها هم آنجاست و کلِ بخش یک‌جا دیده می‌شود."""
         if self._role(event.sender_id) != ROLE_OWNER:
             await event.answer("⛔ فقط مالک.", alert=True)
             return
@@ -3087,10 +3293,10 @@ class SaaSBot:
         log_action(event.sender_id, "trial_toggled", f"new={new_val}")
         try:
             await event.answer(
-                "🎁 اشتراک آزمایشی: " + ("روشن" if new_val == "1" else "خاموش"))
+                "🎁 اعطایِ خودکار: " + ("روشن" if new_val == "1" else "خاموش"))
         except Exception:
             pass
-        await self._admin_show_settings_hub(event)
+        await self._owner_show_trial_settings(event)
 
     async def _owner_toggle_group_sub(self, event):
         """👥 روشن/خاموش‌کردن خرید اشتراک دسته‌جمعی."""
@@ -4813,71 +5019,125 @@ class SaaSBot:
         )
 
     async def _owner_show_channel_settings(self, event):
-        current = (get_setting("required_channel") or "").strip()
+        """
+        📢 صفحهٔ کانال‌ها/گروه‌های اجباری (v2.22.0 چندچتی): فهرستِ همهٔ
+        چت‌ها با دکمهٔ حذفِ هرکدام + افزودن + بررسیِ همه + حذفِ همه.
+        """
+        chats = get_required_chats()
         is_owner = self._role(event.sender_id) == ROLE_OWNER
-        title = (get_setting("required_channel_title") or "").strip()
-        blocked_n = get_setting("gate_blocked_count", "0")
-        rejoined_n = get_setting("gate_rejoined_count", "0")
-        if current:
-            name_line = f"📢 {title} (`{current}`)" if title else f"📢 کانال: `{current}`"
-            text = (f"**کانال اجباری عضویت:**\n{name_line}\n\n"
-                    "همه (به‌جز ادمین اصلی) برای استفاده از ربات باید عضو این کانال باشن.\n\n"
-                    f"📊 آمار گیت: {blocked_n} بسته‌شدن | {rejoined_n} دوباره‌عضویت")
-            buttons = [[UI.go("🔍 بررسی کانال", b"owner_channel_check")]]
+
+        def _stat_int(v):
+            try:
+                return int(str(v))
+            except (TypeError, ValueError):
+                return 0
+
+        blocked_n = _stat_int(get_setting("gate_blocked_count", "0"))
+        rejoined_n = _stat_int(get_setting("gate_rejoined_count", "0"))
+        if chats:
+            body = [
+                f"همه (به‌جز ادمین اصلی) برای استفاده از ربات باید عضوِ **همهٔ"
+                f" {fa_digits(len(chats))} چتِ** زیر باشند:",
+                "",
+            ]
+            buttons = []
+            for i, ch in enumerate(chats):
+                is_id = ch["u"].lstrip("-").isdigit()
+                name = ch["t"] or (f"@{ch['u']}" if not is_id else ch["u"])
+                kind = "گروهِ خصوصی" if (is_id or ch["l"]) else "کانال/گروه"
+                body.append(f"{fa_digits(i + 1)}. {name} — {kind}"
+                            + (f" (`{ch['u']}`)" if is_id else ""))
+                if is_owner:
+                    buttons.append([
+                        UI.danger(f"🗑 حذف {fa_digits(i + 1)}",
+                                  f"channel_remove:{i}"),
+                    ])
+            body += [
+                "",
+                f"📊 آمار گیت: {fa_digits(blocked_n)} بسته‌شدن | "
+                f"{fa_digits(rejoined_n)} دوباره‌عضویت",
+            ]
+            buttons.append([UI.go("🔍 بررسی همه", b"owner_channel_check")])
             if is_owner:
-                buttons.append([UI.go("✏️ تغییر کانال", b"owner_channel_set")])
-                buttons.append([UI.danger("حذف شرط عضویت", "owner_channel_clear")])
+                buttons.append([UI.go("➕ افزودن کانال/گروه", b"owner_channel_set")])
+                buttons.append([UI.danger("🗑 حذف همه", "owner_channel_clear")])
             buttons.append(UI.nav_row())
         else:
-            text = ("📢 **کانال اجباری عضویت:** تنظیم نشده — همه بدون شرط "
-                    "می‌توانند از ربات استفاده کنند.")
+            body = [
+                "هیچ کانال/گروهی تنظیم نشده — همه بدون شرط می‌توانند از"
+                " ربات استفاده کنند.",
+            ]
             buttons = []
             if is_owner:
-                buttons.append([UI.go("📢 تنظیم کانال", b"owner_channel_set")])
+                buttons.append([UI.go("➕ افزودن کانال/گروه", b"owner_channel_set")])
             buttons.append(UI.nav_row())
-        await event.edit(text, buttons=buttons)
+        await self._show_page(
+            event,
+            UI.screen(f"📢 کانال‌های اجباری عضویت ({fa_digits(len(chats))})",
+                      body=body,
+                      subtitle="کانال و گروه — تا ۱۰ چت؛ عضویت در همه الزامی است.",
+                      hint="«➕ افزودن» یوزرنیم/لینک/آیدی عددی می‌پذیرد."),
+            buttons,
+        )
 
     async def _owner_check_channel(self, event):
-        """بررسی زنده‌ی کانال ذخیره‌شده با تلگرام — بدون تغییر چیزی."""
-        channel = (get_setting("required_channel") or "").strip()
+        """بررسی زندهٔ همهٔ چت‌های ذخیره‌شده با تلگرام — بدون تغییر چیزی."""
+        chats = get_required_chats()
         is_owner = self._role(event.sender_id) == ROLE_OWNER
-        if not channel:
+        if not chats:
             buttons = []
             if is_owner:
-                buttons.append([UI.go("📢 تنظیم کانال", b"owner_channel_set")])
-            await event.edit("📢 کانالی تنظیم نشده — اول یکی تنظیم کن.", buttons=buttons)
+                buttons.append([UI.go("➕ افزودن کانال/گروه", b"owner_channel_set")])
+            await event.edit("📢 هیچ چتی تنظیم نشده — اول یکی اضافه کن.",
+                             buttons=buttons)
             return
-        await event.edit("🔄 در حال بررسی کانال با تلگرام…")
-        ok, info, norm = await self._resolve_channel(channel)
-        if ok:
-            # خود-ترمیمی عنوان: اگر کانال بعد از ذخیره تغییر نام داده باشد،
-            # عنوانِ resolveشده ذخیره می‌شود تا کارت شیشه‌ای و صفحه‌ی تنظیمات
-            # نامِ تازه را نشان دهند — بدون داده‌ی کهنه.
-            stored_title = (get_setting("required_channel_title") or "").strip()
-            healed = bool(stored_title) and stored_title != info
-            if healed:
-                set_setting("required_channel_title", info)
-            text = (f"✅ **کانال پیدا شد و معتبر است:**\n\n"
-                    f"📢 {info}\nhttps://t.me/{norm}"
-                    + ("\n\n_تغییرِ نامِ کانال تشخیص داده شد و عنوان به‌روز شد._"
-                       if healed else ""))
-        else:
-            text = (f"❌ **کانال پیدا نشد یا قابل دسترسی نیست!**\n\n"
-                    f"`{channel}`\n({info})\n\n"
-                    "⚠️ گیت عضویت fail-closed است — همه غیر از ادمین اصلی "
-                    "فعلاً بسته‌اند. کانال درست رو تنظیم کن.")
+        await event.edit("🔄 در حال بررسی چت‌ها با تلگرام…")
+        lines = ["نتیجهٔ بررسیِ چت‌ها:"]
+        n_ok = 0
+        for ch in chats:
+            ok, info, norm, _ni = await self._resolve_channel(ch["u"])
+            name = ch["t"] or ch["u"]
+            if ok:
+                n_ok += 1
+                # خود-ترمیمی عنوان: اگر چت بعد از ذخیره تغییر نام داده باشد
+                updated = None
+                for c2 in chats:
+                    if c2["u"].lower() == ch["u"].lower() and info and info != c2["t"]:
+                        c2["t"] = info
+                        updated = info
+                lines.append(f"{UI.GREEN} {name} — سالم"
+                             + (f" (عنوان تازه شد: {info})" if updated else ""))
+            else:
+                lines.append(f"{UI.RED} {name} — پیدا نشد ({info})")
+        # ذخیرهٔ عناوینِ ترمیم‌شده (اگر تغییری بوده)
+        try:
+            set_required_chats(chats)
+        except Exception:
+            pass
+        lines += [
+            "",
+            f"{fa_digits(n_ok)} از {fa_digits(len(chats))} چت سالم.",
+        ]
+        if n_ok < len(chats):
+            lines.append(
+                "⚠️ گیتِ عضویت fail-closed است — چتِ خراب را اصلاح یا حذف کن"
+                " تا کاربران قفل نشوند (ادمین اصلی همیشه مستثنی است)."
+            )
         buttons = []
         if is_owner:
-            buttons.append([UI.go("✏️ تغییر کانال", b"owner_channel_set")])
+            buttons.append([UI.go("➕ افزودن کانال/گروه", b"owner_channel_set")])
         buttons.append(UI.nav_row())
-        await event.edit(text, buttons=buttons)
+        await event.edit("\n".join(lines), buttons=buttons)
 
     async def _start_channel_set(self, event):
         await self._clear_admin_panel_wizard(event.sender_id)
         self._start_own_wizard(event.sender_id, WIZ_SET_CHANNEL, {})
         await event.edit(
-            "یوزرنیم کانال رو بفرست (مثلاً `@MyChannel` یا `mychannel` یا لینک t.me):\n\n"
-            "⚠️ کانال باید **عمومی** باشه تا بتونیم عضویت رو چک کنیم.",
+            "یوزرنیم یا لینک چت را بفرست (مثلاً `@MyChannel` یا `mychannel`"
+            " یا لینک t.me) — یا برای **گروهِ خصوصی**، آیدیِ عددیِ گروه را"
+            " بفرست (مثل `-1001234567890`):\n\n"
+            "⚠️ چتِ عمومی باید قابلِ resolve باشد؛ برای گروهِ خصوصی، ربات"
+            " باید عضوِ گروه باشد (لینکِ دعوت در گامِ بعد پرسیده می‌شود).",
             buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
         )
 
@@ -7798,26 +8058,155 @@ class SaaSBot:
             return True
 
         if state == WIZ_SET_CHANNEL:
-            # resolve واقعی کانال قبل از ذخیره — کانالِ پیدا‌نشده هرگز ذخیره نمی‌شود
-            ok, info, norm = await self._resolve_channel(text)
+            # v2.22.0 (OWNER-REQUEST): افزودن به لیستِ چندچتی — گامِ ۱:
+            # یوزرنیم/لینک/آیدیِ عددی با resolve زنده (چتِ پیدا‌نشده هرگز
+            # ذخیره نمی‌شود)؛ گامِ ۲ (فقط چتِ خصوصیِ بدونِ یوزرنیم): لینکِ
+            # دعوت. سقف و تکراری‌بودن قبل از تأیید چک می‌شود.
+            data = data or {}
+            if data.get("phase") == "invite":
+                link = (text or "").strip()
+                if not re.search(r"(?:t|telegram)\.me/", link, re.IGNORECASE):
+                    await event.respond(
+                        "❌ این یک لینکِ دعوت نیست. لینکِ دعوتِ گروه را بفرست "
+                        "(مثل `https://t.me/+AbCdEf` یا `t.me/joinchat/...`):"
+                    )
+                    return True
+                data["l"] = link
+                self.wizards[event.sender_id] = {
+                    "state": WIZ_SET_CHANNEL, "data": data, "_ts": time.time(),
+                }
+                await event.respond(
+                    f"✅ **گروهِ خصوصی:**\n\n"
+                    f"👥 {data.get('t') or data.get('u')}\n"
+                    f"🔗 {link}\n\n"
+                    "این گروه به لیستِ عضویتِ اجباری اضافه شود؟ از این به بعد"
+                    " همه (به‌جز ادمین اصلی) باید عضوِ همهٔ چت‌های لیست باشند.",
+                    buttons=[
+                        [UI.confirm("بله، اضافه کن", b"channel_confirm_save")],
+                        [UI.neutral("نه، دوباره بفرستم", "owner_channel_set")],
+                    ],
+                )
+                return True
+            # گامِ ۱ — resolve زندهٔ چت
+            ok, info, norm, needs_invite = await self._resolve_channel(text)
             if not ok:
                 await event.respond(
-                    f"❌ کانال «{text.strip()}» پیدا نشد یا قابل دسترسی نیست ({info}).\n\n"
-                    "یوزرنیم درست رو بفرست (کانال باید **عمومی** باشه):"
+                    f"❌ چت «{text.strip()}» پیدا نشد یا قابلِ دسترسی نیست ({info}).\n\n"
+                    "یوزرنیم/لینکِ درست را بفرست — یا برای گروهِ خصوصی، آیدیِ"
+                    " عددی‌اش را (ربات باید عضوِ گروه باشد):"
+                )
+                return True
+            existing = {c["u"].lower() for c in get_required_chats()}
+            if norm.lower() in existing:
+                await event.respond(
+                    "⚠️ این چت از قبل در لیست هست.",
+                    buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                )
+                return True
+            if len(existing) >= REQUIRED_CHATS_MAX:
+                await event.respond(
+                    f"⚠️ لیست پر است (سقف: {fa_digits(REQUIRED_CHATS_MAX)} چت). "
+                    "اول یکی را از صفحهٔ کانال‌ها حذف کن.",
+                    buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
+                )
+                return True
+            if needs_invite:
+                self.wizards[event.sender_id] = {
+                    "state": WIZ_SET_CHANNEL,
+                    "data": {"phase": "invite", "u": norm, "t": info, "l": ""},
+                    "_ts": time.time(),
+                }
+                await event.respond(
+                    f"✅ **گروهِ خصوصی پیدا شد:** {info}\n\n"
+                    "این گروه یوزرنیمِ عمومی ندارد؛ برای اینکه کاربران بتوانند"
+                    " عضو شوند، **لینکِ دعوتِ گروه** را بفرست (مثل"
+                    " `https://t.me/+AbCdEf` یا `t.me/joinchat/...`):",
+                    buttons=[[UI.neutral(UI.L_CANCEL, NAV_BACK)]],
                 )
                 return True
             self.wizards[event.sender_id] = {
-                "state": WIZ_SET_CHANNEL, "data": {"channel": norm, "title": info},
+                "state": WIZ_SET_CHANNEL, "data": {"u": norm, "t": info, "l": ""},
                 "_ts": time.time(),
             }
             await event.respond(
-                f"✅ **کانال پیدا شد:**\n\n"
+                f"✅ **چت پیدا شد:**\n\n"
                 f"📢 {info}\nhttps://t.me/{norm}\n\n"
-                "این کانال ذخیره شود؟ از این به بعد همه (به‌جز ادمین اصلی) باید "
-                "عضو این کانال باشن.",
+                "این چت به لیستِ عضویتِ اجباری اضافه شود؟ از این به بعد همه "
+                "(به‌جز ادمین اصلی) باید عضوِ همهٔ چت‌های لیست باشند.",
                 buttons=[
-                    [UI.confirm("بله، ذخیره کن", b"channel_confirm_save")],
+                    [UI.confirm("بله، اضافه کن", b"channel_confirm_save")],
                     [UI.neutral("نه، دوباره بفرستم", "owner_channel_set")],
+                ],
+            )
+            return True
+
+        if state == WIZ_TRIAL_DAYS:
+            # v2.22.0 (OWNER-REQUEST): تعدادِ روزهایِ دورهٔ آزمایشی — pop
+            # فقط بعد از اعتبارسنجی (الگوی v2.19.4: پیامِ خطا ویزارد را
+            # نمی‌سوزاند و کاربر بدونِ شروعِ دوباره تصحیح می‌کند).
+            raw = (text or "").strip()
+            s = raw.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+            if not s.isdigit():
+                await event.respond(
+                    f"❌ فقط یک عدد بفرست (بین {fa_digits(TRIAL_DAYS_MIN)} و"
+                    f" {fa_digits(TRIAL_DAYS_MAX)}):"
+                )
+                return True
+            days = int(s)
+            if not (TRIAL_DAYS_MIN <= days <= TRIAL_DAYS_MAX):
+                await event.respond(
+                    f"❌ عدد باید بین {fa_digits(TRIAL_DAYS_MIN)} و"
+                    f" {fa_digits(TRIAL_DAYS_MAX)} باشد. دوباره بفرست:"
+                )
+                return True
+            self.wizards.pop(event.sender_id, None)
+            set_setting(TRIAL_DAYS_SETTING, str(days), actor_id=event.sender_id)
+            log_action(event.sender_id, "trial_days_set", f"days={days}")
+            await self._owner_show_trial_settings(event)
+            return True
+
+        if state == WIZ_SELF_BACKUP_GROUP:
+            # v2.22.0 (OWNER-REQUEST): گروهِ مقصدِ بکاپِ ساعتیِ سلف — آیدیِ
+            # عددی یا فورواردِ پیام از خودِ گروه (آیدی از رویِ فوروارد
+            # خوانده می‌شود). resolve زنده قبل از ذخیره — گروهِ پیدا‌نشده
+            # هرگز ذخیره نمی‌شود.
+            raw = (text or "").strip()
+            fwd = getattr(event.message, "fwd_from", None)
+            fwd_chat = getattr(fwd, "chat_id", None) if fwd else None
+            if fwd_chat:
+                candidate = str(int(fwd_chat))
+            else:
+                s = raw.replace(" ", "")
+                if not s.lstrip("-").isdigit():
+                    await event.respond(
+                        "❌ آیدیِ عددیِ گروه را بفرست (مثل `-1001234567890`) یا"
+                        " یک پیام از خودِ گروه را **فوروارد** کن:"
+                    )
+                    return True
+                candidate = s
+            try:
+                entity = await self.client.get_entity(int(candidate))
+                title = getattr(entity, "title", None) or candidate
+            except Exception as e:
+                await event.respond(
+                    f"❌ گروه پیدا نشد ({str(e)[:60]}).\n\n"
+                    "⚠️ ربات باید عضوِ گروه باشد — ربات را به گروه اضافه کن،"
+                    " یک پیام در گروه بفرست و دوباره تلاش کن:"
+                )
+                return True
+            self.wizards[event.sender_id] = {
+                "state": WIZ_SELF_BACKUP_GROUP,
+                "data": {"group": int(candidate), "title": title},
+                "_ts": time.time(),
+            }
+            await event.respond(
+                f"✅ **گروه پیدا شد:**\n\n"
+                f"👥 {title}\nآیدی: `{candidate}`\n\n"
+                "بکاپِ ساعتیِ سشن‌های سلف به این گروه ارسال شود؟ (هر ساعت"
+                " در سرِ ساعت، یک فایلِ فقط-سشنِ رمزگذاری‌شده)",
+                buttons=[
+                    [UI.confirm("بله، ذخیره کن", b"self_backup_confirm_save")],
+                    [UI.neutral("نه، دوباره بفرستم", "owner_self_backup_set")],
                 ],
             )
             return True
@@ -8952,26 +9341,109 @@ class SaaSBot:
                     await self._start_channel_set(event)
                     return
                 if data == "channel_confirm_save" and role == ROLE_OWNER:
+                    # v2.22.0: افزودن به لیستِ چندچتی (کلید‌های ویزارد:
+                    # u/t/l). تکراری و سقفِ ۱۰ چت اینجا هم چک می‌شود —
+                    # دفاعِ دوم بعد از ویزارد.
                     wiz = self.wizards.pop(event.sender_id, None)
-                    ch = (wiz or {}).get("data", {}).get("channel")
-                    title = (wiz or {}).get("data", {}).get("title", "")
-                    if not ch:
-                        await event.answer("کانالی در انتظار تایید نیست.", alert=True)
+                    wd = (wiz or {}).get("data", {}) or {}
+                    u = (wd.get("u") or "").strip()
+                    if not u:
+                        await event.answer("چتی در انتظار تایید نیست.", alert=True)
                         return
-                    set_setting("required_channel", ch)
-                    # عنوان واقعی کانال ذخیره می‌شود تا کادر شیشه‌ایِ پیام
-                    # گیت به‌جای @username نام واقعی را نشان دهد
-                    set_setting("required_channel_title", title)
+                    chats = get_required_chats()
+                    if any(c["u"].lower() == u.lower() for c in chats):
+                        await event.answer("⚠️ این چت از قبل در لیست هست.", alert=True)
+                        await self._owner_show_channel_settings(event)
+                        return
+                    if len(chats) >= REQUIRED_CHATS_MAX:
+                        await event.answer(
+                            f"⚠️ سقفِ {fa_digits(REQUIRED_CHATS_MAX)} چت پر است.",
+                            alert=True)
+                        return
+                    chats.append({"u": u, "t": (wd.get("t") or "").strip(),
+                                  "l": (wd.get("l") or "").strip()})
+                    set_required_chats(chats)
                     self._reset_gate_state()
-                    await event.answer("✅ کانال ذخیره شد.")
+                    log_action(event.sender_id, "required_chat_added", f"u={u}")
+                    await event.answer("✅ چت به لیست اضافه شد.")
+                    await self._owner_show_channel_settings(event)
+                    return
+                if data.startswith("channel_remove:") and role == ROLE_OWNER:
+                    # v2.22.0: حذفِ یک چت از لیست (ایندکسِ ردیفِ دکمه).
+                    try:
+                        idx = int(data.split(":", 1)[1])
+                    except ValueError:
+                        await event.answer("❌ ایندکس نامعتبر.", alert=True)
+                        return
+                    chats = get_required_chats()
+                    if not (0 <= idx < len(chats)):
+                        await event.answer("⚠️ این چت دیگر در لیست نیست.", alert=True)
+                        return
+                    removed = chats.pop(idx)
+                    set_required_chats(chats)
+                    self._reset_gate_state()
+                    log_action(event.sender_id, "required_chat_removed",
+                               f"u={removed.get('u')}")
+                    await event.answer("🗑 چت حذف شد.")
                     await self._owner_show_channel_settings(event)
                     return
                 if data == "owner_channel_clear" and role == ROLE_OWNER:
-                    set_setting("required_channel", "")
-                    set_setting("required_channel_title", "")
+                    set_required_chats([])
                     self._reset_gate_state()
-                    await event.answer("✅ شرط عضویت کانال برداشته شد.")
+                    await event.answer("✅ همهٔ شرط‌های عضویت برداشته شد.")
                     await self._owner_show_channel_settings(event)
+                    return
+                # ── v2.22.0 (OWNER-REQUEST): صفحهٔ آزمایشی + بکاپِ ساعتی ──
+                if data == "owner_trial" and role == ROLE_OWNER:
+                    await self._owner_show_trial_settings(event)
+                    return
+                if data == "owner_trial_days" and role == ROLE_OWNER:
+                    await self._start_trial_days_wizard(event)
+                    return
+                if data == "owner_self_backup" and role == ROLE_OWNER:
+                    await self._owner_show_self_backup(event)
+                    return
+                if data == "owner_self_backup_set" and role == ROLE_OWNER:
+                    await self._owner_start_self_backup_set(event)
+                    return
+                if data == "self_backup_confirm_save" and role == ROLE_OWNER:
+                    wiz = self.wizards.pop(event.sender_id, None)
+                    grp = (wiz or {}).get("data", {}).get("group")
+                    if not grp:
+                        await event.answer("گروهی در انتظار تایید نیست.", alert=True)
+                        return
+                    set_setting(SELF_BACKUP_GROUP_SETTING, str(grp),
+                                actor_id=event.sender_id)
+                    set_setting(SELF_BACKUP_ENABLED_SETTING, "1",
+                                actor_id=event.sender_id)
+                    log_action(event.sender_id, "self_backup_group_set",
+                               f"group={grp}")
+                    await event.answer("✅ گروهِ بکاپِ ساعتی ذخیره شد.")
+                    await self._owner_show_self_backup(event)
+                    return
+                if data == "owner_self_backup_toggle" and role == ROLE_OWNER:
+                    if not self_backup_group():
+                        await event.answer("اول گروه را تنظیم کن.", alert=True)
+                        return
+                    new_val = "0" if self_backup_enabled() else "1"
+                    set_setting(SELF_BACKUP_ENABLED_SETTING, new_val,
+                                actor_id=event.sender_id)
+                    log_action(event.sender_id, "self_backup_toggled",
+                               f"new={new_val}")
+                    try:
+                        await event.answer(
+                            "🗂 ارسالِ ساعتی: "
+                            + ("روشن" if new_val == "1" else "خاموش"))
+                    except Exception:
+                        pass
+                    await self._owner_show_self_backup(event)
+                    return
+                if data == "owner_self_backup_clear" and role == ROLE_OWNER:
+                    set_setting(SELF_BACKUP_GROUP_SETTING, "",
+                                actor_id=event.sender_id)
+                    log_action(event.sender_id, "self_backup_group_cleared", "")
+                    await event.answer("✅ گروهِ بکاپِ ساعتی حذف شد.")
+                    await self._owner_show_self_backup(event)
                     return
                 # ───────────────────────────────────────────────────────────
                 # TEST-G6-SYSTEM (BUG: BROKEN — many spec-named callbacks
@@ -9020,10 +9492,9 @@ class SaaSBot:
                     await self._start_channel_set(event)
                     return
                 if data.startswith("channel_clear:") and role == ROLE_OWNER:
-                    set_setting("required_channel", "")
-                    set_setting("required_channel_title", "")
+                    set_required_chats([])
                     self._reset_gate_state()
-                    await event.answer("✅ شرط عضویت کانال برداشته شد.")
+                    await event.answer("✅ همهٔ شرط‌های عضویت برداشته شد.")
                     await self._owner_show_channel_settings(event)
                     return
                 # Generic `setting_save:{key}:{value}` — previously
