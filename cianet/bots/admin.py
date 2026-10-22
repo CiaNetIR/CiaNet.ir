@@ -2764,9 +2764,31 @@ class AdminBot:
             await self._cleanup_wizard_temp_client(wiz)
             print(f"🧹 [wizard TTL] wizard کاربر {uid} به‌دلیل عدم فعالیت ۳۰ دقیقه پاک شد")
 
+    # v2.22.2 (OWNER-REPORT «انصراف»): مسیرهایی که «شروع‌کننده‌ی ویزارد»
+    # هستند — بعد از لغوِ ویزارد باید از پشته‌ی ناوبری هم برداشته شوند تا
+    # اولین «بازگشت» ویزاردِ تازه‌لغوشده را دوباره باز نکند. (تا این نسخه
+    # فقط مسیرهای 2FA پاک می‌شدند؛ «add» و هم‌خانواده‌هایش نمی‌شدند.)
+    _WIZARD_LAUNCH_EXACT = frozenset({"add", "user_login_account"})
+    _WIZARD_LAUNCH_PREFIXES = (
+        "edit_name:", "send_msg:", "proxy_start:",
+        "tfachange:", "tfaremove:", "tfaemail:",
+    )
+
+    def _pop_wizard_launch_route(self, uid: int) -> None:
+        """اگر بالای پشته‌ی ناوبری مسیرِ شروعِ همین ویزارد است، بردار."""
+        try:
+            cur = self.nav.current(uid) or ""
+        except Exception:
+            return
+        if cur in self._WIZARD_LAUNCH_EXACT or cur.startswith(self._WIZARD_LAUNCH_PREFIXES):
+            self.nav.pop(uid)
+
     async def _cancel_wizard(self, uid: int, notify_event=None, chat=None):
         wiz = self.wizards.pop(uid, None)
         await self._cleanup_wizard_temp_client(wiz)
+        # v2.22.2: مسیرِ شروع‌کننده‌ی ویزاردِ لغوشده از پشته‌ی ناوبری
+        # برداشته می‌شود (برای همه‌ی شاخه‌های پایین، یک‌بار و idempotent).
+        self._pop_wizard_launch_route(uid)
         # اگر این ویزارد مربوط به لاگین مستقیم یک کاربر عادی بود (نه
         # ادمین/نماینده‌ای که از پنل مدیریت وارد شده)، نباید بعد از لغو،
         # منوی کامل مدیریت اکانت‌ها (که چنین کاربری اصلاً نباید ببیند)
@@ -2845,8 +2867,33 @@ class AdminBot:
                         buttons=[[UI.neutral(UI.L_BACK, back_route)]],
                     )
             else:
-                await notify_event.edit("❌ لغو شد.")
-                await self._show_main_menu(notify_event.chat_id)
+                # v2.22.2 (OWNER-REPORT «انصراف» — دابل‌رندر + گیت نقش):
+                # قبلاً اینجا edit("لغو شد") + ارسالِ پیامِ جداگانه‌ی منوی
+                # کامل پنل ادمین (لیست اکانت‌ها/افزودن اکانت) انجام می‌شد —
+                # دو رندر برای یک کلیک، و بدون هیچ چکِ نقش، حتی برای کاربر
+                # عادی روی صفحه‌ی مُرده (ویزارد TTL-منقضی/دابل‌کلیک) منوی
+                # پنل ادمین می‌رسید. حالا: تک‌رندرِ درجا + دکمه‌ی نقش-آگاهِ
+                # «🏠 منوی اصلی» (nav:home در saas برای هر نقش منوی درست
+                # را می‌آورد). حالت standalone (مرده در پروداکشن) همچنان
+                # منوی پنل را — ولی این‌بار درجا — رندر می‌کند.
+                if saas is not None:
+                    try:
+                        await notify_event.edit(
+                            "❌ لغو شد.",
+                            buttons=[UI.nav_row(back=False)],
+                        )
+                    except Exception:
+                        try:
+                            await notify_event.respond(
+                                "❌ لغو شد.",
+                                buttons=[UI.nav_row(back=False)],
+                            )
+                        except Exception:
+                            pass
+                else:
+                    await self._show_main_menu(
+                        notify_event.chat_id, edit_event=notify_event,
+                    )
         elif chat is not None:
             if is_plain_user:
                 await self.client.send_message(
@@ -2861,8 +2908,18 @@ class AdminBot:
                     buttons=[[UI.neutral(UI.L_BACK, back_route)]],
                 )
             else:
-                await self.client.send_message(chat, "❌ لغو شد.")
-                await self._show_main_menu(chat)
+                # v2.22.2: مسیر متنی («لغو») — همان فیکسِ شاخه‌ی بالا:
+                # تک‌پیام + دکمه‌ی نقش-آگاه؛ نه دو پیام جدا.
+                if saas is not None:
+                    await self.client.send_message(
+                        chat, "❌ لغو شد.",
+                        buttons=[UI.nav_row(back=False)],
+                    )
+                else:
+                    await self.client.send_message(
+                        chat, "❌ لغو شد.",
+                        buttons=self._main_menu_buttons(),
+                    )
 
     async def _do_send_code(self, event, data: dict):
         """
@@ -3088,13 +3145,19 @@ class AdminBot:
             except Exception:
                 pass
             self.wizards.pop(event.sender_id, None)
+            # v2.22.2: مسیرِ شروع‌کننده‌ی ویزاردِ منقضی‌شده از پشته برداشته
+            # شود تا «بازگشت» بعدی آن را دوباره باز نکند.
+            self._pop_wizard_launch_route(event.sender_id)
             try:
                 await self._respond_safe(
                     event,
                     "⏰ ویزارد به‌دلیل عدم فعالیت بیش از ۱۰ دقیقه لغو شد. "
                     "برای امنیت، اطلاعاتی که وارد کرده بودی (مثل رمز) از memory "
                     "پاک شد. لطفاً از نو شروع کن.",
-                    buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]],
+                    # v2.22.2: دکمه‌ی «انصراف» اینجا مرده بود — ویزارد دیگر
+                    # باز نیست و کلیک روی آن فقط شاخه‌ی fallback را می‌زد.
+                    # دکمه‌ی نقش-آگاهِ خانه جایگزین شد.
+                    buttons=[UI.nav_row(back=False)],
                 )
             except Exception:
                 pass
@@ -3144,8 +3207,17 @@ class AdminBot:
             entry = self.sb.ACCOUNTS.get(tag)
             self.wizards.pop(event.sender_id, None)
             if not entry:
-                await self._respond_safe(event, f"❌ اکانت «{tag}» دیگر روشن نیست.")
-                await self._show_main_menu(event.chat_id)
+                # v2.22.2: تک‌رندر — قبلاً متنِ خطا + منوی پنل (پیامِ جدا)
+                # ارسال می‌شد؛ حالا همان یک پیامِ خطا + دکمه‌ی نقش-آگاه.
+                self._pop_wizard_launch_route(event.sender_id)
+                _btns = (
+                    [UI.nav_row(back=False)]
+                    if getattr(self, "saas", None) is not None
+                    else self._main_menu_buttons()
+                )
+                await self._respond_safe(
+                    event, f"❌ اکانت «{tag}» دیگر روشن نیست.", buttons=_btns,
+                )
                 return
             bot = entry.bot
             new_name = bot._clean_name(text)

@@ -6847,7 +6847,12 @@ class SaaSBot:
         if not tmp or (wiz or {}).get("state") != WIZ_DB_RESTORE_CONFIRM:
             await event.answer("هیچ عملیات Restore در انتظار تأیید نیست.", alert=True)
             return
-        await event.edit("♻️ در حال Restore (اول Runtimeها متوقف می‌شوند)...")
+        # v2.22.2: edit پیشرفت نباید Restore را قطع کند (پیامِ کهنه/قفل) —
+        # در بدترین حالت بدونِ نشانگرِ پیشرفت ادامه می‌دهیم.
+        try:
+            await event.edit("♻️ در حال Restore (اول Runtimeها متوقف می‌شوند)...")
+        except Exception:
+            pass
         try:
             # نسخه‌ی Runtime-safe: Maintenance Mode + توقف کامل Runtimeها قبل
             # از جایگزینی فایل‌ها + استارت مجدد اکانت‌های روشن بعد از موفقیت.
@@ -6860,12 +6865,24 @@ class SaaSBot:
             except Exception:
                 pass
         if ok:
-            await event.respond(
-                "✅ Restore با موفقیت انجام شد.\n\n"
-                "اطلاعات سیستم با موفقیت بازیابی شد.\n"
-                "برای اعمال کامل روی سلف‌بات‌های روشن، ربات را ری‌استارت کن."
-            )
-            await self._show_menu_for_role(event.chat_id, ROLE_OWNER)
+            # v2.22.2 (AUDIT-40): تک‌رندر — قبلاً برای همین یک کلیک سه رندر
+            # انجام می‌شد (edit پیشرفت + respond موفقیت + منوی نقش به‌صورت
+            # پیامِ جدا). حالا همان پیامِ تأیید درجا به متنِ موفقیت + دکمه‌ی
+            # خانه تبدیل می‌شود.
+            try:
+                await event.edit(
+                    "✅ Restore با موفقیت انجام شد.\n\n"
+                    "اطلاعات سیستم با موفقیت بازیابی شد.\n"
+                    "برای اعمال کامل روی سلف‌بات‌های روشن، ربات را ری‌استارت کن.",
+                    buttons=[UI.nav_row(back=False)],
+                )
+            except Exception:
+                await event.respond(
+                    "✅ Restore با موفقیت انجام شد.\n\n"
+                    "اطلاعات سیستم با موفقیت بازیابی شد.\n"
+                    "برای اعمال کامل روی سلف‌بات‌های روشن، ربات را ری‌استارت کن.",
+                    buttons=[UI.nav_row(back=False)],
+                )
         else:
             await event.respond(
                 "❌ Restore انجام نشد.\n\nBackup فعلی تغییری نکرده است.\n\nخطا:\n" + msg

@@ -96,6 +96,23 @@ def _main():
     return _main_mod
 
 
+def _core():
+    """
+    v2.22.2 (AUDIT-40): ماژولِ زنده‌ی cianet.core — همان instance ای که
+    بات و همه‌ی گیت‌های runtime (مثل _MAINTENANCE_MODE در ensure_started)
+    از آن می‌خوانند. uvicorn در همان پروسه‌ی بات اجرا می‌شود، پس نوشتن
+    روی این ماژول بلافاصله روی گیت‌های واقعی اثر می‌گذارد.
+    """
+    global _core_mod
+    if _core_mod is None:
+        import cianet.core as _c
+        _core_mod = _c
+    return _core_mod
+
+
+_core_mod = None
+
+
 # PATCH (TEST-G9-ANALYTICS FIX-F): track panel startup time so /api/health
 # can report real uptime. Without this, /api/health always said "ok"
 # regardless of whether the DB was reachable or accounts were running —
@@ -1571,7 +1588,12 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
 @app.get("/api/settings")
 async def settings_get(request: Request, _: None = Depends(require_auth)):
     return {
-        "maintenance_mode": bool(_main()._MAINTENANCE_MODE if hasattr(_main(), '_MAINTENANCE_MODE') else False),
+        # v2.22.2 (AUDIT-40 — فیکس placebo): قبلاً از namespace شیمِ main.py
+        # خوانده می‌شد — یک کپیِ لحظه‌ی import که هیچ‌وقت تغییر نمی‌کرد و
+        # گیتِ واقعی (cianet.core._MAINTENANCE_MODE در ensure_started)
+        # آن را نمی‌دید. حالا مستقیم از ماژولِ زنده‌ی cianet.core خوانده
+        # می‌شود (uvicorn در همان پروسه/همان module-instance اجرا می‌شود).
+        "maintenance_mode": bool(getattr(_core(), "_MAINTENANCE_MODE", False)),
         "channel_username": os.environ.get("CIANET_CHANNEL", ""),
         "wallet_address_usdt": os.environ.get("CIANET_WALLET_USDT", ""),
         "min_commit_hash": os.environ.get("CIANET_MIN_COMMIT", ""),
@@ -1583,10 +1605,15 @@ async def settings_get(request: Request, _: None = Depends(require_auth)):
 
 @app.patch("/api/settings")
 async def settings_update(update: SettingsUpdate, request: Request, _: None = Depends(require_csrf)):
-    m = _main()
     if update.maintenance_mode is not None:
-        if hasattr(m, '_MAINTENANCE_MODE'):
-            m._MAINTENANCE_MODE = update.maintenance_mode
+        # v2.22.2 (AUDIT-40 — فیکس placebo): نوشتن روی شیمِ main.py هیچ
+        # اثری روی گیتِ واقعی نداشت (گیت، global خودِ cianet.core را
+        # می‌خواند). حالا مستقیم روی همان ماژول نوشته می‌شود — یعنی
+        # سوییچ واقعاً استارتِ سلف‌بات‌های جدید را می‌بندد/باز می‌کند
+        # (ensure_started در core.py همین global را چک می‌کند).
+        _core()._MAINTENANCE_MODE = bool(update.maintenance_mode)
+        print(f"🟡 [web_panel] maintenance_mode → {update.maintenance_mode} "
+              f"(روی cianet.core اعمال شد)")
     # برای env-based settings، نمی‌تونیم در runtime عوض کنیم — این فقط read-only نمایش می‌ده
     return {
         "ok": True,
