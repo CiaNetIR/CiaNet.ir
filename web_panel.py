@@ -157,8 +157,15 @@ _sessions_with_csrf: Dict[str, dict] = {}  # token -> {"created_at": float, "csr
 
 
 def _create_session() -> str:
+    # v2.23.5 (AUDIT-43 43-d#4): session همیشه با CSRF ساخته می‌شود — قبلاً
+    # فقط در _sessions می‌نوشت و auth_login جداگانه در _sessions_with_csrf
+    # می‌گذاشت؛ هر فراخوانِ آیندهٔ _create_session بدونِ آن بخشِ دوم، شاخهٔ
+    # legacy را «مسلح» می‌کرد (توکن معتبر بدونِ csrf → str(None) با هدرِ
+    # literal «None» پاس می‌شد). حالا هر دو store اتمیک پر می‌شوند.
     token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
     _sessions[token] = time.time()
+    _sessions_with_csrf[token] = {"created_at": time.time(), "csrf": csrf_token}
     return token
 
 
@@ -192,15 +199,16 @@ def _valid_session_with_csrf(request: Request) -> tuple:
     if sess:
         if time.time() - sess["created_at"] > SESSION_TTL_SEC:
             _sessions_with_csrf.pop(token, None)
-            return False, None
-        return True, sess.get("csrf")
-    # Backward-compat: legacy session (only in _sessions, before CSRF patch)
-    created = _sessions.get(token)
-    if created:
-        if time.time() - created > SESSION_TTL_SEC:
             _sessions.pop(token, None)
             return False, None
-        return True, None  # valid legacy session — no CSRF token stored
+        return True, sess.get("csrf")
+    # v2.23.5 (AUDIT-43 43-d#4): شاخهٔ legacy حذف شد — قبلاً توکنِ فقط-در
+    # _sessions به‌صورتِ (True, None) قبول می‌شد و require_csrf با هدرِ
+    # literal «None» + هر cookie ای عبور می‌کرد (fail-open اثبات‌شدهٔ ممیزی؛
+    # امروز غیرقابل‌دسترس چون auth_login هر دو store را می‌نویسد ولی
+    # یک caller آیندهٔ _create_session کافی بود). حالا چنین توکنی
+    # fail-closed رد می‌شود: هر session معتبر باید csrf داشته باشد.
+    _sessions.pop(token, None)  # بقایای legacy — پاک و رد
     return False, None
 
 
@@ -231,7 +239,19 @@ def _get_user_id_from_session(request: Request) -> Optional[int]:
     s = _user_sessions.get(token)
     if not s or time.time() - s["created_at"] > USER_SESSION_TTL_SEC:
         return None
-    return s["user_id"]
+    uid = s["user_id"]
+    # v2.23.5 (AUDIT-43 43-d#7): بلاک‌شدنِ کاربر در طولِ session بلافاصله
+    # اعمال می‌شود — قبلاً is_blocked فقط موقعِ لاگین چک می‌شد و کاربرِ
+    # بلاک‌شده تا ۲۴ ساعت (TTL) به پنلِ کاربری (کیف پول/پرداخت/سشنِ زنده)
+    # دسترسی داشت. این یک SELECT ارزان روی PK است (core.is_user_blocked).
+    try:
+        from cianet.core import is_user_blocked
+        if is_user_blocked(uid):
+            _user_sessions.pop(token, None)
+            return None
+    except Exception:
+        pass  # خطای لحظه‌ای DB نباید session را بیاندازد (fail-open نرم)
+    return uid
 
 def _invalidate_user_session(request: Request) -> None:
     token = request.cookies.get("cianet_user_session")
@@ -1607,18 +1627,63 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
     src = versions_dir / filename
     if not src.is_file():
         raise HTTPException(404, f"Version file not found: {filename}")
-    try:
-        import ast as _ast
-        _ast.parse(src.read_text(encoding="utf-8"))
-    except Exception:
-        raise HTTPException(400, "فایل نسخه نامعتبر است (AST parse failed)")
-    # backup current
-    import shutil, time as _time
-    ts = int(_time.time())
-    backup = versions_dir / f"main.py.pre-rollback.{ts}"
-    shutil.copy2(main_py, backup)
-    # replace
-    shutil.copy2(src, main_py)
+    # v2.23.5 (AUDIT-43 43-d#8): rollback از placebo به واقعی — بعد از
+    # تفکیکِ v2.16، main.py یک shim است و تعویضِ تنها آن هیچ کدی را
+    # برنمی‌گرداند. بکاپ‌های تازه سایدکارِ <name>.commit دارند (HEAD لحظهٔ
+    # بکاپ — cianet_updater._backup_main_py): اگر سایدکار هست، کلِ درختِ
+    # tracked پروژه با «git checkout <commit> -- .» به همان لحظه برمی‌گردد
+    # (main.py + cianet/ + web_panel.py + cianet_updater.py). بکاپ‌های
+    # legacyِ بدونِ سایدکار همان مسیرِ قدیمیِ تعویضِ main.py را می‌گیرند.
+    sidecar = versions_dir / (filename + ".commit")
+    if sidecar.is_file():
+        commit = sidecar.read_text(encoding="utf-8").strip()
+        if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
+            raise HTTPException(400, "Invalid filename")
+        import subprocess as _sp
+        _co = _sp.run(
+            ["git", "checkout", commit, "--", "."],
+            cwd=str(_PROJECT_DIR), capture_output=True, text=True, timeout=30,
+        )
+        if _co.returncode != 0:
+            print(f"❌ [version_rollback] git checkout failed: {_co.stderr[:300]}")
+            raise HTTPException(500, "خطا در بازیابی نسخه — با پشتیبانی تماس بگیرید.")
+        # پاکسازی __pycache__ تا کدِ قدیمیِ کش‌شده اجرا نشود
+        import shutil as _sh, os as _os
+        for _pc_root, _pc_dirs, _pc_files in _os.walk(_PROJECT_DIR):
+            if "__pycache__" in _pc_dirs:
+                _pc_dirs.remove("__pycache__")
+                try:
+                    _sh.rmtree(_os.path.join(_pc_root, "__pycache__"))
+                except Exception:
+                    pass
+        # بکاپِ pre-rollback با سایدکارِ commitِ فعلی — rollbackِ دوباره ممکن بماند
+        import time as _time
+        ts = int(_time.time())
+        backup = versions_dir / f"main.py.pre-rollback.{ts}"
+        shutil.copy2(main_py, backup)
+        _cur = _sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_PROJECT_DIR), capture_output=True, text=True, timeout=5,
+        )
+        if _cur.returncode == 0:
+            try:
+                (versions_dir / (backup.name + ".commit")).write_text(
+                    _cur.stdout.strip(), encoding="utf-8")
+            except Exception:
+                pass
+    else:
+        try:
+            import ast as _ast
+            _ast.parse(src.read_text(encoding="utf-8"))
+        except Exception:
+            raise HTTPException(400, "فایل نسخه نامعتبر است (AST parse failed)")
+        # backup current
+        import shutil, time as _time
+        ts = int(_time.time())
+        backup = versions_dir / f"main.py.pre-rollback.{ts}"
+        shutil.copy2(main_py, backup)
+        # replace
+        shutil.copy2(src, main_py)
     # restart
     # v2.23.3 (AUDIT-45/MED-2 — ④): قبلاً hardcoded «cianet» بود؛
     # install_service.sh سرویسِ «selfbot.service» می‌سازد و env file هم

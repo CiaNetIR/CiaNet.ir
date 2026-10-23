@@ -251,7 +251,13 @@ print_ok "service ساخته شد"
 
 # ─── Install polkit + sudoers ───────────────────────────
 print_step "نصب sudoers برای auto-update..."
-echo "cianet ALL=(ALL) NOPASSWD: /bin/systemctl restart selfbot, /bin/systemctl start selfbot, /bin/systemctl stop selfbot" > /etc/sudoers.d/cianet
+# v2.23.5 (AUDIT-43 43-e#20): مسیر systemctl با command -v resolve می‌شود —
+# sudo تطابقِ sudoers را رشته‌ای روی مسیرِ کامل انجام می‌دهد؛ روی سیستم‌هایِ
+# نو که systemctl در /usr/bin است (و /bin فقط symlink است)، rule قدیمیِ
+# «/bin/systemctl» هرگز مچ نمی‌شد → مرحلهٔ sudo -n آپدیتر بی‌صدا می‌مُرد و
+# restart به SIGTERM-fallback می‌افتاد.
+SYSTEMCTL_BIN=$(command -v systemctl || echo "/usr/bin/systemctl")
+echo "cianet ALL=(ALL) NOPASSWD: $SYSTEMCTL_BIN restart selfbot, $SYSTEMCTL_BIN start selfbot, $SYSTEMCTL_BIN stop selfbot" > /etc/sudoers.d/cianet
 chmod 440 /etc/sudoers.d/cianet
 print_ok "sudoers نصب شد — auto-update کار می‌کنه"
 

@@ -3444,7 +3444,15 @@ def create_scheduled_message(user_id: int, tag: str, chat_id: int, text: str,
         # است، پیام‌های T-فرمت تا ~۲۴ ساعت دیر due می‌شدند.
         _dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
         if _dt.tzinfo is not None:
-            _dt = _dt.astimezone().replace(tzinfo=None)  # → ساعت محلی سرور
+            # v2.23.5 (AUDIT-43 43-a#5): نرمال‌سازی به UTC (نه ساعتِ محلیِ
+            # سرور) — حلقهٔ ارسال با _now() یعنی UTC مقایسه می‌کند؛ روی
+            # سرورِ UTC، ذخیرهٔ محلی یعنی هر پیامِ تهران‌روشنِ کاربر
+            # ۳.۵ ساعت دیر شلیک می‌شد. (ویژگی فعلاً unlinked است؛ این
+            # فیکس قبل از وصل‌شدن لازم بود.)
+            from datetime import timezone as _tzmod
+            _dt = _dt.astimezone(_tzmod.utc).replace(tzinfo=None)
+        else:
+            pass  # naive ورودی — مطابقِ قراردادِ قبلی، همانِ خودش (فراخوانِ فعلی همیشه aware می‌دهد)
         scheduled_at = _dt.strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return {"error": "invalid_scheduled_at"}
@@ -3533,8 +3541,37 @@ def delete_auto_reply(reply_id: int, user_id: int) -> bool:
     return cur.rowcount > 0
 
 
+# v2.23.5 (AUDIT-43 43-c#8): پاسِ خالیِ ۶۰ثانیه‌ایِ جدولِ auto_replies —
+# این تابع روی «هر» پیامِ خصوصیِ متنیِ هر اکانتِ فعال صدا زده می‌شود؛
+# جدول رابطِ نوشتنِ زنده ندارد (نیمه‌ساخته/parked) و در اکثر نصب‌ها خالی
+# است = اتصالِ sqlite تازه + ۲ PRAGMA + SELECT + close در هر پیام، برای
+# هیچ. با COUNT سبکِ هر ۶۰ ثانیه، پرس‌وجویِ per-message حذف می‌شود.
+_AR_CACHE_TS = 0.0
+_AR_CACHE_NONEMPTY = False
+
+
+def _auto_replies_maybe_present() -> bool:
+    global _AR_CACHE_TS, _AR_CACHE_NONEMPTY
+    import time as _time
+    now = _time.time()
+    if now - _AR_CACHE_TS < 60.0:
+        return _AR_CACHE_NONEMPTY
+    try:
+        with _conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM auto_replies WHERE is_active = 1 LIMIT 1"
+            ).fetchone()
+        _AR_CACHE_NONEMPTY = row is not None
+    except Exception:
+        _AR_CACHE_NONEMPTY = True  # خطا → محافظه‌کارانه: همان مسیر قدیمی
+    _AR_CACHE_TS = now
+    return _AR_CACHE_NONEMPTY
+
+
 def find_auto_reply(tag: str, text: str, user_id: int = None) -> str:
     """جستجوی auto-reply برای کلمه‌ی کلیدی در text."""
+    if not _auto_replies_maybe_present():
+        return None
     text_lower = (text or "").lower().strip()
     with _conn() as c:
         rows = c.execute(
@@ -3813,6 +3850,29 @@ async def delete_user_completely(user_id: int) -> bool:
         c.execute("DELETE FROM payments WHERE user_id = ?", (user_id,))
         c.execute("DELETE FROM orders WHERE user_id = ?", (user_id,))
         c.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+        # v2.23.5 (AUDIT-43 43-a#7): ردیف‌های یتیمِ کاربر حذف‌شده — قبلاً
+        # این‌ها زنده می‌ماندند: با ثبت‌مجددِ همان TG id، grantهای قدیمی
+        # بی‌صدا برمی‌گشتند (permission_grants) و پیام‌های زمان‌بندی‌شدهٔ
+        # صاحبِ حذف‌شده هنوز ارسال می‌شدند (pending scheduled_messages).
+        # wallet_transactions عمداً حذف نمی‌شود: دفترِ مالی برای حسابرسی
+        # می‌ماند و مانده از ستونِ users.wallet_balance می‌آید که با حذفِ
+        # ردیفِ کاربر، قطعاً صفر است (resurrect ممکن نیست).
+        # affiliate_commissions فقط سمتِ referrer (درآمدِ خودِ کاربر) پاک
+        # می‌شود؛ ردیف‌هایِ سمتِ referred دفترِ مالیِ معرفِ زنده‌اند.
+        _del_tables = ("scheduled_messages", "auto_replies")
+        _have_tables = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        for _t in _del_tables:
+            if _t in _have_tables:
+                c.execute(f"DELETE FROM {_t} WHERE user_id = ?", (user_id,))
+        if "affiliate_commissions" in _have_tables:
+            c.execute(
+                "DELETE FROM affiliate_commissions WHERE referrer_id = ?",
+                (user_id,))
+        if "permission_grants" in _have_tables:
+            c.execute(
+                "DELETE FROM permission_grants WHERE subject_user_id = ?",
+                (user_id,))
         # لایسنس‌های ساخته‌شده توسط این کاربر (مثلاً یک نماینده): حذف می‌شوند
         # تا کدهای مصرف‌نشده‌ی او بعد از حذفِ سازنده همچنان معتبر نمانند
         # (کد یک‌بارمصرفِ فعالِ متعلق به مالکِ حذف‌شده = مسیر دور زدن).
@@ -4503,6 +4563,11 @@ def activate_license(code: str, user_id: int, username: str = None) -> dict:
             row = c.execute("SELECT role FROM admins WHERE user_id = ?", (creator,)).fetchone()
             if row and row["role"] == ROLE_RESELLER:
                 reseller_link = creator
+        # v2.23.5 (AUDIT-43 43-f#3): نماینده نتواند لایسنسِ ساختهٔ خودش را
+        # روی خودش فعال کند — self-link یعنی کاربر، مشتریِ خودش می‌شد و یک
+        # جایِ سقفِ خودش را مصرف می‌کرد (آزموده‌شده در شبیه‌ساز 43-f/P5.4).
+        if reseller_link is not None and reseller_link == user_id:
+            return {"ok": False, "error": "self_link"}
 
         # ── سیاست سقف مشتریِ نماینده (server-side، داخل همین تراکنش) ──
         # اگر کاربرِ فعال‌کننده هنوز مشتریِ این نماینده نیست و سقف پر است،
@@ -4768,7 +4833,12 @@ def review_payment_atomic(payment_id: int, approve: bool, reviewed_by: int) -> b
     است» به کاربر می‌فرستاد — گمراه‌کننده و آزاردهنده.
     """
     status = PAYMENT_STATUS_APPROVED if approve else PAYMENT_STATUS_REJECTED
-    with _conn() as c:
+    # v2.23.5 (AUDIT-43 43-a#4): _conn_immediate به‌جای _conn — الگویِ خودِ
+    # codebase در create_subscription: تراکنشِ deferred با UPDATE شرطی
+    # درست است ولی snapshot قدیمیِ ادمینِ دومِ هم‌زمان می‌تواند
+    # SQLITE_BUSY_SNAPSHOT بگیرد (busy-timeout آن را حل نمی‌کند) و یک
+    # «خطا در پردازشِ» گذرا برای بازنده می‌سازد.
+    with _conn_immediate() as c:
         cur = c.execute(
             "UPDATE payments SET status = ?, reviewed_by = ?, reviewed_at = ? "
             "WHERE id = ? AND status = 'pending'",
@@ -4801,7 +4871,8 @@ def approve_card_payment_atomic(payment_id: int, reviewed_by: int) -> dict:
     خروجی: {"applied": bool, "plan": str|None, "user_id": int|None,
             "duration": int|None, "dedicated": bool}
     """
-    with _conn() as c:
+    # v2.23.5 (AUDIT-43 43-a#4): _conn_immediate — همان توضیحِ review_payment_atomic
+    with _conn_immediate() as c:
         pay = c.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
         if pay is None:
             return {"applied": False, "plan": None, "user_id": None,
@@ -4877,6 +4948,26 @@ def create_order(user_id: int, plan: str, amount_toman: int, amount_usdt: float,
     original_amount = amount_toman
     discount_percent = 0
     applied_code = None
+    # v2.23.5 (AUDIT-43 43-b#9): سفارشِ pending تکراری بازاستفاده می‌شود —
+    # قبلاً هر کلیکِ دکمهٔ پلن یک ردیفِ pending جدید + فاکتورِ کامل می‌ساخت
+    # (تنها ترمز، FloodWait تلگرام بود). حالا اگر همین کاربر برای همین پلن
+    # سفارشِ pendingِ زنده دارد، همان برگردانده می‌شود. فقط برای درخواستِ
+    # بدونِ تخفیف و سفارشِ بدونِ تخفیف — با کدِ تخفیف، مبالغ فرق می‌کنند
+    # و فاکتورِ تازه باید ساخته شود (بدونِ تقلب از کاربر).
+    if not discount_code:
+        try:
+            with _conn() as c:
+                _pend = c.execute(
+                    "SELECT id FROM orders WHERE user_id = ? AND plan = ? "
+                    "AND status = 'pending' AND expires_at > ? "
+                    "AND (discount_code IS NULL OR discount_code = '') "
+                    "ORDER BY id DESC LIMIT 1",
+                    (user_id, plan, _now()),
+                ).fetchone()
+            if _pend:
+                return get_order(_pend["id"])
+        except Exception:
+            pass  # خطای لحظه‌ای DB → همان مسیرِ ساختِ سفارشِ جدید
     # v2.12.29 (DEEP-7 #7): zero-amount validation — اگه amount <= 0
     # باشه، order گیر می‌کنه و قابل پرداخت نیست.
     if amount_toman <= 0:
@@ -8227,7 +8318,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.4"
+BUILD_VERSION = "2026-10-23-v2.23.5"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)

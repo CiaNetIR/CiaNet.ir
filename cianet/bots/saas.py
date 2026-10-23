@@ -1521,6 +1521,14 @@ class SaaSBot:
             await event.answer("⛔ دسترسی نداری", alert=True)
             return
 
+        # v2.23.5 (AUDIT-43 43-b#7): ویزاردِ admin_panel هم پاک می‌شود —
+        # NAV_HOME/NAV_BACK هر دو را می‌پاکند ولی «ادمین» فقط self.wizards
+        # را می‌پاک کرد؛ کاربرِ وسطِ لاگین (WIZ_PHONE) با زدنِ «ادمین»،
+        # ویزاردِ پنهانِ مسلح می‌ماند و متنِ بعدی‌اش همچنان به‌عنوان شماره
+        # تلفن مصرف می‌شد.
+        await self._clear_admin_panel_wizard(event.sender_id)
+        self.wizards.pop(event.sender_id, None)
+
         # ── آمارها (یک‌بار محاسبه) ──
         pending_pay = len(list_pending_payments())
         open_tk = len(list_open_tickets())
@@ -3458,14 +3466,25 @@ class SaaSBot:
         #   "🔐 2FA" — رمز دو مرحله‌ای (تغییر/حذف/ریست)
         viewer_role = self._role(event.sender_id)
         if viewer_role in (ROLE_OWNER, ROLE_ADMIN):
-            buttons.append([
-                UI.go("📱 دستگاه‌ها", _act("sess")),
-                UI.go("🔐 2FA", _act("tfa")),
-            ])
-            buttons.append([
-                UI.go("📲 کد لاگین", _act("getcode")),
-                UI.go("📨 ارسال پیام", _act("send")),
-            ])
+            # v2.23.5 (AUDIT-43 43-c#5): دکمه‌های ابزارِ امنیتی فقط برای کسی
+            # که واقعاً اجازهٔ اجرایشان را دارد رندر می‌شوند — ADMIN به گاردهای
+            # SECURITY_ROUTES می‌خورد و «فعال نشده» می‌گرفت (fail-closed ولی
+            # تبلیغِ قابلیتِ ناموجود). OWNER/OWNER_IDS همیشه می‌بینند؛ ADMIN
+            # فقط با grant فعّالِ CAP_ACCOUNT_SECURITY.
+            _viewer_sees_security = (
+                viewer_role == ROLE_OWNER
+                or event.sender_id in OWNER_IDS
+                or bool(get_active_grants(event.sender_id, CAP_ACCOUNT_SECURITY))
+            )
+            if _viewer_sees_security:
+                buttons.append([
+                    UI.go("📱 دستگاه‌ها", _act("sess")),
+                    UI.go("🔐 2FA", _act("tfa")),
+                ])
+                buttons.append([
+                    UI.go("📲 کد لاگین", _act("getcode")),
+                    UI.go("📨 ارسال پیام", _act("send")),
+                ])
             # v2.12.24: محافظتِ ورود — toggle
             # v2.14.6 (USER-REQUEST): فقط مالک اصلی سلف دکمه را می‌بیند.
             _viewer_id_for_btn2 = event.sender_id
@@ -8882,9 +8901,19 @@ class SaaSBot:
                         )
                         # v2.12.23 (QA10-STABILITY BUG#4): trim سایر جدول‌ها
                         # که قبلاً بدون محدودیت رشد می‌کردن.
-                        c.execute(
-                            "DELETE FROM wallet_transactions WHERE created_at < datetime('now', '-365 days')"
-                        )
+                        # v2.23.5 (AUDIT-43 43-a#6): نگهداشتِ دفترِ مالی قابل
+                        # تنظیم است — CIANET_WALLET_RETENTION_DAYS (پیش‌فرض
+                        # ۳۶۵، ۰ = بی‌نهایت). دفترِ wallet تنها ردیفِ
+                        # balance_after حسابرسی است؛ حذفِ خودکارش باید تصمیمِ
+                        # صریحِ مالک باشد نه عددِ هاردکد.
+                        _wallet_days = os.environ.get(
+                            "CIANET_WALLET_RETENTION_DAYS", "365").strip()
+                        _wallet_days = int(_wallet_days) if _wallet_days.isdigit() else 365
+                        if _wallet_days > 0:
+                            c.execute(
+                                "DELETE FROM wallet_transactions WHERE created_at < datetime('now', ?)",
+                                (f'-{_wallet_days} days',)
+                            )
                         c.execute(
                             "DELETE FROM orders WHERE status IN ('expired', 'cancelled') "
                             "AND created_at < datetime('now', '-90 days')"
@@ -9040,9 +9069,19 @@ class SaaSBot:
                 # آن‌ها را انجام می‌دهد) ولی برای اطمینانِ idempotent بودن
                 # نگه داشته شدیم.
                 try:
-                    await delete_user_completely_async(uid)
+                    _deleted = await delete_user_completely_async(uid)
                 except Exception as e:
+                    _deleted = False
                     print(f"⚠️ [cleanup] delete_user_completely_async error for uid={uid}: {e}")
+                # v2.23.5 (AUDIT-43 43-f#2): نتیجهٔ حذف چک می‌شود — قبلاً با
+                # False (مثلاً ردیفِ subscriptions یتیم بدونِ users؛ PRECHECK
+                # شکست می‌خورد) باز «حذف شد» چاپ و پیامِ حذف به کاربر فرستاده
+                # می‌شد؛ ردیف می‌ماند و هر sweep ساعتی همان کاربر را دوباره
+                # انتخاب و پیامِ حذف را تکرار می‌کرد.
+                if not _deleted:
+                    print(f"⚠️ [cleanup] delete برای uid={uid} کامل نشد (PRECHECK/مرحلهٔ حیاتی) — "
+                          f"ردیف باقی است؛ sweep بعدی دوباره تلاش می‌کند. پیام کاربر ارسال نشد.")
+                    continue
 
                 # 5. پیام آخر (اگر بتونه)
                 try:
@@ -10494,6 +10533,10 @@ class SaaSBot:
                     ltype = data.split(":", 1)[1]
                     wiz = self.wizards.get(event.sender_id)
                     if wiz is None or wiz["state"] != "cl_pending_type":
+                        # v2.23.5 (AUDIT-43 43-b#6): اسپینرِ کلاینت با پاسخِ
+                        # صریح بسته می‌شود — قبلاً return بی‌جواب تا timeoutِ
+                        # تلگرام می‌چرخید (دابل‌کلیک/کلیکِ بعد از TTL)
+                        await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)
                         return
                     wiz["data"]["license_type"] = ltype
                     if ltype == LICENSE_TYPE_ADMIN:
@@ -10529,6 +10572,7 @@ class SaaSBot:
                 if data.startswith("cl_dur:"):
                     wiz = self.wizards.get(event.sender_id)
                     if wiz is None or wiz["state"] != "cl_pending_duration":
+                        await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)  # v2.23.5 (43-b#6)
                         return
                     duration = int(data.split(":", 1)[1])
                     ltype = wiz["data"].get("license_type", LICENSE_TYPE_ACCOUNT)
@@ -10701,6 +10745,7 @@ class SaaSBot:
                     ltype = data.split(":", 1)[1]
                     wiz = self.wizards.get(event.sender_id)
                     if wiz is None or wiz["state"] != "cl_batch_pending_type":
+                        await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)  # v2.23.5 (43-b#6)
                         return
                     wiz["data"]["license_type"] = ltype
                     if ltype == LICENSE_TYPE_ADMIN:
@@ -10737,6 +10782,7 @@ class SaaSBot:
                 if data.startswith("cl_batch_dur:"):
                     wiz = self.wizards.get(event.sender_id)
                     if wiz is None or wiz["state"] != "cl_batch_pending_duration":
+                        await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)  # v2.23.5 (43-b#6)
                         return
                     duration = int(data.split(":", 1)[1])
                     wiz["data"]["duration_days"] = duration
@@ -10811,7 +10857,11 @@ class SaaSBot:
                     # اکانتِ خودِ کاربر است. کاربرِ لاگین‌نکرده به‌جای alert،
                     # صفحه‌ی راهنمایِ دوستانه با دکمه‌ی مستقیمِ لاگین می‌رود
                     # (قیفِ فروش: ریپورتر ← لاگین ← اشتراک).
-                    if not self._user_has_logged_in_account(event.sender_id):
+                    # v2.23.5 (AUDIT-43 43-e#4): OWNER مستثناست — اونرِ بدونِ
+                    # اکانتِ لاگین‌شده هم باید به تنظیمات ریپورتر (kill-switch)
+                    # برسد؛ وگرنه خاموش‌کردنِ اضطراری ممکن نبود.
+                    if self._role(event.sender_id) != ROLE_OWNER \
+                            and not self._user_has_logged_in_account(event.sender_id):
                         from cianet.bots.ui import UI as _UI
                         await event.edit(
                             _UI.screen(
@@ -10842,7 +10892,11 @@ class SaaSBot:
                 # همان گیتِ لاگین دوباره چک می‌شود (دفاع‌در‌عمق) و کل منطق
                 # در cianet/bots/reporter.py است.
                 if data.startswith("reporter:"):
-                    if not self._user_has_logged_in_account(event.sender_id):
+                    # v2.23.5 (AUDIT-43 43-e#4): گیتِ لاگین برای OWNER نیست —
+                    # تنظیمات ریپورتر (kill-switch/سقف) بدونِ لاگینِ اکانت هم
+                    # باید برای مالک باز باشد.
+                    if self._role(event.sender_id) != ROLE_OWNER \
+                            and not self._user_has_logged_in_account(event.sender_id):
                         await event.answer(
                             "🎙 ریپورتر فقط برای کاربرانی است که اکانت خودشان "
                             "را در ربات لاگین کرده‌اند.", alert=True)
@@ -11062,7 +11116,11 @@ class SaaSBot:
             # شده، ولی callback دست‌ساز/کهنه‌ی «add» هم باید در Backend رد
             # شود (حذف دکمه به تنهایی کافی نیست). مدیریتِ SelfBotِ موجود
             # مشمول این شرط نیست — مالکیت معیار آن است.
-            if role == ROLE_USER and data == "add":
+            # v2.23.5 (AUDIT-43 43-b#8): نماینده هم مشمول گیت است — سیاستِ
+            # مستند (saas.py بالا): «نماینده مثل کاربر عادی اشتراکِ خودش
+            # را دارد»؛ قبلاً نمایندهِ منقضی‌شده می‌توانست بی‌نهایت اکانت
+            # اضافه کند.
+            if role in (ROLE_USER, ROLE_RESELLER) and data == "add":
                 if not self._user_sub_status(event.sender_id)["active"]:
                     await event.answer("❌ برای افزودن SelfBot باید اشتراک فعال داشته باشید.", alert=True)
                     return

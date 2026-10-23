@@ -2818,6 +2818,18 @@ class AdminBot:
     async def _cancel_wizard(self, uid: int, notify_event=None, chat=None):
         wiz = self.wizards.pop(uid, None)
         await self._cleanup_wizard_temp_client(wiz)
+        # v2.23.5 (AUDIT-43 43-c#7): سشنِ موقتِ ویزاردِ لغوشده هم پاک می‌شود —
+        # مسیرِ لغو («لغو» متنی یا cancel_wizard) قبلاً فقط disconnect می‌کرد
+        # و فایلِ wiz_*.session (شاید حاویِ auth key کامل) تا ری‌استارت روی
+        # دیسک می‌ماند؛ cleanup_orphan_sessions فقط موقعِ استارتاپ می‌جارید.
+        try:
+            _wtag = ((wiz or {}).get("data") or {}).get("tag")
+            if _wtag and _wtag.startswith("wiz_"):
+                _cfg_now = self.sb.load_config()
+                if not isinstance(_cfg_now, dict) or _wtag not in _cfg_now:
+                    _remove_session_files(_wtag)
+        except Exception:
+            pass
         # v2.22.2: مسیرِ شروع‌کننده‌ی ویزاردِ لغوشده از پشته‌ی ناوبری
         # برداشته می‌شود (برای همه‌ی شاخه‌های پایین، یک‌بار و idempotent).
         self._pop_wizard_launch_route(uid)
@@ -3006,6 +3018,14 @@ class AdminBot:
                 await temp_client.disconnect()
             except Exception:
                 pass
+            # v2.23.5 (AUDIT-43 43-c#7): فایلِ سشنِ موقت همین‌جا پاک می‌شود —
+            # قبلاً فقط disconnect می‌شد و wiz_*.session روی دیسک می‌ماند تا
+            # ری‌استارتِ بعدی (cleanup_orphan_sessions فقط استارتاپی است)؛
+            # سشنِ حاویِ auth key کامل با ۰۶۰۰، ولی روی دیسک.
+            try:
+                _remove_session_files(tag)
+            except Exception:
+                pass
             self.wizards.pop(event.sender_id, None)
             return
         except errors.PhoneNumberUnoccupiedError:
@@ -3019,6 +3039,10 @@ class AdminBot:
             )
             try:
                 await temp_client.disconnect()
+            except Exception:
+                pass
+            try:
+                _remove_session_files(tag)  # v2.23.5 (43-c#7): سشن موقت یتیم نمی‌ماند
             except Exception:
                 pass
             self.wizards.pop(event.sender_id, None)
@@ -3035,6 +3059,10 @@ class AdminBot:
                 await temp_client.disconnect()
             except Exception:
                 pass
+            try:
+                _remove_session_files(tag)  # v2.23.5 (43-c#7): سشن موقت یتیم نمی‌ماند
+            except Exception:
+                pass
             self.wizards.pop(event.sender_id, None)
             return
         except Exception as e:
@@ -3044,6 +3072,10 @@ class AdminBot:
             await self._respond_safe(event, _friendly_error(e, "send_code") + "\nویزارد لغو شد.")
             try:
                 await temp_client.disconnect()
+            except Exception:
+                pass
+            try:
+                _remove_session_files(tag)  # v2.23.5 (43-c#7): سشن موقت یتیم نمی‌ماند
             except Exception:
                 pass
             self.wizards.pop(event.sender_id, None)
@@ -4150,6 +4182,9 @@ class AdminBot:
                     wiz["state"] = WIZ_SEND_MSG_TEXT
                     await event.edit("متن پیام رو بفرست:",
                                       buttons=[[UI.neutral(UI.L_CANCEL, "cancel_wizard")]])
+                else:
+                    # v2.23.5 (AUDIT-43 43-b#6): اسپینر بی‌پاسخ نمی‌ماند
+                    await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)
             elif data.startswith("proxy_start:"):
                 tag = data.split(":", 1)[1]
                 await self._start_proxy_wizard(event, tag)
@@ -4164,6 +4199,9 @@ class AdminBot:
                 wiz = self.wizards.get(event.sender_id)
                 if wiz:
                     await self._finish_proxy(event, wiz["data"])
+                else:
+                    # v2.23.5 (AUDIT-43 43-b#6): اسپینر بی‌پاسخ نمی‌ماند
+                    await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)
             elif data.startswith("disable:"):
                 tag = data.split(":", 1)[1]
                 await self._disable_account(event, tag)

@@ -17,6 +17,11 @@ fastapi>=0.100.0      # Web Panel backend
 uvicorn[standard]>=0.23.0  # ASGI server
 pydantic>=2.0.0      # validation
 passlib[bcrypt]>=1.7.4  # password hashing for panel login
+# v2.23.5 (AUDIT-43 43-d#6): bcrypt پین شد — passlib 1.7.4 با bcrypt>=5.0
+# ناسازگار است («password cannot be longer than 72 bytes» در backend-probe)
+# و چون web_panel._verify_password خطا را می‌بلعد، لاگینِ ادمین در نصبِ
+# تازه با رمزِ درست هم ۴۰۱ می‌داد (آزموده‌شده در سندباکس ممیزی).
+bcrypt==4.0.1
 python-multipart>=0.0.6  # form data (login)
 
 # === Standard library only for everything else ===

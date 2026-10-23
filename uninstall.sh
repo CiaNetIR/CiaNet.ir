@@ -53,6 +53,11 @@ rm -f /etc/systemd/system/selfbot.service
 rm -f /etc/systemd/system/cianet-panel.service
 rm -f /etc/systemd/system/cianet-tunnel.service
 rm -f /etc/systemd/system/cianet.service
+# v2.23.5 (AUDIT-43 43-e#18): تایمر/سرویس watchdog هم پاک شود
+systemctl stop cianet-watchdog.timer 2>/dev/null || true
+systemctl disable cianet-watchdog.timer 2>/dev/null || true
+rm -f /etc/systemd/system/cianet-watchdog.service
+rm -f /etc/systemd/system/cianet-watchdog.timer
 rm -f /etc/systemd/system/multi-user.target.wants/selfbot.service
 rm -f /etc/systemd/system/multi-user.target.wants/cianet-panel.service
 # حذف sudoers ساخته‌شده توسط install.sh (برای auto-update)

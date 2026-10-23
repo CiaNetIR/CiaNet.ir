@@ -588,10 +588,17 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
         # v2.16.0 (SPLIT): کل پکیج cianet/ هم به چک اضافه شد — بدون این،
         # یک فایل خراب داخل پکیج از این گار رد می‌شد و بعد از restart
         # سرویس روی ImportError چرخه‌ی crash می‌افتاد.
+        # v2.23.5 (AUDIT-43 43-e#12): (۱) cianet_updater.py تازه هم چک
+        # می‌شود — پروسهٔ در حالِ اجرا کدِ قدیمی است و فایلِ روی دیسکِ
+        # پس از reset تازه است؛ parse کردنش یعنی اعتبارسنجیِ نسخهٔ جدید
+        # پیش از restart (آپدیترِ خراب = crash-loop بعد از restart چون
+        # main آن را import می‌کند). (۲) فقط SyntaxError گرفته نمی‌شد —
+        # UnicodeDecodeError/OSError بعد از reset بدون rollback می‌مُرد؛
+        # حالا همان ماشینِ rollback برای آن‌ها هم اجرا می‌شود.
         new_main_path = os.path.join(repo_dir, "main.py")
         try:
             import ast as _ast
-            _sanity_names = ["main.py", "web_panel.py"]
+            _sanity_names = ["main.py", "web_panel.py", "cianet_updater.py"]
             _pkg_dir = os.path.join(repo_dir, "cianet")
             if os.path.isdir(_pkg_dir):
                 for _root, _dirs, _files in os.walk(_pkg_dir):
@@ -606,9 +613,15 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 with open(_sanity_path, "r", encoding="utf-8") as _f:
                     _src = _f.read()
                 _ast.parse(_src, filename=_sanity_path)
-        except SyntaxError as _se:
+        except (SyntaxError, UnicodeDecodeError, OSError) as _se:
+            # v2.23.5 (AUDIT-43 43-e#12): UnicodeDecodeError/OSError هم مانند
+            # SyntaxError به ماشینِ rollback می‌روند (قبلاً از دستِ except
+            # می‌گذشتند و apply_update با exception بیرون می‌افتاد بدون rollback).
             _bad_file = os.path.basename(getattr(_se, "filename", None) or "main.py")
-            log.error("❌ new %s has SyntaxError: %s — rolling back", _bad_file, _se)
+            _se_msg = getattr(_se, "msg", None) or getattr(_se, "reason", None) or str(_se)
+            _se_lineno = getattr(_se, "lineno", None) or "?"
+            log.error("❌ new %s failed sanity (%s: %s) — rolling back",
+                      _bad_file, type(_se).__name__, _se)
             # v2.14.2 (BUG-18b): web_panel.py هم (best-effort از git) به
             # نسخه‌ی قبل از reset برگردونده می‌شه تا پنل روی کد خراب بالا
             # نیاید. backup فقط از main.py گرفته می‌شه (§14.1 گام ۳ / §14.5)،
@@ -658,11 +671,11 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                     state = _read_state()
                     state["rolled_back"] = True
                     state["rolled_back_at"] = time.time()
-                    state["rollback_reason"] = f"syntax_error: {_se.msg}"
+                    state["rollback_reason"] = f"sanity_fail: {type(_se).__name__}: {_se_msg}"
                     _write_state(state)
                     return False, (
                         f"❌ آپدیت ناموفق: {_bad_file} جدید SyntaxError داشت "
-                        f"(خط {_se.lineno}: {_se.msg}). به backup برگشتیم:\n"
+                        f"(خط {_se_lineno}: {_se_msg}). به backup برگشتیم:\n"
                         f"{backup_path}\n\nربات روی نسخه‌ی قبلی ادامه می‌دهد."
                     )
                 except Exception as _re:
@@ -897,6 +910,26 @@ def _backup_main_py(repo_dir: str = None) -> Optional[str]:
             os.chmod(backup, 0o600)
         except OSError:
             pass  # best-effort — اگه FS از chmod پشتیبانی نکنه (مثلاً FAT)
+        # v2.23.5 (AUDIT-43 43-d#8): سایدکارِ commit — کنارِ هر بکاپ،
+        # HEAD لحظهٔ بکاپ نوشته می‌شود تا rollback وب بتواند کلِ درختِ
+        # پروژه (نه فقط main.py شیم‌شده) را به همین لحظه برگرداند.
+        # قبلاً rollback فقط main.py را عوض می‌کرد که بعد از تفکیکِ v2.16
+        # یک shim ۴۳-خطی است — کدِ واقعی (cianet/ و web_panel.py) هرگز
+        # برنمی‌گشت (placebo).
+        try:
+            _head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=5,
+            )
+            if _head.returncode == 0:
+                _sidecar = backup.with_name(backup.name + ".commit")
+                _sidecar.write_text(_head.stdout.strip(), encoding="utf-8")
+                try:
+                    os.chmod(_sidecar, 0o600)
+                except OSError:
+                    pass
+        except Exception:
+            pass  # best-effort — legacy بدون سایدکار با مسیرِ قدیمی کار می‌کند
         # v2.12.23 (QA10-STABILITY BUG#5): پاکسازی backup‌های قدیمی.
         # فقط ۱۰ تا backup اخیر رو نگه دار. بقیه حذف بشن تا disk پر نشه.
         try:
@@ -927,10 +960,19 @@ def _cleanup_old_backups(versions_dir: Path, keep: int = 10) -> None:
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
+    # v2.23.5 (AUDIT-43 43-d#8): سایدکارهای .commit خودِ بکاپ نیستند — از
+    # پنجرهٔ keep حذف می‌شوند تا اسلات نگیرند (پاکسازی‌شان در حلقهٔ زیر)
+    all_backups = [p for p in all_backups if not p.name.endswith(".commit")]
     for old in all_backups[keep:]:
         try:
             old.unlink()
             log.info("cleaned up old backup: %s", old.name)
+        except Exception:
+            pass
+        # v2.23.5 (AUDIT-43 43-d#8): سایدکارِ commitِ همین بکاپ هم پاک شود
+        # (وگرنه فایل‌های .commit یتیم انباشته می‌شدند)
+        try:
+            old.with_name(old.name + ".commit").unlink()
         except Exception:
             pass
 

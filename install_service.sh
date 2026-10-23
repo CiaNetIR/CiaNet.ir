@@ -167,6 +167,34 @@ fi
 EOF
 chmod +x "$WATCHDOG"
 
+# v2.23.5 (AUDIT-43 43-e#18): زمان‌بندیِ واقعی برای watchdog — قبلاً فایل
+# نوشته و chmod +x می‌شد ولی هیچ cron/timer آن را اجرا نمی‌کرد (artifact
+# مرده). حالا یک سرویس+تایمر systemd هر ۵ دقیقه آن را می‌جارد. عمداً به‌صورتِ
+# root اجرا می‌شود (مثل cronِ طراحیِ اولیه): خودِ اسکریپت systemctl restart
+# می‌زند و به /var/log می‌نویسد — هر دو با user سرویس ممکن نیست.
+cat > /etc/systemd/system/cianet-watchdog.service <<WEOF
+[Unit]
+Description=CiaNet SelfBot Watchdog (one-shot)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${WATCHDOG}
+WEOF
+cat > /etc/systemd/system/cianet-watchdog.timer <<WEOF
+[Unit]
+Description=Run CiaNet watchdog every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=cianet-watchdog.service
+
+[Install]
+WantedBy=timers.target
+WEOF
+systemctl daemon-reload
+systemctl enable --now cianet-watchdog.timer 2>/dev/null || true
+
 # ─── مالکیت دایرکتوری پروژه برای کاربر سرویس ───
 echo -e "${YELLOW}🔧 تنظیم مالکیت فایل‌ها برای ${SERVICE_USER}...${NC}"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$SCRIPT_DIR" 2>/dev/null || {

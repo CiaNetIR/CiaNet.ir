@@ -3157,7 +3157,13 @@ class SelfBot:
                     pass
 
         async def wrapped_send_message(*args, **kwargs):
-            if not self._gate_outbound():
+            # v2.23.5 (AUDIT-43 43-c#6): دایس از گیتِ outbound عبور می‌کند —
+            # سه تلاشِ هر دور با gather هم‌زمان صدا زده می‌شوند و گیتِ
+            # cooldown ۱ثانیه‌ای، تلاش‌های ۲و۳ را بی‌صدا می‌کشت (~۱ دایس به‌جای
+            # ۳ در هر دور = بازی‌های ۳ برابر طولانی‌تر + AttributeError در
+            # پاکسازیِ losers چون None نه Exception بود). دایس به «me» می‌رود
+            # (Saved Messages) پس نرخ‌گیری واقعی روی دیگران اثر ندارد.
+            if not getattr(self, "_dice_gate_bypass", False) and not self._gate_outbound():
                 await _notify_ratelimit_drop("message")
                 return None
             result = await orig_send_message(*args, **kwargs)
@@ -4333,6 +4339,11 @@ class SelfBot:
                     return
 
                 try:
+                    # v2.23.5 (AUDIT-43 43-c#6): پرچمِ عبور از گیت فقط برای این
+                    # gather روشن است — سه دایسِ دور با هم (مقصد: Saved Messages)
+                    # و cleanup از Noneها فیلتر می‌شود (گیتِ قبلاً بعضی تلاش‌ها
+                    # را None برمی‌گرداند نه Exception).
+                    self._dice_gate_bypass = True
                     results = await asyncio.gather(
                         *[
                             self.client.send_message(
@@ -4347,8 +4358,11 @@ class SelfBot:
                 except Exception as e:
                     print(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی (توقف فوری): {e}")
                     return
+                finally:
+                    self._dice_gate_bypass = False
 
-                valid = [m for m in results if not isinstance(m, Exception)]
+                valid = [m for m in results
+                         if not isinstance(m, Exception) and m is not None]
                 flood_errors = [m for m in results if isinstance(m, errors.FloodWaitError)]
                 other_errors = [
                     m for m in results

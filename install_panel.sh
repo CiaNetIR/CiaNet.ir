@@ -425,6 +425,9 @@ EOF
                 if [ ! -x /usr/bin/cloudflared ] && [ -x /usr/local/bin/cloudflared ]; then
                     sed -i 's|/usr/bin/cloudflared|/usr/local/bin/cloudflared|' "$CF_SERVICE_FILE"
                 fi
+                # v2.23.5 (AUDIT-43 43-e#19): یونیتِ تانل حاویِ توکنِ زندهِ
+                # Cloudflare است — 0600 (قبلاً umask پیش‌فرض 0644 = world-readable)
+                chmod 600 "$CF_SERVICE_FILE"
 
                 systemctl daemon-reload
                 systemctl enable cianet-tunnel

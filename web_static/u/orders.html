@@ -71,7 +71,13 @@
         }
         let payBtnHtml = '';
         if (o.status === 'pending') {
-          payBtnHtml = `<button class="pay-btn" onclick="payWithWallet(${o.id}, '${escapeHtml(o.order_no)}', ${o.amount_toman})">💰 پرداخت با کیف پول (${faDigits(o.amount_toman)} Toman)</button>`;
+          // v2.23.5 (AUDIT-43 43-d#5): دکمهٔ پرداخت با data-attributes — قبلاً
+          // order_no داخلِ رشتهٔ JSِ تک‌کوتیشن‌دار در attribute می‌نشست و
+          // escapeHtml فقط &#39; می‌داد که HTML parser قبل از JS آن را به '
+          // decode می‌کند = امکان شکستن به JS دلخواه (latent — order_no
+          // سرور-ساخته است ولی الگوی خطرناک است). حالا مقادیر فقط در
+          // dataset و listener امن خوانده می‌شوند.
+          payBtnHtml = `<button class="pay-btn" data-oid="${o.id}" data-order-no="${escapeHtml(o.order_no)}" data-amount="${o.amount_toman}">💰 پرداخت با کیف پول (${faDigits(o.amount_toman)} Toman)</button>`;
         }
         div.innerHTML = `
           <div><strong>${escapeHtml(o.order_no)}</strong> — ${escapeHtml(o.plan)}</div>
@@ -97,6 +103,17 @@
         alert('خطا: ' + err.message);
       }
     }
+    // v2.23.5 (AUDIT-43 43-d#5): event delegation — دکمه‌های pay-btn از طریق
+    // dataset به payWithWallet وصل می‌شوند (نه onclick درون‌خطی)
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.pay-btn');
+      if (!btn) return;
+      payWithWallet(
+        parseInt(btn.dataset.oid, 10),
+        btn.dataset.orderNo || '',
+        parseInt(btn.dataset.amount, 10) || 0
+      );
+    });
     document.addEventListener('DOMContentLoaded', loadOrders);
   </script>
 </body>
