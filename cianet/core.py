@@ -1077,6 +1077,30 @@ def _migrate_schema(c) -> None:
             print("✅ [saas_db] مهاجرت wallet_transactions انجام شد.")
 
 
+def _split_sql_statements(script: str) -> list:
+    """تقسیمِ اسکریپتِ اسکیمای ثابت به statementهای تکی برای اجرایِ
+    تراکنشیِ یکی‌یکی با execute() — به‌جای executescript.
+
+    چرا executescript نه: executescript تراکنشِ بازِ BEGIN IMMEDIATE را
+    به‌طورِ ضمنی COMMIT می‌کند و خودش بدونِ تراکنش اجرا می‌شود — یعنی
+    شکستِ میانی، اسکیمای نیمه‌کاره را روی DB می‌گذارد (جزئیات در
+    init_db).
+
+    chunkهایی که فقط کامنت (-- ...) و فضای سفید دارند حذف می‌شوند؛
+    کامنت‌هایِ درونِ statement (بینِ توکن‌ها) دست‌نخورده می‌مانند. این
+    تقسیم‌بندی فقط برای اسکیمایِ ثابتِ خودمان (بدونِ literal رشته‌ایِ
+    سمیکولن‌دار) طراحی شده — برای SQL عمومیِ دلخواه نیست.
+    """
+    stmts = []
+    for chunk in script.split(";"):
+        if any(
+            line.strip() and not line.strip().startswith("--")
+            for line in chunk.splitlines()
+        ):
+            stmts.append(chunk.strip())
+    return stmts
+
+
 def init_db() -> None:
     if os.path.exists(DB_PATH):
         try:
@@ -1087,9 +1111,7 @@ def init_db() -> None:
                 _chmod_private(_bak_path, 0o600)
         except Exception as _be:
             print(f"⚠️ [saas_db] pre-migration backup failed: {_be}")
-    with _conn_immediate() as c:
-        _migrate_schema(c)
-        c.executescript("""
+    _SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS admins (
             user_id INTEGER PRIMARY KEY,
             role TEXT NOT NULL CHECK(role IN ('OWNER','ADMIN','RESELLER')),
@@ -1178,7 +1200,7 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, status);
         CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, expires_at);
         -- Replay protection در سطح دیتابیس: هر txid فقط یک‌بار (روی هر فاکتور).
-        -- به‌صورت جدا (خارج از executescript) ساخته می‌شود تا اگر دیتابیس
+        -- به‌صورت جدا (خارج از اسکیمای بالا) ساخته می‌شود تا اگر دیتابیس
         -- قدیمی تکراری دارد (قبل از این قانون ساخته شده)، استارت‌آپ کرش نکند:
         -- در آن صورت ایندکس یکتا ساخته نمی‌شود و چک پایتونیِ replay همچنان
         -- در تراکنش فعال می‌ماند.
@@ -1276,8 +1298,24 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_users_reseller ON users(reseller_id);
         CREATE INDEX IF NOT EXISTS idx_ticket_msgs_ticket ON ticket_messages(ticket_id);
         CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
-        """)
-        # Replay protection در سطح دیتابیس (خارج از executescript تا خطای
+        """
+    with _conn_immediate() as c:
+        _migrate_schema(c)
+        # v2.23.2 (AUDIT-45/⑤ — MED): این اسکیما قبلاً با executescript
+        # اجرا می‌شد که (۱) تراکنشِ بازِ BEGIN IMMEDIATEِ مهاجرت‌های
+        # بالا را به‌طورِ ضمنی COMMIT می‌کرد و (۲) خودش بدونِ تراکنش،
+        # statementبه‌statement اجرا می‌شد؛ مهاجرت‌هایِ بازسازیِ
+        # dedicated_bots که بعد از این خط می‌آیند هم اصلاً بیرونِ هر
+        # تراکنشی بودند. نتیجه: بمیرد پروسه وسط کار (قطع برق/پرشدنِ
+        # دیسک/کرش)، اسکیمای نیمه‌کاره روی DB می‌ماند و بوتِ بعدی روی
+        # جدولِ تکراری یا ستونِ غایب کرش می‌کرد = boot-loop. SQLite از
+        # DDL تراکنشی کامل پشتیبانی می‌کند؛ حالا statementها یکی‌یکی با
+        # execute() داخلِ همین تراکنشِ واحد اجرا می‌شوند — کلِ init_db
+        # (مهاجرت‌ها + اسکیما + ایندکس‌ها + seed) یا کامل commit می‌شود
+        # یا کامل rollback.
+        for _stmt in _split_sql_statements(_SCHEMA_SQL):
+            c.execute(_stmt)
+        # Replay protection در سطح دیتابیس (خارج از حلقهٔ بالا تا خطای
         # تکراریِ قدیمی استارت‌آپ را کرش نکند): هر txid فقط یک‌بار روی هر
         # فاکتور. اگر دیتابیس قدیمی تکراری دارد، ایندکس یکتا ساخته نمی‌شود
         # و چک پایتونیِ replay داخل تراکنش همچنان محافظ است.
@@ -2151,7 +2189,11 @@ def reporter_recently_reported(user_id: int, target_id, hours: int = None,
     v2.19.2: hours=None یعنی مقدارِ تنظیم‌شده‌ی مالک (reporter_dup_hours).
     v2.19.4 (AUDIT-36 L8): fallback رشته‌ای که docstring وعده می‌داد بالاخره
     پیاده شد — وقتی target_id هست همان مقایسه‌ی عددی؛ وقتی None است و
-    target (رشته) داده شده، مقایسه روی ستونِ target انجام می‌شود."""
+    target (رشته) داده شده، مقایسه روی ستونِ target انجام می‌شود.
+    v2.23.2 (AUDIT-45/③): فقط بسته‌هایی که واقعاً شلیک داشته‌اند
+    (report_count > 0) پنجرهٔ dup را قفل می‌کنند — بستهٔ fail-resolve
+    با count=0 دیگر نه از مسیر target_id و نه از مسیرِ fallback رشته‌ای
+    قفل نمی‌کند تا کاربر بتواند همان هدف را دوباره امتحان کند."""
     if hours is None:
         hours = reporter_dup_hours()
     if not _ensure_reporter_ready():
@@ -2161,7 +2203,8 @@ def reporter_recently_reported(user_id: int, target_id, hours: int = None,
         with _conn() as c:
             row = c.execute(
                 "SELECT 1 FROM reporter_logs "
-                "WHERE user_id = ? AND target_id = ? AND created_at >= ? LIMIT 1",
+                "WHERE user_id = ? AND target_id = ? AND report_count > 0 "
+                "AND created_at >= ? LIMIT 1",
                 (user_id, int(target_id), cutoff),
             ).fetchone()
         return row is not None
@@ -2171,7 +2214,7 @@ def reporter_recently_reported(user_id: int, target_id, hours: int = None,
         row = c.execute(
             "SELECT 1 FROM reporter_logs "
             "WHERE user_id = ? AND target_id IS NULL AND target = ? "
-            "AND created_at >= ? LIMIT 1",
+            "AND report_count > 0 AND created_at >= ? LIMIT 1",
             (user_id, str(target)[:120], cutoff),
         ).fetchone()
     return row is not None
@@ -2186,12 +2229,19 @@ def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
     رفتارِ قدیمی). سهمیهٔ روزانه با SUM همین ستون مصرف می‌شود؛ target_id
     را فقط برای بستهٔ «تمام‌شده» پر کنید (بستهٔ ناتمام با NULL ثبت می‌شود
     تا پنجرهٔ dup هدف را قفل نکند و کاربر بتواند بقیهٔ سهمیه را بعداً
-    روی همان هدف شلیک کند)."""
+    روی همان هدف شلیک کند).
+    v2.23.2 (AUDIT-45/③): report_count=0 معتبر است و سهمیه نمی‌سوزاند —
+    برای بسته‌هایی که حتی یک شلیک هم به تلگرام نرسیدند (fail-resolve)."""
     if not _ensure_reporter_ready():
         # گزارشِ واقعی ممکن است به تلگرام رسیده باشد — شکستِ لاگ نباید
         # رسیدِ کاربر را خراب کند؛ فقط در کنسول هشدار می‌دهیم.
         print("⚠️ [core] add_reporter_log skipped: reporter table unavailable")
         return
+    # v2.23.2 (AUDIT-45/③): report_count=0 دیگر به 1 clamp نمی‌شود —
+    # بستهٔ fail-resolve (حتی یک شلیک هم به تلگرام نرسیده) نباید از
+    # سهمیهٔ روزانه کم کند. مقادیر منفی همچنان به 0 clamp می‌شوند و
+    # پیش‌فرضِ قدیمی (1 برای فراخوانی بدونِ report_count) حفظ شده است.
+    _count = max(0, int(report_count if report_count is not None else 1))
     with _conn() as c:
         c.execute(
             "INSERT INTO reporter_logs "
@@ -2201,7 +2251,7 @@ def add_reporter_log(user_id: int, target: str, target_id, target_type: str,
              int(target_id) if target_id is not None else None,
              str(target_type or "")[:20], str(category)[:40],
              1 if with_messages else 0, str(status)[:20],
-             max(1, int(report_count or 1)), _now()),
+             _count, _now()),
         )
 
 
@@ -2873,6 +2923,62 @@ def wallet_credit(user_id: int, amount: int, created_by: int,
         tx_id = cur.lastrowid
     log_action(created_by, "wallet_credit",
                 f"user={user_id}, amount={amount}, reason={reason or '-'}")
+    return {"ok": True, "balance": new_balance, "tx_id": tx_id}
+
+
+def credit_gateway_capture(user_id: int, amount: int, gateway: str,
+                           tx_ref: str = "") -> dict:
+    """v2.23.2 (AUDIT-45/② — MED): واریزِ خودکارِ پرداختِ اسیرشدهٔ درگاه.
+
+    سناریو: کاربر فاکتوری را با روشِ دیگری (مثلاً کیف پول) تسویه کرده
+    ولی بعد سرِ همان لینکِ قدیمیِ درگاه هم پرداخت می‌کند. پول در درگاه
+    قبض (verify موفق) می‌شود ولی چون فاکتور دیگر pending نیست، قبلاً هیچ‌جا
+    واریز نمی‌شد (capture-but-never-credited) و فقط صفحهٔ «قبلاً پرداخت
+    شده» می‌دید. این تابع مبلغ را اتمیک به کیف پول کاربر واریز می‌کند تا
+    برای تمدید/فاکتورِ بعدی قابلِ مصرف باشد.
+
+    نکتهٔ type: به‌جای نوعِ جدید (که CHECKِ قدیمیِ wallet_transactions روی
+    دیتابیس‌های موجود ردش می‌کند) از type='refund' استفاده می‌شود —
+    معنای دقیقِ «بازگشت پول» و در UI وب هم به‌صورتِ «بازگشت» (سبز) رندر
+    می‌شود. هیچ مسیرِ دیگری type='refund' با ref درج نمی‌کند، پس
+    idempotency روی (type='refund', ref) بی‌تداخل است.
+
+    Idempotent: اگر برای همین tx_ref قبلاً واریز شده باشد بدونِ واریزِ
+    دوم {"error": "already_credited"} برمی‌گرداند — callback درگاه ممکن
+    است دوبار بیاید.
+    """
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        return {"error": "invalid_amount"}
+    with _conn_immediate() as c:
+        urow = c.execute(
+            "SELECT wallet_balance FROM users WHERE user_id = ?", (user_id,),
+        ).fetchone()
+        if urow is None:
+            return {"error": "user_not_found"}
+        if tx_ref:
+            _dup = c.execute(
+                "SELECT id FROM wallet_transactions "
+                "WHERE type = 'refund' AND ref = ? LIMIT 1",
+                (tx_ref,),
+            ).fetchone()
+            if _dup is not None:
+                return {"error": "already_credited"}
+        current = int(urow["wallet_balance"] or 0)
+        new_balance = current + amount
+        c.execute(
+            "UPDATE users SET wallet_balance = ? WHERE user_id = ?",
+            (new_balance, user_id),
+        )
+        cur = c.execute(
+            "INSERT INTO wallet_transactions "
+            "(user_id, amount, balance_after, type, ref, reason, created_by, created_at) "
+            "VALUES (?, ?, ?, 'refund', ?, ?, 0, ?)",
+            (user_id, amount, new_balance, tx_ref or None,
+             f"واریز خودکار پرداخت تکراری درگاه {gateway}", _now()),
+        )
+        tx_id = cur.lastrowid
+    log_action(user_id, "gateway_overpay_credit",
+               f"amount={amount}, gateway={gateway}, ref={tx_ref or '-'}")
     return {"ok": True, "balance": new_balance, "tx_id": tx_id}
 
 
@@ -8121,7 +8227,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.1"
+BUILD_VERSION = "2026-10-23-v2.23.2"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -11817,6 +11923,7 @@ __all__ = [
     'create_ticket',
     'create_zarinpal_payment',
     'create_zibal_payment',
+    'credit_gateway_capture',
     'datetime',
     'db_init_db',
     'deactivate_license',

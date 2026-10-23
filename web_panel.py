@@ -1474,8 +1474,15 @@ def _get_remote_commit() -> str:
         return ""
 
 
-@app.get("/api/version")
-async def version_info(request: Request, _: None = Depends(require_auth)):
+def _collect_git_version_info() -> tuple:
+    """v2.23.2 (AUDIT-45/④ — MED): کلِ پرس‌وجویِ git نسخه به‌صورتِ یک
+    کارِ همگامِ یکپارچه — برای اجرا با asyncio.to_thread از روترِ async.
+
+    سه فراخوانیِ ساب‌پروسسِ sync (از جمله git fetch با timeout=15s)
+    قبلاً مستقیم روی event-loop اجرا می‌شدند؛ در حالتِ embed (پنلِ وب در
+    همان پروسهٔ سلف‌بات) هر بازدیدِ صفحهٔ نسخه، کلِ ربات را تا ~۲۰ ثانیه
+    فریز می‌کرد — همان مشکلی که AUDIT-36 H7 در check_for_update آپدیتر
+    رفع کرده بود ولی این اندپوینت جا مانده بود."""
     local = _get_local_commit()
     remote = _get_remote_commit()
     pending = []
@@ -1489,6 +1496,14 @@ async def version_info(request: Request, _: None = Depends(require_auth)):
             pending = [l for l in r.stdout.strip().split("\n") if l]
         except Exception:
             pass
+    return local, remote, pending
+
+
+@app.get("/api/version")
+async def version_info(request: Request, _: None = Depends(require_auth)):
+    # v2.23.2 (AUDIT-45/④): gitها در thread جدا — event-loop (و کلِ ربات
+    # در حالتِ embed) دیگر روی کندی/قطعیِ شبکه فریز نمی‌شود.
+    local, remote, pending = await asyncio.to_thread(_collect_git_version_info)
     # rollback candidates
     rollback_files = []
     versions_dir = _PROJECT_DIR / "versions"
@@ -2464,6 +2479,39 @@ p { color: #475569; line-height: 1.7; }
 <p>لازم نیست دوباره پرداخت کنید.<br>اشتراک شما از قبل فعال است.</p>
 </div></body></html>""")
 
+
+def _payment_overpay_credited_html(amount_toman: int, ref_id: str) -> _HTMLResponse:
+    """v2.23.2 (AUDIT-45/②): پرداختِ دوم روی فاکتورِ تسویه‌شده — مبلغ به
+    کیف پول کاربر واریز شده (نه گم‌شده)."""
+    try:
+        amt = f"{amount_toman:,}".replace(",", "،")
+    except Exception:
+        amt = str(amount_toman)
+    return _HTMLResponse(f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>پرداخت به کیف پول شما واریز شد — CiaNet</title>
+<style>
+body {{ font-family: 'Vazirmatn', Tahoma, sans-serif; background: #f0f4f8;
+  display: flex; min-height: 100vh; align-items: center; justify-content: center; margin: 0; }}
+.card {{ background: white; padding: 40px; border-radius: 16px; max-width: 460px;
+  text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
+.i {{ width: 80px; height: 80px; background: #16a34a; border-radius: 50%;
+  margin: 0 auto 20px; display: flex; align-items: center; justify-content: center;
+  color: white; font-size: 44px; font-weight: bold; }}
+h1 {{ color: #16a34a; margin: 0 0 12px; font-size: 22px; }}
+p {{ color: #475569; line-height: 1.8; }}
+.code {{ direction: ltr; font-family: monospace; background: #f1f5f9;
+  border-radius: 8px; padding: 4px 10px; display: inline-block; }}
+</style></head><body><div class="card">
+<div class="i">✓</div>
+<h1>پرداخت شما به کیف پول واریز شد</h1>
+<p>این فاکتور قبلاً پرداخت شده بود، ولی پرداخت دوم شما دریافت شد.<br>
+مبلغ <b>{amt} تومان</b> به کیف پول حساب شما اضافه شد و برای
+تمدید یا خرید بعدی قابل استفاده است.<br>
+<span class="code">{_html_module.escape(str(ref_id or "-"))}</span></p>
+</div></body></html>""")
+
 @app.get("/api/payment/zarinpal/callback")
 async def zarinpal_callback(request: Request, Authority: str = "", Status: str = ""):
     """callback Zarinpal بعد از پرداخت."""
@@ -2488,6 +2536,27 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
                 (m._now(), order["id"]),
             )
             if cur.rowcount == 0:
+                # v2.23.2 (AUDIT-45/② — MED): پولِ کاربر در درگاه قبض
+                # (verify موفق) شده ولی فاکتور دیگر pending نیست — قبلاً
+                # فقط صفحهٔ «قبلاً پرداخت شده» می‌داد و پول هیچ‌جا واریز
+                # نمی‌شد (capture-but-never-credited). حالا مبلغ اتمیک به
+                # کیف پول کاربر واریز می‌شود (idempotent روی authority)
+                # تا برای تمدید/خرید بعدی قابل مصرف باشد.
+                _cred = m.credit_gateway_capture(
+                    int(order["user_id"]), amount, "zarinpal",
+                    tx_ref=str(Authority or ""),
+                )
+                if _cred.get("ok"):
+                    try:
+                        await m._notify_user_async(int(order["user_id"]),
+                            f"💳 این فاکتور قبلاً پرداخت شده بود، ولی پرداخت دوم شما از درگاه دریافت شد.\n\n"
+                            f"💰 {m.fa_digits(amount)} تومان به کیف پول شما واریز شد "
+                            f"(کد پیگیری: {verify_result.get('ref_id', '-')}).\n"
+                            f"موجودی برای تمدید/خرید بعدی قابل استفاده است.")
+                    except Exception as _e:
+                        print(f"⚠️ [zarinpal_callback] overpay notify failed: {_e}", flush=True)
+                    return _payment_overpay_credited_html(
+                        amount, str(verify_result.get("ref_id", "-")))
                 return _payment_already_processed_html()
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)
@@ -2675,7 +2744,8 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
     if not row:
         return _payment_failed_html("سفارش پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.")
     order = dict(row)
-    verify_result = m.verify_zibal_payment(trackId, int(order["amount_toman"]))
+    amount = int(order["amount_toman"])
+    verify_result = m.verify_zibal_payment(trackId, amount)
     if verify_result.get("ok"):
         with m._conn_immediate() as c:
             cur = c.execute(
@@ -2684,6 +2754,23 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
                 (m._now(), order["id"]),
             )
             if cur.rowcount == 0:
+                # v2.23.2 (AUDIT-45/② — MED): همان فیکس زرین‌پال — پولِ
+                # قبض‌شده در درگاه نباید گم شود؛ به کیف پول واریز می‌شود.
+                _cred = m.credit_gateway_capture(
+                    int(order["user_id"]), amount, "zibal",
+                    tx_ref=str(trackId or ""),
+                )
+                if _cred.get("ok"):
+                    try:
+                        await m._notify_user_async(int(order["user_id"]),
+                            f"💳 این فاکتور قبلاً پرداخت شده بود، ولی پرداخت دوم شما از درگاه دریافت شد.\n\n"
+                            f"💰 {m.fa_digits(amount)} تومان به کیف پول شما واریز شد "
+                            f"(کد پیگیری: {verify_result.get('ref_id', '-')}).\n"
+                            f"موجودی برای تمدید/خرید بعدی قابل استفاده است.")
+                    except Exception as _e:
+                        print(f"⚠️ [zibal_callback] overpay notify failed: {_e}", flush=True)
+                    return _payment_overpay_credited_html(
+                        amount, str(verify_result.get("ref_id", "-")))
                 return _payment_already_processed_html()
         plan_name = order["plan"]
         pricing = m.get_pricing(plan_name)

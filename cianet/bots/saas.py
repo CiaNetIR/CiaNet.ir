@@ -3383,7 +3383,17 @@ class SaaSBot:
         else:
             # مسیرِ بازگشت از پشته می‌آید — دیگر لازم نیست مقصد را اینجا
             # بسازیم و در callback_data جاسازی کنیم.
-            await self.admin_panel._show_account_detail(event, tag)
+            # v2.23.2 (AUDIT-45/① — MED، نشتی اسکوپ): admin_panel یک
+            # singleton مشترک بین همهٔ کاربران است؛ ورودِ نماینده به هابِ
+            # اکانتِ مشتری بدونِ sync اسکوپ یعنی رندر با اسکوپِ کاربرِ
+            # قبلی — اگر آخرین کاربرِ پنل OWNER/ADMIN بود (owner_filter=None)،
+            # _viewer_owns_account به‌صورتِ OWNER رفتار می‌کرد و شمارهٔ
+            # تلفنِ مشتری برای نماینده رندر می‌شد. مثلِ بقیهٔ ورودی‌های
+            # admin_panel: sync + رندر هر دو زیرِ _panel_lock تا رویدادِ
+            # هم‌زمانِ کاربرِ دیگر نتواند اسکوپ را وسطِ رندر عوض کند.
+            async with self._panel_lock:
+                self._sync_admin_panel_scope(event.sender_id)
+                await self.admin_panel._show_account_detail(event, tag)
 
     async def _show_user_acc_quick_actions(self, event, target_user_id: int, tag: str):
         """

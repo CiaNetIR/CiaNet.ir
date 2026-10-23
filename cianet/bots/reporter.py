@@ -1180,9 +1180,18 @@ async def _run_burst(event, saas_bot, uid: int, d: dict) -> None:
 
     if not shooters:
         # هیچ اکانتی هدف را حل نکرد — همان رفتارِ خطای v2.20.0
-        add_reporter_log(uid, target, info.get("id"), info.get("type", ""),
+        # v2.23.2 (AUDIT-45/③ — MED): بستهٔ fail-resolve دیگر نه سهمیه
+        # می‌سوزاند و نه پنجرهٔ dup را روی هدف قفل می‌کند. قبلاً هر دو
+        # رخ می‌داد: report_count=1 یک واحد از سهمیهٔ روزانه را می‌سوزاند
+        # (با اینکه حتی یک شلیک هم به تلگرام نرسیده بود — برخلاف شلیک‌های
+        # ناموفقِ واقعی که عمداً شمرده می‌شوند تا حلقهٔ تلاشِ بی‌سقف
+        # نشود) و target_id ثبت می‌شد یعنی کاربر تا پایانِ پنجرهٔ dup
+        # (پیش‌فرض ۲۴ ساعت) نمی‌توانست همان هدف را دوباره امتحان کند —
+        # مطابقِ docstring خودِ add_reporter_log فقط «بستهٔ تمام‌شده»
+        # target_id می‌گیرد.
+        add_reporter_log(uid, target, None, info.get("type", ""),
                          cat, with_messages=False, status="error",
-                         report_count=1)
+                         report_count=0)
         saas_bot.wizards.pop(uid, None)
         await _render_receipt(
             event, d, ok=False,
