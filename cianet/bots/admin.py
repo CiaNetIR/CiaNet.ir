@@ -627,9 +627,16 @@ class AdminBot:
 
         buttons = [
             [UI.go("🌐 تنظیم پروکسی", b"proxy_start:" + tag.encode())],
+        ]
+        # v2.23.4 (AUDIT-43 43-c#4 · MED): دکمهٔ حذف پروکسی — قبلاً هیچ راهی
+        # برای برداشتنِ پروکسی وجود نداشت؛ پروکسیِ مرده اکانت را آفلاین می‌کرد
+        # و تنها بازیابی، ویرایشِ دستیِ config.json بود.
+        if proxy_cfg:
+            buttons.append([UI.danger("🚫 حذف پروکسی", b"proxy_off:" + tag.encode())])
+        buttons.extend([
             [UI.go("📊 وضعیت", b"status:" + tag.encode())],
             UI.nav_row(),
-        ]
+        ])
         await self._edit_safe(
             event,
             UI.screen("🌐 اتصال و پروکسی", body=body,
@@ -2272,6 +2279,23 @@ class AdminBot:
             self.wizards.pop(event.sender_id, None)
             await event.respond("⛔ آدرس پروکسی نامعتبر است (IP داخلی یا محلی مجاز نیست).")
             return
+        # v2.23.4 (AUDIT-43 43-c#4 · MED): پروبِ سبکِ TCP قبل از اعمال — اگر
+        # آدرس/پورت اصلاً باز نباشد، هشدارِ صریح (غیرمسدودکننده) می‌دهیم؛
+        # مسدود نمی‌کنیم چون فایروال ممکن است پروبِ سرور را رد کند ولی
+        # پروکسی برای تلگرام کار کند. با وجودِ دکمهٔ «🚫 حذف پروکسی»،
+        # اعمالِ اشتباه دیگر آجرین نیست و در UI قابلِ بازگشت است.
+        _probe_note = ""
+        try:
+            import socket as _socket
+            _s = _socket.create_connection(
+                (data["addr"], int(data["port"])), timeout=5)
+            _s.close()
+        except Exception:
+            _probe_note = (
+                "\n⚠️ هشدار: اتصالِ آزمایشیِ TCP به این آدرس/پورت برقرار نشد."
+                "\nاگر پروکسی واقعاً مرده باشد، اکانت آفلاین می‌ماند —"
+                " از «🌐 اتصال و پروکسی ← 🚫 حذف پروکسی» می‌توانی برگردی."
+            )
         proxy_cfg = {
             "proxy_type": data["proxy_type"],
             "addr": data["addr"],
@@ -2293,7 +2317,8 @@ class AdminBot:
         self.wizards.pop(event.sender_id, None)
 
         await event.respond(
-            f"✅ پروکسی برای «{tag}» ذخیره شد.\n"
+            f"✅ پروکسی برای «{tag}» ذخیره شد."
+            f"{_probe_note}\n"
             f"⚠️ نیاز است این پکیج روی سرور نصب باشد: `pip install python_socks --break-system-packages`\n"
             f"برای اعمال، اکانت الان ری‌استارت می‌شود..."
         )
@@ -2301,6 +2326,40 @@ class AdminBot:
         # توقف کامل → استارت جدید با پروکسی تازه — از Runtime Manager مرکزی
         # (restart تضمین می‌کند Stop کامل قبل از Start جدید انجام شود).
         ready, st = await restart(tag, cfg[tag], caller="AdminBot._apply_proxy",
+                                  runner=self.sb.run_bot)
+        if not ready:
+            await event.respond(
+                f"⚠️ اکانت «{tag}» هنوز آماده نشده (وضعیت: {_status_human(st)}). "
+                f"علت دقیق در لاگ سرور ثبت شده."
+            )
+        await self._show_account_detail(event, tag)
+
+    async def _remove_proxy(self, event, tag: str):
+        """v2.23.4 (AUDIT-43 43-c#4 · MED): حذف پروکسی + بازگشت به اتصال مستقیم.
+
+        قبلاً هیچ راهی برای برداشتنِ پروکسیِ تنظیم‌شده وجود نداشت — پروکسیِ
+        مرده اکانت را brick می‌کرد (connect timeout ← ready=False ← «هنوز
+        آماده نشده») و تنها راهِ بازیابی، ویرایشِ دستیِ config.json یا
+        تنظیمِ پروکسیِ دیگری بود. حالا حذف در UI + ری‌استارت زنده.
+        """
+        cfg = self.sb.load_config()
+        if tag not in cfg:
+            await event.answer("این اکانت دیگر وجود ندارد.", alert=True)
+            return
+        if not cfg[tag].get("proxy"):
+            await event.answer("این اکانت پروکسی ندارد.", alert=True)
+            return
+        cfg[tag].pop("proxy", None)
+        self.sb.save_config(cfg)
+        try:
+            await event.answer()
+        except Exception:
+            pass
+        await event.respond(
+            f"🚫 پروکسی «{tag}» حذف شد — اتصال مستقیم.\n"
+            f"برای اعمال، اکانت الان ری‌استارت می‌شود..."
+        )
+        ready, st = await restart(tag, cfg[tag], caller="AdminBot._remove_proxy",
                                   runner=self.sb.run_bot)
         if not ready:
             await event.respond(
@@ -3523,6 +3582,14 @@ class AdminBot:
                 _save_last_2fa_password(data.get("tag", ""), text)
             except Exception as _e:
                 print(f"⚠️ [2fa_save] خطا در ذخیره‌ی رمز: {_e}")
+            # v2.23.4 (AUDIT-43 43-c#3 · MED): در مسیرِ لاگینِ اکانتِ جدید،
+            # tag هنوز موقت است (wiz_XXX_hex) و در config.json نیست؛
+            # _save_last_2fa_password برای تگِ ناموجود fail-safe برگشت
+            # می‌خورد و هش 2FA هرگز ذخیره نمی‌شد (قابلیتِ v2.8.10 برای همه‌ی
+            # اکانت‌های تازه عملاً مرده بود). رمز در data نگه داشته می‌شود
+            # تا _finish_add_account بعد از ثبتِ تگِ نهایی، ذخیره را انجام
+            # دهد (data همراهِ ویزارد می‌میرد؛ پس از مصرف pop می‌شود).
+            data["_last_2fa_pass"] = text
 
             # v2.8.10: درخواست خودکار حذف رمز 2FA (ResetPasswordRequest)
             # این شروع ۷ روزه‌ی انتظار است. بعد از ۷ روز، تلگرام خودش
@@ -3697,6 +3764,16 @@ class AdminBot:
             new_entry["proxy"] = data["proxy"]
         cfg[tag] = new_entry
         self.sb.save_config(cfg)
+
+        # v2.23.4 (AUDIT-43 43-c#3 · MED): حالا که تگِ نهایی در config ثبت
+        # شده، هشِ 2FA را ذخیره می‌کنیم — فراخوانیِ WIZ_PASSWORD با تگِ
+        # موقت fail-safe برگشت می‌خورد و این ذخیره هرگز انجام نمی‌شد.
+        _2fa_pass = data.pop("_last_2fa_pass", "")
+        if _2fa_pass:
+            try:
+                _save_last_2fa_password(tag, _2fa_pass)
+            except Exception as _e:
+                print(f"⚠️ [2fa_save] خطا در ذخیره‌ی رمز (deferred): {_e}")
 
         # ─── انتظار برای READY واقعی (نه فقط ثبت در ACCOUNTS) ───────────
         # Runtime Manager مرکزی: استارت + انتظار برای READY واقعی. ACCOUNTS
@@ -3909,7 +3986,7 @@ class AdminBot:
         # به هر تابعی که یک تگ خاص را دستکاری می‌کند، اجرا می‌شود.
         _TAG_PREFIXES = (
             "acc:", "toggle:", "font_menu:", "font_set:", "edit_name:",
-            "send_msg:", "proxy_start:", "disable:", "enable:",
+            "send_msg:", "proxy_start:", "proxy_off:", "disable:", "enable:",
             "del_confirm:", "del_go:",
             "confirm_replace:",  # v2.15.3 (LOGIN-UX): حذف سلف قبلی — هدفش tag است
             # بخش‌های دسته‌بندی‌شده‌ی UI — همان گارد مالکیت برای این‌ها هم
@@ -4076,6 +4153,10 @@ class AdminBot:
             elif data.startswith("proxy_start:"):
                 tag = data.split(":", 1)[1]
                 await self._start_proxy_wizard(event, tag)
+            elif data.startswith("proxy_off:"):
+                # v2.23.4 (AUDIT-43 43-c#4): حذف پروکسی + ری‌استارت زنده
+                tag = data.split(":", 1)[1]
+                await self._remove_proxy(event, tag)
             elif data.startswith("proxy_type:"):
                 ptype = data.split(":", 1)[1]
                 await self._proxy_type_chosen(event, ptype)

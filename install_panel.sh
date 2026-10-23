@@ -621,6 +621,19 @@ systemctl daemon-reload
 systemctl enable cianet-panel
 systemctl restart cianet-panel
 
+# ─── sudoers برای restart پنل از طرف updater (v2.23.4 · AUDIT-43 43-e#8) ──
+# در دیپلوی جدا، updater داخل پروسهٔ cianet-panel با user غیر از root اجرا
+# می‌شود؛ بدون این rule، «sudo -n systemctl restart cianet-panel» در مرحلهٔ
+# آپدیت سایلنت شکست می‌خورد و پنلِ قدیمی تا ری‌استارتِ دستی بالا می‌ماند.
+# مسیر systemctl با command -v resolve می‌شود (نه /bin سیستم‌السابق) تا با
+# sudo مطابقت رشته‌ای داشته باشد.
+if [ "$SERVICE_USER" != "root" ] && [ -n "$SERVICE_USER" ] && id "$SERVICE_USER" >/dev/null 2>&1; then
+    SYSTEMCTL_BIN=$(command -v systemctl || echo "/usr/bin/systemctl")
+    echo "$SERVICE_USER ALL=(root) NOPASSWD: $SYSTEMCTL_BIN restart cianet-panel" > /etc/sudoers.d/cianet-panel
+    chmod 440 /etc/sudoers.d/cianet-panel
+    echo -e "${GREEN}✅ sudoers پنل نصب شد (auto-update restart کار می‌کنه)${NC}"
+fi
+
 sleep 3
 if systemctl is-active --quiet cianet-panel; then
     echo -e "${GREEN}✅ cianet-panel running${NC}"

@@ -57,6 +57,8 @@ rm -f /etc/systemd/system/multi-user.target.wants/selfbot.service
 rm -f /etc/systemd/system/multi-user.target.wants/cianet-panel.service
 # حذف sudoers ساخته‌شده توسط install.sh (برای auto-update)
 rm -f /etc/sudoers.d/cianet
+# v2.23.4 (AUDIT-43 43-e#8): sudoers restart پنل (install_panel.sh)
+rm -f /etc/sudoers.d/cianet-panel
 systemctl daemon-reload
 
 echo -e "${YELLOW}۴. حذف nginx config...${NC}"

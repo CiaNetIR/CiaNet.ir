@@ -814,13 +814,48 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                     msg += f"\n❌ SIGTERM هم ناموفق — دستی بزن: sudo systemctl restart {svc_name}"
 
             # M-22: ری‌استارت سرویس پنل وب (cianet-panel) در صورت فعال بودن
+            # v2.23.4 (AUDIT-43 43-e#8 · MED): قبلاً plain systemctl به‌صورتِ
+            # سایلنت شکست می‌خورد — در دیپلویِ جدا، updater داخل پروسهٔ پنل
+            # با user غیر از root اجرا می‌شود و بدونِ sudoers/polkit اجازهٔ
+            # restart ندارد؛ پنلِ قدیمی تا ری‌استارتِ دستی به کارِ خود
+            # ادامه می‌داد و «is-active» چک هم نمی‌شد. حالا: اول وجودِ
+            # واقعیِ سرویس چک می‌شود (نصبِ فقط-بات پیامِ گیج‌کننده نمی‌گیرد)،
+            # بعد همان سه‌مرحله‌ایِ سرویسِ سلف (sudo -n → plain) و اگر نشد
+            # پیامِ قابلِ مشاهده به کاربر.
             try:
-                subprocess.run(
-                    ["systemctl", "restart", "cianet-panel"],
-                    capture_output=True, text=True, timeout=10,
-                )
-            except Exception:
-                pass
+                _panel_exists = False
+                try:
+                    _r = subprocess.run(
+                        ["systemctl", "is-enabled", "cianet-panel"],
+                        capture_output=True, text=True, timeout=3,
+                    )
+                    _panel_exists = _r.returncode == 0
+                except Exception:
+                    _panel_exists = False
+                if _panel_exists:
+                    _panel_done = False
+                    if not _is_root:
+                        rc = subprocess.run(
+                            ["sudo", "-n", "systemctl", "restart", "cianet-panel"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if rc.returncode == 0:
+                            _panel_done = True
+                    if not _panel_done:
+                        rc = subprocess.run(
+                            ["systemctl", "restart", "cianet-panel"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        if rc.returncode == 0:
+                            _panel_done = True
+                    if _panel_done:
+                        msg += "\n🔄 پنل وب هم restart شد (cianet-panel)..."
+                    else:
+                        msg += ("\n⚠️ restart پنل وب ناموفق بود — دستی: "
+                                "sudo systemctl restart cianet-panel")
+            except Exception as _e:
+                msg += (f"\n⚠️ restart پنل وب ناموفق ({_e}) — دستی: "
+                        f"sudo systemctl restart cianet-panel")
             return True, msg
 
         # v2.16.1 (E2E update-test finding): مسیر restart=False هیچ مقداری
