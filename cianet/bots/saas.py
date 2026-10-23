@@ -4227,7 +4227,12 @@ class SaaSBot:
             candidates = []
             if versions_dir.exists():
                 # ۱. فایل‌های pre-auto-update.<ts>
+                # v2.23.8 (AUDIT-47 51-f#1): سایدکارهای .commit (SHA خام) از
+                # لیست حذف شدند — انتخابشان main.py را با SHA جایگزین می‌کرد
+                # → NameError → سرویس مرده.
                 for f in sorted(versions_dir.glob("main.py.pre-auto-update.*"), reverse=True):
+                    if f.name.endswith(".commit"):
+                        continue
                     if f.is_file():
                         try:
                             size = f.stat().st_size
@@ -4398,6 +4403,14 @@ class SaaSBot:
         if src_path is None:
             await event.edit(
                 f"❌ نسخه‌ی `{name}` پیدا نشد.",
+                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+            )
+            return
+        # v2.23.8 (AUDIT-47 51-f#1): سایدکار .commit هیچ‌وقت قابل rollback نیست —
+        # محتوایش SHA خام است و از گیت AST (M-21) هم عبور می‌کند.
+        if src_path.name.endswith(".commit"):
+            await event.edit(
+                "❌ این فایل سایدکارِ commit است و قابل rollback نیست.",
                 buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
             )
             return
@@ -5324,7 +5337,32 @@ class SaaSBot:
             password_target = "Saved Messages"
             print(f"✅ [backup] رمز بکاپ به Saved Messages ارسال شد")
         except Exception as e:
-            print(f"⚠️ [backup] ارسال رمز به Saved Messages ناموفق بود (حذف fallback ارسال در همان چت طبق M-12): {type(e).__name__}")
+            # v2.23.8 (AUDIT-47 51-c#1): در حالتِ bot_token (استقرارِ استاندارد)
+            # «me» همیشه fail است — بات‌ها Saved Messages ندارند و نمی‌توانند به
+            # خودشان پیام بدهند. M-12 (v2.14.2) fallbackِ ارسال در همان چت را
+            # حذف کرد و نتیجه این شد که «هر» بکاپِ دستیِ استقرارِ باتی غیرقابل‌
+            # بازیابی بود (پیامِ «دوباره بکاپ بزن» هم بی‌فایده — retry همان
+            # شکست را می‌دهد). تجزیهٔ امنیتی: فایلِ رمزگذاری‌شده همین حالا به
+            # همین چت (DM خودِ OWNER) می‌رود؛ رمزِ کنارِ آن فقط در سناریوی
+            # «کل چت لو رفته» تفاوت می‌سازد که در آن حالت خودِ فایل هم لو
+            # رفته است. بکاپِ غیرقابل‌بازیابی به‌طور اکید بدتر است. راه‌حل:
+            # ارسال به همان چت + دستورِ صریحِ حذفِ پیامِ رمز بعد از نگه‌داری
+            # (حفظ روحِ M-12: فایلِ فورواردشده بدون پیامِ رمز می‌ماند).
+            try:
+                _bot_pw_body = (
+                    _pw_body
+                    + "\n\n🗑 بعد از ذخیرهٔ رمز در جای امن، همین پیام را حذف کن "
+                      "تا فایل و رمز با هم نمانند."
+                )
+                await asyncio.wait_for(
+                    self.client.send_message(event.chat_id, _bot_pw_body),
+                    timeout=30.0,
+                )
+                password_sent = True
+                password_target = "همین چت (کلاینت بات — Saved Messages در دسترس نیست)"
+                print("✅ [backup] رمز بکاپ به چتِ OWNER ارسال شد (bot_token mode)")
+            except Exception as ee:
+                print(f"⚠️ [backup] ارسال رمز ناموفق (me و chat هر دو): {type(e).__name__} / {type(ee).__name__}")
         # v1.9.2: کل فرآیند send_file و send_message زیر یه try/except مستقل
         # و با لاگ کامل. قبلاً اگه send_file فیل می‌شد، حتی پیام خطا هم
         # به کاربر نمی‌رسید (silent fail). حالا هر خطا با traceback کامل

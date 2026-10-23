@@ -663,6 +663,29 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                         "⚠️ بازگردانی cianet/ به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
                         _pkg_e
                     )
+            # v2.23.8 (AUDIT-47 51-f#2): خودِ cianet_updater.py هم در لیستِ
+            # sanity است (بالا) ولی rollback آن نمی‌شد — سناریوی اصلیِ فیکسِ
+            # v2.23.5 (فایلِ خراب از upstream) هنوز crash-loop می‌ساخت: پیامِ
+            # «به backup برگشتیم» داده می‌شد ولی بعد از restart همان فایلِ
+            # خرابِ جدید import می‌شد. requirements.txt هم برای هم‌خوانیِ
+            # وابستگی‌ها برمی‌گردد.
+            if pre_reset_commit:
+                try:
+                    _up_rb = subprocess.run(
+                        ["git", "checkout", pre_reset_commit, "--",
+                         "cianet_updater.py", "requirements.txt"],
+                        cwd=repo_dir, capture_output=True, text=True, timeout=15,
+                    )
+                    if _up_rb.returncode != 0:
+                        log.warning(
+                            "⚠️ بازگردانی cianet_updater.py به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                            _up_rb.stderr.strip()[:200]
+                        )
+                except Exception as _up_e:
+                    log.warning(
+                        "⚠️ بازگردانی cianet_updater.py به نسخه‌ی قبل از آپدیت ناموفق بود (ادامه می‌دهیم): %s",
+                        _up_e
+                    )
             # rollback: backup رو برگردون
             if backup_path and os.path.exists(backup_path):
                 try:

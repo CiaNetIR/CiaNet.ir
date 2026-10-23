@@ -846,6 +846,11 @@ async def users_list(
                 params + [page_size, offset],
             ).fetchall()
             # join با admins برای role
+            # v2.23.8 (AUDIT-47 51-a#4): r_dict های غنی‌شده قبلاً ساخته می‌شدند
+            # ولی خروجی [dict(r) for r in rows] دوباره Row خام را برمی‌گرداند —
+            # یعنی role/plan/sub_status/expire_date هرگز به ادمین نمی‌رسید و
+            # همهٔ کاربران «USER بدون پلن» دیده می‌شدند.
+            items = []
             for r in rows:
                 ar = c.execute(
                     "SELECT role, reseller_max_users FROM admins WHERE user_id=?",
@@ -863,8 +868,9 @@ async def users_list(
                 r_dict["plan"] = sub["plan"] if sub else None
                 r_dict["sub_status"] = sub["status"] if sub else None
                 r_dict["expire_date"] = sub["expire_date"] if sub else None
+                items.append(r_dict)
             return {
-                "items": [dict(r) for r in rows],
+                "items": items,
                 "total": total,
                 "page": page,
                 "page_size": page_size,
@@ -951,36 +957,18 @@ async def user_delete(user_id: int, request: Request, _: None = Depends(require_
     if user_id == m.ADMIN_ID:
         raise HTTPException(400, "Cannot delete OWNER")
     try:
-        # استفاده از delete_user_completely_async که به‌صورت اتمیک همه‌چیز رو پاک می‌کنه
-        # ولی چون اینجا sync هست، یک نسخه‌ی ساده‌تر اینجا اجرا می‌کنیم
-        with m._conn() as c:
-            # FK order
-            c.execute("DELETE FROM ticket_messages WHERE ticket_id IN (SELECT id FROM tickets WHERE user_id=?)", (user_id,))
-            c.execute("DELETE FROM tickets WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM subscriptions WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM purchases WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM permission_grants WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM users WHERE user_id=?", (user_id,))
-            c.commit()
-        # remove from config.json
-        cfg = m.load_config()
-        to_remove = [
-            tag for tag, acc in cfg.items()
-            if isinstance(acc, dict) and acc.get("owner_user_id") == user_id
-        ]
-        for tag in to_remove:
-            cfg.pop(tag, None)
-            # remove session files
-            for suffix in ("", "-journal", "-shm", "-wal"):
-                p = os.path.join(m.SESSIONS_DIR, f"{tag}.session{suffix}")
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-        if to_remove:
-            m.save_config(cfg)
-        return {"ok": True, "removed_accounts": to_remove}
+        # v2.23.8 (AUDIT-47 51-a#3): نسخهٔ دستی قبلی DELETE FROM purchases داشت —
+        # جدولی که فقط در bot_data.db وجود دارد نه saas.db → هر حذف کاربر از
+        # پنل با OperationalError → rollback → 500 شکست می‌خورد. حالا همان
+        # تابعِ اتمیکِ مسیر ربات (PRECHECK → تراکنش واحد → bot_data → config)
+        # استفاده می‌شود؛ سیاستِ اکانت‌های سلف نیز one‌شده با ربات است (یتیم
+        # عمدی برای مدیریت OWNER، نه حذف سشن).
+        ok = await _core().delete_user_completely_async(user_id)
+        if not ok:
+            raise HTTPException(400, "حذف کاربر ناموفق بود (کاربر وجود ندارد یا OWNER است)")
+        return {"ok": True, "mode": "complete"}
+    except HTTPException:
+        raise
     except Exception as e:
         # v2.13.0 (DEBUG-2 EXC-LEAK): don't leak exception details (DB schema,
         # file paths, stack traces) to client — log server-side only.
@@ -1296,11 +1284,18 @@ async def finance_payments(
     offset = (max(1, page) - 1) * page_size
     try:
         with m._conn() as c:
+            # v2.23.8 (AUDIT-47 51-a#2): جدولِ واقعی saas.db `payments` است
+            # (نه `purchases` که فقط در bot_data.db ساخته می‌شود) — TEST-G9
+            # داشبورد/stats را اصلاح کرد ولی این سه اندپوینت جا ماندند و همیشه
+            # ۵۰۰ می‌دادند. ستون‌ها با alias به همان شکلِ فرانت‌اند برمی‌گردند
+            # (plan→plan_id · reviewed_at→approved_at).
             total = c.execute(
-                f"SELECT COUNT(*) FROM purchases {where_clause}", params
+                f"SELECT COUNT(*) FROM payments {where_clause}", params
             ).fetchone()[0]
             rows = c.execute(
-                f"SELECT * FROM purchases {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+                f"SELECT id, user_id, plan AS plan_id, amount, receipt_ref, "
+                f"status, reviewed_by, created_at, reviewed_at AS approved_at "
+                f"FROM payments {where_clause} ORDER BY id DESC LIMIT ? OFFSET ?",
                 params + [page_size, offset],
             ).fetchall()
             return {"items": [dict(r) for r in rows], "total": total, "page": page, "page_size": page_size}
@@ -1316,16 +1311,14 @@ async def finance_payments(
 async def finance_approve(pay_id: int, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     try:
-        with m._conn() as c:
-            # PATCH (v2.1.5): approved_at رو هم ست کن
-            r = c.execute(
-                "UPDATE purchases SET status='approved', approved_at=datetime('now') WHERE id=?",
-                (pay_id,),
-            )
-            c.commit()
-            if r.rowcount == 0:
-                raise HTTPException(404, "Payment not found")
-        return {"ok": True}
+        # v2.23.8 (AUDIT-47 51-a#2): همان تابعِ اتمیکِ مسیر ربات — تاییدِ وب
+        # حالا اثر تجاری کامل دارد (payment→approved + اشتراک فعال + فاکتور
+        # →paid در یک تراکنش) و idempotent است؛ قبلاً UPDATE purchases روی
+        # جدولِ ناموجود = ۵۰۰.
+        res = _core().approve_card_payment_atomic(pay_id, m.ADMIN_ID)
+        if res["user_id"] is None:
+            raise HTTPException(404, "Payment not found")
+        return {"ok": True, "applied": bool(res["applied"])}
     except HTTPException:
         raise
     except Exception as e:
@@ -1339,10 +1332,16 @@ async def finance_approve(pay_id: int, request: Request, _: None = Depends(requi
 async def finance_reject(pay_id: int, request: Request, _: None = Depends(require_csrf)):
     m = _main()
     try:
-        with m._conn() as c:
-            r = c.execute("UPDATE purchases SET status='rejected' WHERE id=?", (pay_id,))
-            c.commit()
-            if r.rowcount == 0:
+        # v2.23.8 (AUDIT-47 51-a#2): review_payment_atomic — اتمیک + فاکتورِ
+        # متصل در reject همان‌جا cancelled می‌شود (وگرنه expiry_loop هر ۷ روز
+        # «در صف بررسی» پیام می‌داد)؛ قبلاً UPDATE purchases = ۵۰۰.
+        ok = _core().review_payment_atomic(pay_id, approve=False, reviewed_by=m.ADMIN_ID)
+        if not ok:
+            # یا پرداخت نیست یا از قبل بررسی شده — برای UX همان 404 مسیر قبل
+            with m._conn() as c:
+                exists = c.execute(
+                    "SELECT 1 FROM payments WHERE id=?", (pay_id,)).fetchone()
+            if not exists:
                 raise HTTPException(404, "Payment not found")
         return {"ok": True}
     except HTTPException:
@@ -1591,7 +1590,12 @@ async def version_info(request: Request, _: None = Depends(require_auth)):
     rollback_files = []
     versions_dir = _PROJECT_DIR / "versions"
     if versions_dir.exists():
+        # v2.23.8 (AUDIT-47 51-f#1): سایدکارهای .commit (SHA خام) از لیست
+        # حذف شدند — انتخابشان main.py را با SHA جایگزین می‌کرد → NameError
+        # → crash-loop سرویس.
         for f in sorted(versions_dir.glob("main.py.pre-*"), reverse=True)[:10]:
+            if f.name.endswith(".commit"):
+                continue
             rollback_files.append(f.name)
         for f in sorted(versions_dir.glob("v*.py"), reverse=True)[:10]:
             rollback_files.append(f.name)
@@ -1662,6 +1666,10 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
         raise HTTPException(400, "filename required")
     # security: filename نباید path traversal داشته باشه
     if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    # v2.23.8 (AUDIT-47 51-f#1): سایدکار .commit هیچ‌وقت قابل rollback نیست —
+    # محتوایش SHA خام است و در مسیر legacy از AST هم عبور می‌کند.
+    if filename.endswith(".commit"):
         raise HTTPException(400, "Invalid filename")
     main_py = _PROJECT_DIR / "main.py"
     versions_dir = _PROJECT_DIR / "versions"
@@ -3028,8 +3036,15 @@ def _get_live_client(request: Request, tag: str = None):
     entry = getattr(m, "ACCOUNTS", {}).get(active_tag)
     if entry is None:
         raise HTTPException(503, "اکانت در حال حاضر متصل نیست — صبر کن یا /start بزن")
-    client = getattr(entry, "client", None) or getattr(entry, "bot", None)
-    if client is None or not getattr(client, "is_connected", False):
+    # v2.23.8 (AUDIT-47 51-a#1): الگوی درست entry.bot.client است (همان admin.py
+    # و core.py) — قبلاً getattr(entry,"client") روی RunningAccount وجود ندارد
+    # و به SelfBot-wrapper می‌افتاد که is_connected ندارد → هر ۵ اندپوینتِ
+    # live-session از v2.8.5 همیشه ۵۰۳ می‌داد.
+    bot = getattr(entry, "bot", None)
+    client = getattr(bot, "client", None) if bot is not None else None
+    # v2.23.8: is_connected متد است نه صفت — getattr بدونِ فراخوانی همیشه
+    # truthy بود و کلاینتِ قطع‌شده را «وصل» می‌داد؛ فراخوانی با fallback.
+    if client is None or not getattr(client, "is_connected", lambda: False)():
         raise HTTPException(503, "اکانت هنوز وصل نشده — صبر کن")
     return uid, active_tag, acc, client
 

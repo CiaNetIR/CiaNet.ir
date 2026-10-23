@@ -3421,6 +3421,14 @@ def auto_renew_subscription(user_id: int) -> dict:
             if not last_sub:
                 return {"ok": True, "renewed": False, "reason": "no_previous_plan"}
             plan_name = last_sub["plan"]
+            # v2.23.8 (AUDIT-47 51-b#1): پلنِ گروهی هرگز با تمدیدِ خودکار تمدید
+            # نمی‌شود — قیمتِ آن قیمتِ کاملِ N صندلی است؛ کسرِ خودکارش از کیفِ
+            # یک نفر یعنی پرداختِ N برابری برای «یک» صندلی (صندلی‌های بقیه هرگز
+            # ساخته نمی‌شدند چون maybe_fulfill_group_order فقط در مسیرهای
+            # فاکتور صدا زده می‌شود — ۳۱۳۷/۴۹۶۵/۵۳۰۸). خریدِ گروهی تصمیمی
+            # دسته‌جمعی است؛ خریدار باید آگاهانه فاکتور تازه بزند.
+            if is_group_plan(plan_name):
+                return {"ok": True, "renewed": False, "reason": "group_plan_manual"}
             pricing = c.execute("SELECT * FROM pricing WHERE plan = ?", (plan_name,)).fetchone()
             if not pricing:
                 return {"ok": True, "renewed": False, "reason": "plan_not_found"}
@@ -8356,7 +8364,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.7"
+BUILD_VERSION = "2026-10-23-v2.23.8"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -11183,16 +11191,27 @@ async def run_bot(tag, config, interactive=False):
                         bot.client.session.close()
                     except Exception as e:
                         print(f"❌ [SESSION][{tag}][CLOSE] خطا هنگام بستن سشن: {type(e).__name__}: {str(e)[:120]}")
-                # unregister_account خیلی آخر اجرا می‌شود — بعد از پایانِ کاملِ
-                # disconnect/save/close (PATCH 5). تا وقتی Session هنوز در حال
-                # بسته‌شدن است، Runtime جدید نباید همان Session را «آزاد»
-                # ببیند (جلوگیری از باز شدن هم‌زمان Session / readonly).
-                unregister_account(tag)
+                # v2.23.8 (AUDIT-47 51-b#2): unregister_account از اینجا (finallyِ
+                # داخلِ حلقه که در «هر» تلاش اجرا می‌شود) به finallyِ بیرونیِ
+                # run_bot منتقل شد — قبلاً در پنجرهٔ backoff، _TAG_LOCKS/
+                # _START_LOCKS/BOT_STATUS پاک می‌شدند و گاردِ ضد-تکراریِ
+                # ensure_started (که همین invariant را مستند کرده) نقض می‌شد:
+                # استارتِ دوم در.backoff قفلِ تازه می‌ساخت → دو کلاینت روی یک
+                # سشن + تسک زامبی. PATCH 5 (ترتیبِ unregister بعد از
+                # disconnect/save/close) همچنان برقرار است — در finallyِ بیرونی
+                # همهٔ آن مراحل تمام شده‌اند.
 
             first_attempt = False
             wait_time = min(10 * (2 ** min(consecutive_failures, 5)), MAX_BACKOFF)
             await asyncio.sleep(wait_time)
     finally:
+        # v2.23.8 (AUDIT-47 51-b#2): پاک‌سازیِ نهاییِ ریجیستری‌ها فقط وقتی
+        # run_bot واقعاً تمام می‌شود (break از حلقه / cancel / استثنای
+        # بیرونی) — نه در هر تلاشِ ناموفق.
+        try:
+            unregister_account(tag)
+        except Exception as _ue:
+            print(f"❌ [{tag}][RUNTIME][UNREGISTER] {_ue}")
         if _PENDING_STARTS.get(tag) is pending and pending.done():
             _PENDING_STARTS.pop(tag, None)
         lock.release()

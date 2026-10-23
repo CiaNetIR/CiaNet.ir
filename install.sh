@@ -308,7 +308,19 @@ echo "📞 پشتیبانی: @CiaNetOwner"
 
 # Seed min-commit floor for supply-chain protection (CRIT-04)
 if command -v git >/dev/null 2>&1 && [ -d "${INSTALL_DIR:-/opt/cianet}/.git" ]; then
-    mkdir -p "${INSTALL_DIR:-/opt/cianet}/data"
-    git -C "${INSTALL_DIR:-/opt/cianet}" rev-parse HEAD > "${INSTALL_DIR:-/opt/cianet}/data/.min_commit_floor" 2>/dev/null || true
-    chmod 600 "${INSTALL_DIR:-/opt/cianet}/data/.min_commit_floor" 2>/dev/null || true
+    # v2.23.8 (AUDIT-47 51-f#3): mkdir/نوشتنِ floor باید با مالکیتِ کاربرِ
+    # سرویس باشد — قبلاً با root زیر umask 077 اجرا می‌شد: data/ با 0700/
+    # root ساخته می‌شد و قفلِ آپدیتر برای کاربر cianet غیرقابل‌نوشت بود
+    # (EACCES) → هر آپدیتِ نصبِ تازه می‌مُرد؛ git هم به‌عنوان root روی ریپوی
+    # cianet با «dubious ownership» رد می‌شد و floor خالی می‌ماند.
+    _FLOOR_DIR="${INSTALL_DIR:-/opt/cianet}/data"
+    if id cianet >/dev/null 2>&1; then
+        install -d -o cianet -g cianet -m 700 "$_FLOOR_DIR"
+        sudo -u cianet git -C "${INSTALL_DIR:-/opt/cianet}" rev-parse HEAD > "$_FLOOR_DIR/.min_commit_floor" 2>/dev/null || true
+        chown cianet:cianet "$_FLOOR_DIR/.min_commit_floor" 2>/dev/null || true
+    else
+        mkdir -p "$_FLOOR_DIR"
+        git -C "${INSTALL_DIR:-/opt/cianet}" rev-parse HEAD > "$_FLOOR_DIR/.min_commit_floor" 2>/dev/null || true
+    fi
+    chmod 600 "$_FLOOR_DIR/.min_commit_floor" 2>/dev/null || true
 fi
