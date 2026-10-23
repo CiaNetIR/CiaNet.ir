@@ -64,7 +64,12 @@ import hashlib
 import hmac
 import json
 import os
+# v2.23.7 (AUDIT-46 #3): re در سطح ماژول import نشده بود ولی
+# version_rollback از re.fullmatch استفاده می‌کند (از v2.23.5) — هر
+# rollbackِ واقعی با NameError → 500 شکست می‌خورد؛ تست رفتاری T37 گرفت.
+import re
 import secrets
+import shutil
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -1676,23 +1681,11 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
         if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
             raise HTTPException(400, "Invalid filename")
         import subprocess as _sp
-        _co = _sp.run(
-            ["git", "checkout", commit, "--", "."],
-            cwd=str(_PROJECT_DIR), capture_output=True, text=True, timeout=30,
-        )
-        if _co.returncode != 0:
-            print(f"❌ [version_rollback] git checkout failed: {_co.stderr[:300]}")
-            raise HTTPException(500, "خطا در بازیابی نسخه — با پشتیبانی تماس بگیرید.")
-        # پاکسازی __pycache__ تا کدِ قدیمیِ کش‌شده اجرا نشود
-        import shutil as _sh, os as _os
-        for _pc_root, _pc_dirs, _pc_files in _os.walk(_PROJECT_DIR):
-            if "__pycache__" in _pc_dirs:
-                _pc_dirs.remove("__pycache__")
-                try:
-                    _sh.rmtree(_os.path.join(_pc_root, "__pycache__"))
-                except Exception:
-                    pass
-        # بکاپِ pre-rollback با سایدکارِ commitِ فعلی — rollbackِ دوباره ممکن بماند
+        # v2.23.7 (AUDIT-46 #1): بکاپِ pre-rollback باید قبل از checkout
+        # گرفته شود — قبلاً بعد از checkout نوشته می‌شد و محتوایش کدِ
+        # رول‌بک‌شده بود نه وضعیتِ قبل؛ اگر نوشتن sidecar شکست می‌خورد
+        # (rev-parse ناموفق)، «واگردانیِ» آن بکاپ از مسیرِ legacy دقیقاً
+        # همان کدِ قدیمی را دوباره اعمال می‌کرد (undo عملاً no-op).
         import time as _time
         ts = int(_time.time())
         backup = versions_dir / f"main.py.pre-rollback.{ts}"
@@ -1707,6 +1700,23 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
                     _cur.stdout.strip(), encoding="utf-8")
             except Exception:
                 pass
+        _co = _sp.run(
+            ["git", "checkout", commit, "--", "."],
+            cwd=str(_PROJECT_DIR), capture_output=True, text=True, timeout=30,
+        )
+        if _co.returncode != 0:
+            print(f"❌ [version_rollback] git checkout failed: {_co.stderr[:300]}")
+            raise HTTPException(500, "خطا در بازیابی نسخه — با پشتیبانی تماس بگیرید.")
+        # پاکسازی __pycache__ تا کدِ قدیمیِ کش‌شده اجرا نشود
+        # (v2.23.7: shutil/os از سطح ماژول — import محلیِ «as _sh» قبلاً
+        # فقط _sh را bind می‌کرد و shutil.copy2 بالاتر UnboundLocalError می‌داد)
+        for _pc_root, _pc_dirs, _pc_files in os.walk(_PROJECT_DIR):
+            if "__pycache__" in _pc_dirs:
+                _pc_dirs.remove("__pycache__")
+                try:
+                    shutil.rmtree(os.path.join(_pc_root, "__pycache__"))
+                except Exception:
+                    pass
     else:
         try:
             import ast as _ast
@@ -1714,8 +1724,9 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
         except Exception:
             raise HTTPException(400, "فایل نسخه نامعتبر است (AST parse failed)")
         # backup current
-        import shutil, time as _time
-        ts = int(_time.time())
+        # (v2.23.7: import محلیِ shutil حذف شد — همین اسمِ محلی بود که
+        # «shutil» را برای کل تابع local می‌کرد و شاخهٔ sidecar را می‌شکست)
+        ts = int(time.time())
         backup = versions_dir / f"main.py.pre-rollback.{ts}"
         shutil.copy2(main_py, backup)
         # replace

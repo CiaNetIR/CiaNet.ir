@@ -1122,8 +1122,14 @@ def init_db() -> None:
                         except Exception:
                             pass
                 import glob as _glob_bak
-                _old_baks = [p for p in _glob_bak.glob(DB_PATH + ".bak.*")
-                             if not p.endswith(("-wal", "-shm"))]
+                # v2.23.7 (AUDIT-46 #2): sorted الزامی است — ترتیبِ glob
+                # تضمین‌نشده است (os.scandir order)؛ بدونِ مرتب‌سازیِ
+                # لغت‌نامه‌ایِ تاریخ‌ها، «قدیمی‌ترین‌ها برای حذف» ممکن بود
+                # بکاپِ جدیدتری را انتخاب کند و قدیمی‌تر را نگه دارد.
+                _old_baks = sorted(
+                    p for p in _glob_bak.glob(DB_PATH + ".bak.*")
+                    if not p.endswith(("-wal", "-shm"))
+                )
                 for _ob in _old_baks[:-7]:
                     for _victim in (_ob, _ob + "-wal", _ob + "-shm"):
                         try:
@@ -8350,7 +8356,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.6"
+BUILD_VERSION = "2026-10-23-v2.23.7"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
