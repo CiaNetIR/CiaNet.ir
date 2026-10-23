@@ -117,8 +117,13 @@
 
 ### روش اول: نصب سریع (توصیه‌شده)
 
+اسکریپتِ نصب را قبل از اجرای root مرور کنید (پیش‌فرضِ امن — نه pipe-to-bash لخت):
+
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/CiaNetIR/CiaNet.ir/main/quick_install.sh)
+curl -fsSL -o /tmp/cianet_quick_install.sh https://raw.githubusercontent.com/CiaNetIR/CiaNet.ir/main/quick_install.sh
+sha256sum /tmp/cianet_quick_install.sh   # برای ممیزی یادداشت کن
+less /tmp/cianet_quick_install.sh        # مرور کد
+sudo bash /tmp/cianet_quick_install.sh
 ```
 
 یا با env vars:
@@ -128,43 +133,48 @@ sudo API_ID=YOUR_API_ID \
      API_HASH=YOUR_API_HASH \
      ADMIN_BOT_TOKEN=YOUR_BOT_TOKEN \
      ADMIN_ID=YOUR_TELEGRAM_ID \
-     bash <(curl -sL https://raw.githubusercontent.com/CiaNetIR/CiaNet.ir/main/quick_install.sh)
+     bash /tmp/cianet_quick_install.sh
 ```
 
 ### روش دوم: نصب دستی
+
+نصب‌کنندهٔ سرویس (کاربر `cianet` + venv مطابق PEP 668 + یونیت systemd) را خودِ ریپو دارد:
 
 ```bash
 git clone https://github.com/CiaNetIR/CiaNet.ir.git /opt/cianet
 cd /opt/cianet
 
-# ساخت venv
-sudo python3 -m venv .venv
-sudo .venv/bin/pip install -r requirements.txt
+# ساخت env file — توجه: هش پسورد پنل باید bcrypt باشد؛
+# پنل هش‌های sha256 را رد می‌کند (F-02).
+PANEL_PASS="YOUR_PANEL_PASS"
+PANEL_HASH=$(python3 -c "from passlib.hash import bcrypt; print(bcrypt.encrypt('$PANEL_PASS'))")
 
-# ساخت env file
-sudo tee /etc/selfbot.env > /dev/null << 'EOF'
+sudo tee /etc/selfbot.env > /dev/null <<EOF
 API_ID=YOUR_API_ID
 API_HASH=YOUR_API_HASH
 ADMIN_BOT_TOKEN=YOUR_BOT_TOKEN
 ADMIN_ID=YOUR_TELEGRAM_ID
 PANEL_ADMIN_USER=admin
-PANEL_ADMIN_PASS_HASH=sha256:YOUR_HASH
+PANEL_ADMIN_PASS_HASH=$PANEL_HASH
 PANEL_URL=https://your-domain.com
 EOF
 
-# ساخت systemd service
-sudo cp install_service.sh /etc/systemd/system/selfbot.service
-sudo systemctl daemon-reload
-sudo systemctl enable selfbot
-sudo systemctl start selfbot
+# ساخت کاربر سرویس + venv + systemd unit (اسکریپتِ نصب‌کنندهٔ رسمی)
+sudo bash install_service.sh
 ```
+
+نکته: اگر `python3` ماژول `passlib` را ندارد، اول `pip install --user 'passlib[bcrypt]'` را اجرا کن، یا هش را از داخل venv پروژه بساز:
+`sudo /opt/cianet/.venv/bin/python -c "from passlib.hash import bcrypt; print(bcrypt.encrypt('YOUR_PANEL_PASS'))"`
 
 ### آپدیت
 
 ```bash
 cd /opt/cianet
-sudo git fetch origin && sudo git reset --hard origin/main
-sudo rm -rf __pycache__ && sudo systemctl restart selfbot
+# git به‌عنوان کاربرِ سرویس (مالکِ ریپو cianet است؛ sudo git روی git جدید
+# با «dubious ownership» رد می‌شود)
+sudo -u cianet git fetch origin && sudo -u cianet git reset --hard origin/main
+sudo find /opt/cianet -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null
+sudo systemctl restart selfbot
 ```
 
 ---

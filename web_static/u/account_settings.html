@@ -56,6 +56,7 @@
           <div><span>👤 یوزرنیم تلگرام:</span> <code>${escapeHtml(info.live_username || '—')}</code></div>
         </div>
         <h3 style="margin-top:20px">تنظیمات قابل ویرایش:</h3>
+        <!-- v2.23.9 (AUDIT-47 51-a#5): فیلد secret فقط برای MTProto -->
         <div class="step">
           <label>📞 شماره موبایل</label>
           <input type="text" id="phone" value="${escapeHtml(info.phone || '')}" placeholder="+989123456789">
@@ -75,6 +76,7 @@
             <option value="socks5" ${proxy.proxy_type==='socks5'?'selected':''}>SOCKS5</option>
             <option value="socks4" ${proxy.proxy_type==='socks4'?'selected':''}>SOCKS4</option>
             <option value="http" ${proxy.proxy_type==='http'?'selected':''}>HTTP</option>
+            <option value="mtproto" ${proxy.proxy_type==='mtproto'?'selected':''}>MTProto</option>
             <option value="">بدون پروکسی</option>
           </select>
         </div>
@@ -85,6 +87,10 @@
         <div class="step">
           <label>پورت</label>
           <input type="number" id="proxy_port" value="${escapeHtml(proxy.port || '')}" placeholder="10808">
+        </div>
+        <div class="step" id="proxy_secret_row" style="display:none">
+          <label>Secret (اختیاری — فقط MTProto؛ برای تغییر، مقدار جدید وارد کن)</label>
+          <input type="password" id="proxy_secret" value="" placeholder="dd00000000000000000000000000000000" autocomplete="off">
         </div>
         <div class="step">
           <label>نام کاربری (اختیاری)</label>
@@ -106,14 +112,20 @@
         </div>
       `;
       document.getElementById('save-btn').disabled = false;
+      // v2.23.9 (AUDIT-47 51-a#5): نمایش/مخفی‌کردن فیلد secret بر اساس نوع پروکسی
+      const _ptSel = document.getElementById('proxy_type');
+      const _secRow = document.getElementById('proxy_secret_row');
+      if (_ptSel && _secRow) {
+        const _syncSecret = () => { _secRow.style.display = (_ptSel.value === 'mtproto') ? '' : 'none'; };
+        _ptSel.addEventListener('change', _syncSecret);
+        _syncSecret();
+      }
     }
     document.getElementById('save-btn').addEventListener('click', async () => {
       const proxy_type = document.getElementById('proxy_type').value;
-      // BUG-23u: password is only sent when the user typed a new one;
-      // otherwise the stored value from `original` (JS memory, not visible
-      // DOM) is re-sent because the backend replaces the whole proxy dict.
-      const typedPass = document.getElementById('proxy_password').value;
-      const existingPass = (original.proxy && original.proxy.password) || undefined;
+      // v2.23.9 (AUDIT-47 51-a#5): سرور حالا merge می‌کند — فقط فیلدهایی که
+      // کاربر واقعاً تغییر داده فرستاده می‌شوند؛ رمز/secret ذخیره‌شده هرگز
+      // با مقدارِ خالیِ echo-back پاک نمی‌شود (GET آن را استریپ می‌کند).
       const updates = {
         phone: document.getElementById('phone').value.trim() || null,
         api_id: parseInt(document.getElementById('api_id').value) || null,
@@ -124,13 +136,21 @@
         updates.proxy = {
           proxy_type: proxy_type,
           addr: document.getElementById('proxy_addr').value.trim(),
-          port: parseInt(document.getElementById('proxy_port').value) || 0,
           username: document.getElementById('proxy_username').value.trim() || undefined,
-          password: typedPass !== '' ? typedPass : existingPass,
           rdns: document.getElementById('proxy_rdns').checked,
         };
+        const portVal = parseInt(document.getElementById('proxy_port').value);
+        if (Number.isInteger(portVal) && portVal >= 1 && portVal <= 65535) {
+          updates.proxy.port = portVal;
+        }
+        const typedPass = document.getElementById('proxy_password').value;
+        if (typedPass !== '') updates.proxy.password = typedPass;
+        if (proxy_type === 'mtproto') {
+          const typedSecret = document.getElementById('proxy_secret').value;
+          if (typedSecret !== '') updates.proxy.secret = typedSecret;
+        }
       } else {
-        updates.proxy = null;
+        updates.proxy = {};  // dict خالی = حذف پروکسی (سمت سرور)
       }
       try {
         const r = await apiCall('PATCH', '/api/user/account/settings', updates);

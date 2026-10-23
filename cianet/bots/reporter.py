@@ -1106,7 +1106,7 @@ async def _exec_report(event, saas_bot, uid: int, d: dict) -> None:
         await event.answer("🎙 ریپورتر توسط مالک غیرفعال شده است.", alert=True)
         return
     if reporter_quota_left(uid) <= 0:
-        await event.answer("⛔ سهمیهٔ گزارشِ امروزِ شما تمام شده است — فردا.",
+        await event.answer("⛔ سهمیهٔ گزارشِ امروزِ شما تمام شده است — فردا (حدود ۳:۳۰ بامداد تهران).",
                            alert=True)
         return
     info = d.get("info", {})
@@ -1499,6 +1499,20 @@ async def handle_reporter_action(event, saas_bot, action: str) -> None:
         await event.answer("مسیر نامعتبر است.", alert=True)
         return
 
+    # ── توقفِ اضطراری قبل از گیتِ فعال‌بودن ──
+    # v2.23.9 (AUDIT-47 51-e#2): قبلا‌ «reporter:stop» بعد از گیتِ _eff_enabled
+    # بود — خاموشیِ اضطراریِ مالک وسطِ بسته‌ٔ در حالِ اجرا دکمه‌ٔ توقف را می‌کشت
+    # («ریپورتر فعال نیست» + صفحه‌ٔ پیشرفت با coming-soon جایگزین می‌شد) ولی
+    # بسته تا پایانِ سهمیه شلیک می‌کرد. توقف باید همیشه کار کند.
+    if action == "reporter:stop":
+        # v2.20.0 (SPAM-MODE): پرچمِ توقف — حلقهٔ بستهٔ در حالِ اجرا آن را
+        # می‌بیند و بسته را ناتمام می‌بندد. جریان/ویزارد دست‌نخورده می‌ماند.
+        if not hasattr(saas_bot, "_reporter_stop"):
+            saas_bot._reporter_stop = set()
+        saas_bot._reporter_stop.add(uid)
+        await event.answer("⛔ در حال توقفِ بستهٔ گزارش…")
+        return
+
     if not _eff_enabled():
         # کیل‌سوییچِ خاموش → همان صفحه‌ی «به‌زودی» + هشدارِ کوتاه
         await _render_coming_soon(event)
@@ -1521,14 +1535,6 @@ async def handle_reporter_action(event, saas_bot, action: str) -> None:
     if action == "reporter:history":
         saas_bot.wizards.pop(uid, None)
         await _page_history(event, saas_bot, uid)
-        return
-    if action == "reporter:stop":
-        # v2.20.0 (SPAM-MODE): پرچمِ توقف — حلقهٔ بستهٔ در حالِ اجرا آن را
-        # می‌بیند و بسته را ناتمام می‌بندد. جریان/ویزارد دست‌نخورده می‌ماند.
-        if not hasattr(saas_bot, "_reporter_stop"):
-            saas_bot._reporter_stop = set()
-        saas_bot._reporter_stop.add(uid)
-        await event.answer("⛔ در حال توقفِ بستهٔ گزارش…")
         return
 
     # ── جریانِ گزارشِ جدید ──
@@ -1667,7 +1673,8 @@ async def handle_reporter_text(event, saas_bot, wiz: dict) -> bool:
         saas_bot.wizards.pop(uid, None)
         await event.respond(
             UI.screen("⛔ سهمیه‌ی امروز تمام شده",
-                      body=["سقفِ گزارشِ امروزِ شما پر شده است — فردا دوباره بیایید.",
+                      body=["سقفِ گزارشِ امروزِ شما پر شده است — فردا دوباره بیایید",
+                            "(به‌روزرسانی سهمیه: حدود ۳:۳۰ بامداد تهران).",
                             "", f"سهمیه‌ی باقی‌مانده: **0**"]),
             buttons=_back_row(),
         )

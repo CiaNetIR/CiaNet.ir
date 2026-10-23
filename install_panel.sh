@@ -117,7 +117,7 @@ echo "  using: $PYTHON_BIN"
 VENV_DIR="$SCRIPT_DIR/.venv"
 echo -e "${YELLOW}🐍 ساخت virtualenv در $VENV_DIR...${NC}"
 if [ ! -d "$VENV_DIR" ]; then
-    $PYTHON_BIN -m venv "$VENV_DIR" 2>&1 | tail -3 || {
+    "$PYTHON_BIN" -m venv "$VENV_DIR" 2>&1 | tail -3 || {
         echo -e "${RED}❌ venv creation شکست خورد${NC}"
         echo -e "${YELLOW}   احتمالاً python3-venv نصب نیست. نصب کن:${NC}"
         echo "   sudo apt install -y python3-venv python3.12-venv"
@@ -129,27 +129,27 @@ VENV_PIP="$VENV_DIR/bin/pip"
 
 # Upgrade pip در venv (بدون مشکل uninstall)
 echo "  upgrading pip in venv..."
-$VENV_PYTHON -m pip install --upgrade pip --quiet 2>&1 | tail -2 || true
+"$VENV_PYTHON" -m pip install --upgrade pip --quiet 2>&1 | tail -2 || true
 
 # نصب requirements کامل (شامل telethon هم) در venv
 echo "  installing requirements..."
-$VENV_PIP install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>&1 | tail -5 || {
+"$VENV_PIP" install -r "$SCRIPT_DIR/requirements.txt" --quiet 2>&1 | tail -5 || {
     echo -e "${RED}❌ pip install شکست خورد!${NC}"
     echo -e "${YELLOW}   لگ کامل:${NC}"
-    $VENV_PIP install -r "$SCRIPT_DIR/requirements.txt" 2>&1 | tail -30
+    "$VENV_PIP" install -r "$SCRIPT_DIR/requirements.txt" 2>&1 | tail -30
     exit 1
 }
 
 # اگر telethon از قبل در system نصب بوده و در venv هم لازمه، نصب کن
 # (مثلاً main.py telethon رو import می‌کنه)
-if ! $VENV_PYTHON -c "import telethon" 2>/dev/null; then
+if ! "$VENV_PYTHON" -c "import telethon" 2>/dev/null; then
     echo "  installing telethon..."
-    $VENV_PIP install "telethon>=1.36.0" --quiet 2>&1 | tail -2 || true
+    "$VENV_PIP" install "telethon>=1.36.0" --quiet 2>&1 | tail -2 || true
 fi
 
 echo -e "${GREEN}✅ venv آماده${NC}"
 echo "  venv python: $VENV_PYTHON"
-$VENV_PYTHON --version
+"$VENV_PYTHON" --version
 
 # مالکیت venv رو به service user تغییر بده (اگه non-root)
 if [ "$SERVICE_USER" != "root" ]; then
@@ -228,9 +228,13 @@ if ! grep -q "PANEL_ADMIN_PASS_HASH" "$ENV_FILE" 2>/dev/null; then
     # بخوره (مثلاً bcrypt C extension نصب نباشه)، کل اسکریپت بدون پیام خطا
     # متوقف می‌شد. حالا یا || true اضافه می‌کنیم یا set +e موقتاً غیرفعال.
     set +e
-    PANEL_PASS_HASH=$($PYTHON_BIN -c "
+    # v2.23.9 (AUDIT-47 51-f#6): پسورد از طریقِ env var پاس می‌شود — قبلاً
+    # داخلِ سورسِ python -c جایگذاری می‌شد: ' در پسورد = SyntaxError و در
+    # واقعیت «کدِ دلخواه به‌عنوان root» (تزریق از طریقِ رشته).
+    PANEL_PASS_HASH=$(PANEL_PASS_ENV="$PANEL_PASS" "$PYTHON_BIN" -c "
+import os
 from passlib.hash import bcrypt
-print(bcrypt.encrypt('$PANEL_PASS'))
+print(bcrypt.encrypt(os.environ['PANEL_PASS_ENV']))
 " 2>/dev/null)
     set -e
     if [ -z "$PANEL_PASS_HASH" ]; then
@@ -255,7 +259,7 @@ print(bcrypt.encrypt('$PANEL_PASS'))
     fi
     echo "PANEL_ADMIN_PASS_HASH=$PANEL_PASS_HASH" >> "$ENV_FILE"
     # Session secret
-    SESSION_SECRET=$($PYTHON_BIN -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || openssl rand -hex 32)
+    SESSION_SECRET=$("$PYTHON_BIN" -c "import secrets; print(secrets.token_hex(32))" 2>/dev/null || openssl rand -hex 32)
     echo "PANEL_SESSION_SECRET=$SESSION_SECRET" >> "$ENV_FILE"
     echo -e "${GREEN}✅ پسورد تنظیم شد (hash type: ${PANEL_PASS_HASH%%:*})${NC}"
 else
@@ -388,9 +392,20 @@ EOF
                         aarch64|arm64) CF_ARCH="arm64" ;;
                         *) CF_ARCH="amd64" ;;
                     esac
+                    _cfd_tmp=$(mktemp)
                     curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" \
-                        -o /usr/local/bin/cloudflared
-                    chmod +x /usr/local/bin/cloudflared
+                        -o "$_cfd_tmp"
+                    # v2.23.9 (AUDIT-47 51-f#9): اعتبارسنجیِ حداقلیِ باینریِ root —
+                    # پین‌کردنِ hash برای «latest» ممکن نیست؛ حداقلِ دفاع:
+                    # جادوی ELF چک می‌شود (ردِ HTML/دانلودِ خراب) و sha256
+                    # برای ممیزی ثبت می‌شود.
+                    if [ -s "$_cfd_tmp" ] && [ "$(head -c 4 "$_cfd_tmp")" = "$(printf '\177ELF')" ]; then
+                        echo "   sha256(cloudflared): $(sha256sum "$_cfd_tmp" | cut -d' ' -f1)"
+                        install -m 755 "$_cfd_tmp" /usr/local/bin/cloudflared
+                    else
+                        echo -e "${YELLOW}   ⚠ دانلودِ cloudflared نامعتبر بود — نصب نشد (بعداً دستی نصب کن)${NC}"
+                    fi
+                    rm -f "$_cfd_tmp"
                 fi
             fi
 
@@ -593,13 +608,31 @@ if [ -f "$SCRIPT_DIR/web/package.json" ]; then
         cd "$SCRIPT_DIR/web"
         if ! command -v npm >/dev/null 2>&1; then
             echo -e "${YELLOW}📦 نصب Node.js 20...${NC}"
+            # v2.23.9 (AUDIT-47 51-f#9): نه pipe-to-bash لخت — اسکریپتِ
+            # setup اول دانلود، صحت‌سنجیِ shebang (ردِ HTML/صفحهٔ خطا) و
+            # ثبتِ sha256 برای ممیزی، بعد اجرا به‌عنوان root.
+            _nsrc_tmp=$(mktemp)
             if command -v apt-get >/dev/null 2>&1; then
-                curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
-                apt-get install -y nodejs 2>&1 | tail -3
+                _NSRC_URL="https://deb.nodesource.com/setup_20.x"
             elif command -v yum >/dev/null 2>&1; then
-                curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - 2>&1 | tail -3
-                yum install -y nodejs 2>&1 | tail -3
+                _NSRC_URL="https://rpm.nodesource.com/setup_20.x"
+            else
+                _NSRC_URL=""
             fi
+            if [ -n "$_NSRC_URL" ] && curl -fsSL "$_NSRC_URL" -o "$_nsrc_tmp" 2>/dev/null \
+               && [ -s "$_nsrc_tmp" ] \
+               && head -c 2 "$_nsrc_tmp" | grep -q '#!'; then
+                echo "   sha256(nodesource setup): $(sha256sum "$_nsrc_tmp" | cut -d' ' -f1)"
+                bash "$_nsrc_tmp" 2>&1 | tail -3
+                if command -v apt-get >/dev/null 2>&1; then
+                    apt-get install -y nodejs 2>&1 | tail -3
+                else
+                    yum install -y nodejs 2>&1 | tail -3
+                fi
+            else
+                echo -e "${YELLOW}   ⚠ دانلود/اعتبارسنجیِ اسکریپت Node.js ناموفق بود — Node را دستی نصب کن و دوباره اجرا کن${NC}"
+            fi
+            rm -f "$_nsrc_tmp"
         fi
         if command -v npm >/dev/null 2>&1; then
             npm install --silent 2>&1 | tail -5 || {

@@ -59,9 +59,17 @@ fi
 echo -e "${GREEN}🐍 Python:${NC} $PYTHON_BIN"
 
 # ─── نصب requirements ───
-echo -e "${YELLOW}📦 نصب requirements...${NC}"
+echo -e "${YELLOW}📦 ساخت venv و نصب requirements...${NC}"
 cd "$SCRIPT_DIR"
-$PYTHON_BIN -m pip install -r requirements.txt 2>&1 | tail -5 || {
+# v2.23.9 (AUDIT-47 51-f#8): pip سیستمی بدون venv روی Debian 12+/Ubuntu 24.04
+# با PEP 668 رد می‌شود (externally-managed-environment) — الگوی quick_install.
+VENV_DIR="$SCRIPT_DIR/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+    "$PYTHON_BIN" -m venv "$VENV_DIR" 2>&1 | tail -2
+fi
+VENV_PY="$VENV_DIR/bin/python"
+"$VENV_PY" -m pip install --upgrade pip --quiet 2>&1 | tail -1
+"$VENV_PY" -m pip install -r requirements.txt 2>&1 | tail -5 || {
     echo -e "${RED}❌ pip install شکست خورد!${NC}"
     exit 1
 }
@@ -115,7 +123,7 @@ User=cianet
 Group=cianet
 WorkingDirectory=$SCRIPT_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$PYTHON_BIN main.py all
+ExecStart=$VENV_PY main.py all
 Restart=always
 RestartSec=10
 

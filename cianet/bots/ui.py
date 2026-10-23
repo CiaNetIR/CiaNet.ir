@@ -346,9 +346,9 @@ class UI:
             if 0 <= num < 5 else "", ""
         )
         text = f"{n}  {label}  ·  {hint}" if hint else f"{n}  {label}"
-        # callback data خالی = دکمه نمایش داده می‌شه ولی کلیک نمی‌شه
-        # (در تلگرامِ client‌های جدید؛ در برخی کلاینت‌ها ممکنه کلیک بشه
-        # و answer بیاد — handler ما این رو هندل می‌کنه)
+        # v2.23.9 (AUDIT-47 51-d#10): docstring با کد هم‌راستا شد — callback
+        # data «hdr:{num}» است (کلیک‌پذیر) و saas.py آن را answer + رندرٔ
+        # دوبارهٔ هاب هندل می‌کند؛ ادعای «کلیک نمی‌شه» غلط بود.
         return UI.btn(text, f"hdr:{num}", style=None)
 
     # v2.23.0 (AUDIT-40): section_title حذف شد — هیچ مصرف‌کننده‌ای نداشت.

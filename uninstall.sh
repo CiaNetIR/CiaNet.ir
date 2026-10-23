@@ -37,6 +37,10 @@ fi
 
 echo ""
 echo -e "${YELLOW}۱. توقف سرویس‌ها...${NC}"
+# v2.23.9 (AUDIT-47 51-f#14): تایمرِ watchdog اول از همه متوقف می‌شود —
+# قبلاً بعد از stopِ سرویس‌ها بود و در پنجرهٔ بینِ دو، تیکِ تایمر می‌توانست
+# سرویسِ تازه-stop-شده را دوباره بالا بیاورد (race احیا).
+systemctl stop cianet-watchdog.timer 2>/dev/null || true
 systemctl stop selfbot 2>/dev/null || true
 systemctl stop cianet-panel 2>/dev/null || true
 systemctl stop cianet-tunnel 2>/dev/null || true
@@ -54,10 +58,12 @@ rm -f /etc/systemd/system/cianet-panel.service
 rm -f /etc/systemd/system/cianet-tunnel.service
 rm -f /etc/systemd/system/cianet.service
 # v2.23.5 (AUDIT-43 43-e#18): تایمر/سرویس watchdog هم پاک شود
-systemctl stop cianet-watchdog.timer 2>/dev/null || true
 systemctl disable cianet-watchdog.timer 2>/dev/null || true
 rm -f /etc/systemd/system/cianet-watchdog.service
 rm -f /etc/systemd/system/cianet-watchdog.timer
+# v2.23.9 (AUDIT-47 51-f#14): لاگ‌های watchdog هم پاک شوند (جاماندنِ بقیهٔ نصب)
+rm -f /var/log/cianet-watchdog.log 2>/dev/null || true
+journalctl --rotate 2>/dev/null || true
 rm -f /etc/systemd/system/multi-user.target.wants/selfbot.service
 rm -f /etc/systemd/system/multi-user.target.wants/cianet-panel.service
 # حذف sudoers ساخته‌شده توسط install.sh (برای auto-update)
@@ -111,6 +117,11 @@ userdel cianet 2>/dev/null || true
 
 echo -e "${YELLOW}۹. حذف cloudflared...${NC}"
 apt remove -y cloudflared 2>/dev/null || true
+# v2.23.9 (AUDIT-47 51-f#14): repoهای aptِ اضافه‌شده توسط نصب‌کننده هم پاک شوند
+# (nodesource که install_panel.sh اضافه می‌کند + کلید مربوط).
+rm -f /etc/apt/sources.list.d/nodesource.list 2>/dev/null || true
+rm -f /etc/apt/sources.list.d/nodesource*.list 2>/dev/null || true
+rm -f /usr/share/keyrings/nodesource.gpg 2>/dev/null || true
 rm -f /usr/local/bin/cloudflared 2>/dev/null || true
 
 echo ""

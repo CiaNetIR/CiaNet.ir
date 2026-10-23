@@ -50,7 +50,7 @@ try:
     )
 except Exception as _e:
     log.warning("initial safe.directory setup failed: %s", _e)
-LOCAL_COMMIT_FILE = Path(INSTALL_DIR) / ".last_seen_commit"
+# v2.23.9 (AUDIT-47 51-f#16): .last_seen_commit حذف شد — هرگز خوانده نمی‌شد (فقط نوشته می‌شد)؛ state[«last_commit»] منبع حقیقت است.
 LOCK_FILE = Path(INSTALL_DIR) / "data" / ".cianet-update.lock"
 STATE_FILE = Path(INSTALL_DIR) / "data" / ".updater_state.json"
 MIN_COMMIT_FLOOR_FILE = Path(INSTALL_DIR) / "data" / ".min_commit_floor"
@@ -72,8 +72,12 @@ def _write_min_commit_floor(commit_sha: str) -> None:
     commit_sha = commit_sha.strip().lower()
     try:
         MIN_COMMIT_FLOOR_FILE.parent.mkdir(parents=True, exist_ok=True)
-        MIN_COMMIT_FLOOR_FILE.write_text(commit_sha + "\n")
-        os.chmod(str(MIN_COMMIT_FLOOR_FILE), 0o600)
+        # v2.23.9 (AUDIT-47 51-f#11): نوشتنِ اتمیک (tmp + os.replace) —
+        # write پاره‌شده یعنی ردِ دائمیِ آپدیت‌های قبل از floor.
+        _tmp = MIN_COMMIT_FLOOR_FILE.with_name(MIN_COMMIT_FLOOR_FILE.name + ".tmp")
+        _tmp.write_text(commit_sha + "\n")
+        os.chmod(str(_tmp), 0o600)
+        os.replace(str(_tmp), str(MIN_COMMIT_FLOOR_FILE))
     except Exception as e:
         log.warning("min_commit_floor write failed: %s", e)
 
@@ -90,7 +94,10 @@ def _read_state() -> dict:
 def _write_state(state: dict) -> None:
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2))
+        # v2.23.9 (AUDIT-47 51-f#11): نوشتنِ اتمیک — JSON نصفه = state گم‌شده.
+        _tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+        _tmp.write_text(json.dumps(state, indent=2))
+        os.replace(str(_tmp), str(STATE_FILE))
     except Exception as e:
         log.warning("state write failed: %s", e)
 
@@ -191,13 +198,6 @@ def mark_rolled_back() -> None:
     state["rolled_back"] = True
     state["rolled_back_at"] = time.time()
     _write_state(state)
-    # پاک کردن .last_seen_commit تا check_for_update بدونه باید
-    # فوراً re-detect کنه
-    try:
-        if LOCAL_COMMIT_FILE.exists():
-            LOCAL_COMMIT_FILE.unlink()
-    except Exception:
-        pass
 
 
 def _acquire_lock(timeout: int = 30) -> bool:
@@ -459,13 +459,18 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                         )
                 else:
                     try:
-                        loop = asyncio.get_running_loop()
-                        # event loop فعال است: schedule کن و واقعاً صبر کن
-                        # (با create_task + ۲s sleep، حلقه فرصت اجرا داره)
-                        task = loop.create_task(hook())
-                        # بذار disable تموم شه
-                        time.sleep(2)
-                        disable_hook_ok = True
+                        asyncio.get_running_loop()
+                        # v2.23.9 (AUDIT-47 51-f#13): مسیرِ create_task +
+                        # time.sleep(2) حذف شد — sleepِ بلاک‌کننده یعنی
+                        # تسکِ ساخته‌شده هرگز فرصتِ اجرا پیدا نمی‌کرد ولی
+                        # disable_hook_ok بی‌دروغ True می‌شد. بدونِ main_loop،
+                        # hook صرفاً رد می‌شود (restart با SIGTERM همچنان
+                        # اکانت‌ها را قطع می‌کند).
+                        log.warning(
+                            "disable accounts hook skipped: running loop "
+                            "without main_loop reference (accounts will be "
+                            "killed by SIGTERM during restart)"
+                        )
                     except RuntimeError:
                         # event loop نیست: fallback به asyncio.run (legacy)
                         try:
@@ -544,7 +549,7 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 cwd=repo_dir, capture_output=True, text=True, timeout=30,
             )
             if reset_result.returncode != 0:
-                return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
+                return False, f"❌ git reset --hard failed:\n{reset_result.stderr.strip()[:300]}"
             # Defense-in-depth: confirm HEAD actually points at the
             # verified SHA. A misconfigured git config or hook could
             # otherwise leave us on a different commit.
@@ -565,14 +570,14 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
                 cwd=repo_dir, capture_output=True, text=True, timeout=30,
             )
             if fetch_result.returncode != 0:
-                return False, f"❌ git fetch failed:\n{fetch_result.stderr}"
+                return False, f"❌ git fetch failed:\n{fetch_result.stderr.strip()[:300]}"
 
             reset_result = subprocess.run(
                 ["git", "reset", "--hard", f"origin/{BRANCH}"],
                 cwd=repo_dir, capture_output=True, text=True, timeout=30,
             )
             if reset_result.returncode != 0:
-                return False, f"❌ git reset --hard failed:\n{reset_result.stderr}"
+                return False, f"❌ git reset --hard failed:\n{reset_result.stderr.strip()[:300]}"
 
         # v2.12.9 CRITICAL (QA-DEBUG C1): پس از reset --hard، فایلِ main.py
         # جدید رو با ast.parse اعتبارسنجی کن. اگه SyntaxError داشت، یعنی
@@ -763,11 +768,6 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
             return False, f"❌ نصب وابستگی‌های pip ناموفق بود و سیستم به کامیت قبلی بازگردانی شد: {_pip_e}"
 
         new_commit = get_local_commit(repo_dir)
-        try:
-            LOCAL_COMMIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-            LOCAL_COMMIT_FILE.write_text(new_commit or "")
-        except Exception as e:
-            log.warning("local commit file write failed: %s", e)
 
         state = _read_state()
         state["last_commit"] = new_commit
@@ -1042,7 +1042,7 @@ async def propagate_to_accounts(admin_bot=None) -> str:
                     await _owner_notify_async(
                         f"🎉 آپدیت CiaNet اعمال شد!\n\n"
                         f"📊 گزارش:\n{report}\n\n"
-                        f"🔗 commit: `{(get_local_commit() or '?')[:8]}`\n"
+                        f"🔗 commit: `{(await asyncio.to_thread(get_local_commit) or '?')[:8]}`\n"
                         f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
                     )
                 except (ImportError, Exception):
@@ -1082,7 +1082,9 @@ async def check_for_update() -> Optional[dict]:
     if not pending:
         return None
 
-    local = get_local_commit()
+    local = await asyncio.to_thread(get_local_commit)
+    # v2.23.9 (AUDIT-47 51-f#10): git rev-parse سینک است — مثل get_remote_commit
+    # از طریقِ to_thread؛ قبلاً روی event loop فریزِ تا ۱۰ثانیه‌ای می‌ساخت.
     remote = await asyncio.to_thread(get_remote_commit)
 
     return {

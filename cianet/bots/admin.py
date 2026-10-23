@@ -99,6 +99,13 @@ from cianet.core import (
     self_backup_group,
 )
 
+# v2.23.9 (AUDIT-47 51-d#1): حالت‌های مجاز برای دکمه‌های میان-ویزاردیِ پروکسی —
+# دیسپچر قبل از هدایتِ state، همین مجموعه را چک می‌کند تا دکمهٔ کهنه از یک
+# ویزاردِ دیگر (مثلاً لاگین با temp_client متصل) ویزاردِ فعال را بازنویسی نکند.
+_PROXY_WIZARD_STATES = (
+    WIZ_PROXY_ADDR, WIZ_PROXY_PORT, WIZ_PROXY_USERNAME, WIZ_PROXY_PASSWORD,
+)
+
 # کلاس‌های هم‌خانواده / توابعِ جابه‌جا‌شده
 from cianet.bots.ui import NavStack, UI
 
@@ -824,8 +831,12 @@ class AdminBot:
                 if on:
                     n_sel_page += 1
                 mark = "☑️" if on else "⬜️"
+                # v2.23.9 (AUDIT-47 51-d#7): hash در callback نه index — لیست
+                # لحظهٔ کلیک دوباره fetch می‌شود؛ با index، لاگ‌اوت/لاگینِ هم‌زمان
+                # یعنی تیک/بستنِ دستگاهِ اشتباه (TOCTOU). hash عددی ≤ ۲۰ رقم است
+                # و در سقفِ ۶۴ بایتِ callback جا می‌شود.
                 buttons.append([UI.btn(f"{mark} {self._sess_line(s)[:28]}",
-                                       f"sesstog:{tag}:{global_idx}", style="primary")])
+                                       f"sesstog:{tag}:{s['hash']}", style="primary")])
             # خلاصه‌ی انتخاب + عملیاتِ گروهی (چسبیده به پایینِ صفحه)
             # اگر اکانت شماره‌ی خارج/مجازی داشته باشد، یک 🛡️ به دکمه‌ها
             # اضافه می‌کنیم تا کاربر متوجه Anti-Ban بودن عملیات شود.
@@ -883,7 +894,7 @@ class AdminBot:
             buttons=buttons,
         )
 
-    async def _toggle_sess_selection(self, event, tag: str, idx: int):
+    async def _toggle_sess_selection(self, event, tag: str, session_hash: str):
         """تیکِ یک دستگاه را برعکس می‌کند و فهرست را دوباره رندر می‌کند."""
         allowed, _r = await self._authorize_security(event, tag)
         if not allowed:
@@ -898,15 +909,26 @@ class AdminBot:
             print(f"⚠️ [sesstog:{tag}] list_sessions ناموفق: {type(e).__name__}")
             await event.answer("گرفتن فهرست دستگاه‌ها ناموفق بود.", alert=True)
             return
-        if 0 <= idx < len(others):
+        # v2.23.9 (AUDIT-47 51-d#7): جستجو با hash نه index — قبلاً idxِ زمانِ
+        # رندر روی لیستِ دوباره-fetch شده اعمال می‌شد؛ اگر بین رندر و کلیک
+        # دستگاهی لاگ‌اوت/لاگین کرده بود، idx به دستگاهِ متفاوتی از برچسبِ
+        # دکمه اشاره می‌کرد و sesskill دستگاهِ اشتباه را می‌بست.
+        hit_idx = None
+        for i, s in enumerate(others):
+            if str(s["hash"]) == session_hash:
+                hit_idx = i
+                break
+        if hit_idx is not None:
             sel = self._sel_set(event.sender_id, tag)
-            h = others[idx]["hash"]
+            h = others[hit_idx]["hash"]
             if h in sel:
                 sel.discard(h)
             elif len(sel) < self._SESS_SEL_MAX:
                 sel.add(h)
+        else:
+            await event.answer("این دستگاه دیگر فعال نیست — فهرست تازه شد.", alert=True)
         # روی همان صفحه‌ای که بوده بمان
-        page = idx // self._SESS_PAGE_SIZE
+        page = (hit_idx if hit_idx is not None else 0) // self._SESS_PAGE_SIZE
         await self._show_sessions(event, tag, page=page)
 
     async def _kill_selected_sessions(self, event, tag: str, skip_antiban: bool = False):
@@ -2015,6 +2037,11 @@ class AdminBot:
         await event.edit(f"🔤 فونت جدید برای «{tag}» رو انتخاب کن:", buttons=buttons)
 
     async def _set_font(self, event, tag: str, font: str):
+        # v2.23.9 (AUDIT-47 51-d#11): اعتبارسنجی با FONT_CHOICES — کالبکِ
+        # دست‌سازِ font_set:TAG:anything قبلاً رشتهٔ دلخواه را persist می‌کرد.
+        if font not in FONT_CHOICES:
+            await event.answer("فونت نامعتبر است.", alert=True)
+            return
         entry = self.sb.ACCOUNTS.get(tag)
         if not entry:
             await event.answer("این اکانت الان روشن نیست.", alert=True)
@@ -2660,12 +2687,47 @@ class AdminBot:
         _fd_bkp, backup_path = tempfile.mkstemp(prefix="cianet_bkp_", suffix=".zip")
         os.close(_fd_bkp)
         try:
-            ok = await asyncio.wait_for(
-                asyncio.to_thread(build_backup_zip, backup_path, backup_pass),
-                timeout=60.0,
-            )
+            # v2.23.9 (AUDIT-47 51-d#2): الگوی shield + پاک‌سازیِ به‌تعویق‌افتاده
+            # (همان سخت‌سازیِ v2.22.1 دوقلوی ساعتی) — to_thread قابلِ cancel
+            # نیست؛ قبلاً بعد از timeoutِ ۶۰s، threadِ رهاشده ادامه می‌یافت و
+            # _encrypt_file_inplace با tmp+os.replace فایل را دوباره می‌ساخت →
+            # بکاپِ کاملِ رمزشدهٔ یتیم در /tmp می‌ماند و نوبتِ روزانه بی‌صدا
+            # از دست می‌رفت (فقط در journalctl دیده می‌شد).
+            build_fut = asyncio.ensure_future(
+                asyncio.to_thread(build_backup_zip, backup_path, backup_pass))
+            ok = False
+            try:
+                ok = await asyncio.wait_for(asyncio.shield(build_fut),
+                                            timeout=60.0)
+            except asyncio.TimeoutError:
+                def _purge_late_daily(_f, _p=backup_path):
+                    for _v in (_p, _p + ".enc.tmp"):
+                        try:
+                            os.remove(_v)
+                        except OSError:
+                            pass
+                build_fut.add_done_callback(_purge_late_daily)
+                print("⏰ [admin_bot] ساختِ بکاپِ روزانه بیش از ۶۰ ثانیه طول کشید — این نوبت رد شد.")
+                try:
+                    await self.client.send_message(
+                        ADMIN_ID,
+                        "⏰ ساختِ بکاپِ روزانهٔ کامل بیش از ۶۰ ثانیه طول کشید و"
+                        " این نوبت ارسال نشد — اگر تکرار شد، حجمِ سشن‌ها/دیتابیس"
+                        " یا فشارِ دیسک را بررسی کن.",
+                    )
+                except Exception:
+                    pass
+                return
             if not ok:
                 print("⚠️ [admin_bot] ساخت بکاپ روزانه ناموفق بود — ارسال نشد.")
+                try:
+                    await self.client.send_message(
+                        ADMIN_ID,
+                        "⚠️ ساختِ بکاپِ روزانهٔ کامل ناموفق بود — لاگِ سرویس را"
+                        " ببین (journalctl -u selfbot).",
+                    )
+                except Exception:
+                    pass
                 return
             file_size = os.path.getsize(backup_path)
             now = self.sb.iran_now()
@@ -2707,9 +2769,13 @@ class AdminBot:
             import traceback
             traceback.print_exc()
         finally:
-            if os.path.exists(backup_path):
+            # v2.23.9 (AUDIT-47 51-d#2): هر دو مسیرِ موقت پاک می‌شوند —
+            # قبلاً فقط backup_path پاک می‌شد و sidecarِ «.enc.tmp» در شکستِ
+            # میانیِ encrypt یتیم می‌ماند (الگوی دوقلوی ساعتی).
+            for _p in (backup_path, backup_path + ".enc.tmp"):
                 try:
-                    os.remove(backup_path)
+                    if os.path.exists(_p):
+                        os.remove(_p)
                 except Exception:
                     pass
 
@@ -3360,6 +3426,13 @@ class AdminBot:
 
         if state == WIZ_PROXY_PASSWORD:
             data["password"] = text
+            # v2.23.9 (AUDIT-47 51-d#8): رمز پروکسی از chat history پاک می‌شود —
+            # الگوی کدِ لاگین (WIZ_CODE) و رمزِ 2FA؛ پیامِ کاربر حاوی credential
+            # نباید در PV با ربات بماند.
+            try:
+                await event.message.delete()
+            except Exception:
+                pass
             await self._finish_proxy(event, data)
             return
 
@@ -3691,6 +3764,16 @@ class AdminBot:
                 pass
             await event.respond(_friendly_error(e, "finish_login"))
             self.wizards.pop(event.sender_id, None)
+            # v2.23.9 (AUDIT-47 51-d#4): سشنِ مجازِ wiz_* پاک می‌شود — در این
+            # نقطه auth کامل دارد (sign_in موفق بوده) و تا ری‌استارت+grace
+            # روی دیسک می‌ماند (همان کلاسِ 43-c#7؛ الگوی _cancel_wizard).
+            try:
+                if tag.startswith("wiz_"):
+                    _cfg_chk = self.sb.load_config()
+                    if not isinstance(_cfg_chk, dict) or tag not in _cfg_chk:
+                        _remove_session_files(tag)
+            except Exception:
+                pass
             return
 
         cfg = self.sb.load_config()
@@ -3766,6 +3849,18 @@ class AdminBot:
             except Exception as _e:
                 await event.respond(_friendly_error(_e, "finish_login"))
                 self.wizards.pop(event.sender_id, None)
+                # v2.23.9 (AUDIT-47 51-d#4): rename نیمه‌کاره — هر دو تگِ موقت
+                # و نهایی سشنِ کاملِ لاگین‌شده را روی دیسک می‌گذاشتند؛ تگِ
+                # نهایی هنوز در config نیست پس هر دو قابلِ پاکسازی امن‌اند.
+                try:
+                    _cfg_chk2 = self.sb.load_config()
+                    for _dead_tag in (tag, final_tag):
+                        if _dead_tag and (
+                                not isinstance(_cfg_chk2, dict)
+                                or _dead_tag not in _cfg_chk2):
+                            _remove_session_files(_dead_tag)
+                except Exception:
+                    pass
                 return
             tag = final_tag
             data["tag"] = tag
@@ -3985,7 +4080,14 @@ class AdminBot:
             await event.answer("⛔ دسترسی نداری", alert=True)
             return True
         if data is None:
-            data = event.data.decode()
+            # v2.23.9 (AUDIT-47 51-d#9): decode داخل try — کالبکِ جعلی با بایت‌های
+            # غیر-UTF8 قبلاً UnicodeDecodeError می‌داد که قبل از دیسپچر بود و
+            # کاربر answer نمی‌گرفت.
+            try:
+                data = event.data.decode()
+            except Exception:
+                await event.answer("درخواست نامعتبر.", alert=True)
+                return True
 
         # ─── ناوبری (فقط حالت standalone) ─────────────────────────────
         # در حالت غیر-standalone، روترِ SaaSBot مسیرهای nav:* را قبل از
@@ -4128,8 +4230,9 @@ class AdminBot:
                 _, tag, page = data.split(":", 2)
                 await self._show_sessions(event, tag, page=safe_callback_int(page, 0))
             elif data.startswith("sesstog:"):
-                _, tag, idx = data.split(":", 2)
-                await self._toggle_sess_selection(event, tag, safe_callback_int(idx, -1))
+                _, tag, sess_hash = data.split(":", 2)
+                # v2.23.9 (AUDIT-47 51-d#7): hash حمل می‌شود نه index.
+                await self._toggle_sess_selection(event, tag, sess_hash)
             elif data.startswith("sesskill:"):
                 tag = data.split(":", 1)[1]
                 await self._kill_selected_sessions(event, tag)
@@ -4179,8 +4282,11 @@ class AdminBot:
                 tag = data.split(":", 1)[1]
                 await self._start_send_msg_wizard(event, tag)
             elif data == "send_target_me":
+                # v2.23.9 (AUDIT-47 51-d#1): گارد state — قبلاً هر ویزاردِ بازِ
+                # کاربر (مثلاً لاگین با temp_client متصل) با دکمهٔ کهنه به
+                # WIZ_SEND_MSG_TEXT بازنویسی می‌شد و سشنِ wiz_* روی دیسک می‌ماند.
                 wiz = self.wizards.get(event.sender_id)
-                if wiz:
+                if wiz and wiz.get("state") == WIZ_SEND_MSG_TARGET:
                     wiz["data"]["target"] = "me"
                     wiz["state"] = WIZ_SEND_MSG_TEXT
                     await event.edit("متن پیام رو بفرست:",
@@ -4197,11 +4303,24 @@ class AdminBot:
                 await self._remove_proxy(event, tag)
             elif data.startswith("proxy_type:"):
                 ptype = data.split(":", 1)[1]
-                await self._proxy_type_chosen(event, ptype)
+                # v2.23.9 (AUDIT-47 51-d#1/#5): گارد state — قبلاً هر ویزاردِ
+                # باز (حتی WIZ_CODE با temp_client متصل) به ویزاردِ پروکسی
+                # بازنویسی می‌شد؛ و بدون ویزارد کاملاً SILENT بود (اسپینر
+                # بی‌پاسخ تا timeout خودِ تلگرام).
+                _pwiz = self.wizards.get(event.sender_id)
+                if _pwiz and _pwiz.get("state") in _PROXY_WIZARD_STATES:
+                    await self._proxy_type_chosen(event, ptype)
+                else:
+                    await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)
             elif data == "proxy_skip_auth":
-                wiz = self.wizards.get(event.sender_id)
-                if wiz:
-                    await self._finish_proxy(event, wiz["data"])
+                # v2.23.9 (AUDIT-47 51-d#1): گارد state + دیتا — قبلاً مستقیم
+                # _finish_proxy با دیتای ویزاردِ لاگین صدا زده می‌شد؛ popِ
+                # بی‌disconnect سشنِ wiz_* لاگین‌شده را روی دیسک می‌گذاشت.
+                _swiz = self.wizards.get(event.sender_id)
+                if (_swiz and _swiz.get("state") in _PROXY_WIZARD_STATES
+                        and "addr" in _swiz.get("data", {})
+                        and "port" in _swiz.get("data", {})):
+                    await self._finish_proxy(event, _swiz["data"])
                 else:
                     # v2.23.5 (AUDIT-43 43-b#6): اسپینر بی‌پاسخ نمی‌ماند
                     await event.answer("⏳ این مرحله منقضی شده — از منو دوباره شروع کن.", alert=True)

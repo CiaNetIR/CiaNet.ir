@@ -61,7 +61,7 @@ echo -e "${YELLOW}۲. نصب پیش‌نیازها...${NC}"
 apt-get update -qq 2>/dev/null || true
 apt-get install -y -qq python3 python3-pip python3-venv 2>&1 | tail -3
 
-PYTHON_BIN=$(which python3)
+PYTHON_BIN=$(command -v python3 || echo /usr/bin/python3)
 
 # ─── ۳. ساخت کاربر cianet (اگه وجود نداره) ───
 echo -e "${YELLOW}۳. ساخت کاربر سرویس...${NC}"
@@ -76,12 +76,13 @@ fi
 echo -e "${YELLOW}۴. ساخت venv و نصب requirements...${NC}"
 VENV_DIR="$INSTALL_DIR/.venv"
 if [ ! -d "$VENV_DIR" ]; then
-    $PYTHON_BIN -m venv "$VENV_DIR" 2>&1 | tail -2
+    # v2.23.9 (AUDIT-47 51-f#17): متغیرهای مفسر quote می‌شوند — مسیر با فاصله می‌شکست.
+    "$PYTHON_BIN" -m venv "$VENV_DIR" 2>&1 | tail -2
 fi
 VENV_PY="$VENV_DIR/bin/python"
 VENV_PIP="$VENV_DIR/bin/pip"
-$VENV_PY -m pip install --upgrade pip --quiet 2>&1 | tail -1
-$VENV_PIP install -r "$INSTALL_DIR/requirements.txt" --quiet 2>&1 | tail -3
+"$VENV_PY" -m pip install --upgrade pip --quiet 2>&1 | tail -1
+"$VENV_PIP" install -r "$INSTALL_DIR/requirements.txt" --quiet 2>&1 | tail -3
 echo -e "${GREEN}   venv آماده${NC}"
 
 # ─── انتخاب پسورد پنل (حذف پسورد پیش‌فرض hardcode شده — P1-8) ───
@@ -116,14 +117,33 @@ resolve_panel_pass() {
     echo ""
 }
 
+# v2.23.9 (AUDIT-47 · تعمیر خانوادهٔ 51-f#15): هش bcrypt با venv — قبلاً
+# «sha256:...» ساخته می‌شد ولی web_panel از F-02 به بعد sha256 را سخت رد
+# می‌کند (لاگین همیشه ناموفق)؛ یعنی نصبِ تازه با quick_install = ادمینِ
+# لاک‌اوت. پسورد از طریقِ env var پاس می‌شود (درس 51-f#6 — نه در سورس
+# python -c) و شکستِ bcrypt با exit 1 فیل-کلوزد است (نه downgrade).
+make_panel_hash() {
+    PANEL_HASH=$(PANEL_PASS_ENV="$PANEL_PASS" "$VENV_PY" -c '
+import os
+from passlib.hash import bcrypt
+print(bcrypt.encrypt(os.environ["PANEL_PASS_ENV"]))
+' 2>/dev/null)
+    if [ -z "$PANEL_HASH" ]; then
+        echo -e "${RED}❌ ساخت هش bcrypt برای پسورد پنل ناموفق بود (passlib/bcrypt)${NC}"
+        echo -e "   venv: $VENV_PY — دستی تست کن: $VENV_PY -c 'from passlib.hash import bcrypt; print(bcrypt.encrypt("x"))'"
+        exit 1
+    fi
+}
+
 # ─── ۵. env file ───
 echo -e "${YELLOW}۵. ساخت env file...${NC}"
 ENV_FILE="/etc/cianet.env"
 # اگه env vars از environment آمده
 if [ -n "$API_ID" ] && [ -n "$API_HASH" ] && [ -n "$ADMIN_BOT_TOKEN" ] && [ -n "$ADMIN_ID" ]; then
     resolve_panel_pass
-    PANEL_HASH="sha256:$(echo -n "$PANEL_PASS" | sha256sum | cut -d' ' -f1)"
-    SECRET=$(head -c64 /dev/urandom | xxd -p | tr -d '\n')
+    make_panel_hash   # v2.23.9: bcrypt (F-02) — sha256 توسط پنل رد می‌شود
+    # v2.23.9 (AUDIT-47 51-f#7): xxd → secrets.token_hex — ایمیج‌های مینیمال xxd ندارند و نصب وسط راه می‌مُرد.
+    SECRET=$("$VENV_PY" -c 'import secrets; print(secrets.token_hex(32))')
     cat > "$ENV_FILE" <<EOF
 API_ID=$API_ID
 API_HASH=$API_HASH
@@ -146,8 +166,9 @@ else
     read -p "   ADMIN_BOT_TOKEN: " ADMIN_BOT_TOKEN
     read -p "   ADMIN_ID: " ADMIN_ID
     resolve_panel_pass
-    PANEL_HASH="sha256:$(echo -n "$PANEL_PASS" | sha256sum | cut -d' ' -f1)"
-    SECRET=$(head -c64 /dev/urandom | xxd -p | tr -d '\n')
+    make_panel_hash   # v2.23.9: bcrypt (F-02) — sha256 توسط پنل رد می‌شود
+    # v2.23.9 (AUDIT-47 51-f#7): xxd → secrets.token_hex — ایمیج‌های مینیمال xxd ندارند و نصب وسط راه می‌مُرد.
+    SECRET=$("$VENV_PY" -c 'import secrets; print(secrets.token_hex(32))')
     cat > "$ENV_FILE" <<EOF
 API_ID=$API_ID
 API_HASH=$API_HASH
@@ -249,6 +270,14 @@ EOF
 echo -e "${YELLOW}۱۰. فعال‌سازی سرویس‌ها...${NC}"
 systemctl daemon-reload
 systemctl enable selfbot cianet-panel
+# v2.23.9 (AUDIT-47 51-f#5): sudoers برای auto-update — بدونِ این، بعد از هر
+# آپدیت restart سرویس‌ها به «دستی بزن» می‌افتاد (الگوی install.sh).
+SYSTEMCTL_BIN=$(command -v systemctl || echo "/usr/bin/systemctl")
+if [ "$(id -u)" -eq 0 ]; then
+    echo "cianet ALL=(ALL) NOPASSWD: $SYSTEMCTL_BIN restart selfbot, $SYSTEMCTL_BIN start selfbot, $SYSTEMCTL_BIN stop selfbot, $SYSTEMCTL_BIN restart cianet-panel" > /etc/sudoers.d/cianet
+    chmod 440 /etc/sudoers.d/cianet
+    echo -e "${GREEN}   sudoers نصب شد — auto-update کار می‌کنه${NC}"
+fi
 systemctl restart selfbot cianet-panel
 sleep 3
 

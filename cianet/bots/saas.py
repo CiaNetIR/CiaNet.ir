@@ -318,8 +318,13 @@ class SaaSBot:
         # کند) — این کار را _start_own_wizard انجام می‌دهد.
         self.wizards: dict = {}
         # v2.15.0: announce feature — بدون wizard، ساده و قابل اعتماد
+        # v2.23.9 (AUDIT-47 51-c#6): announce هم مثل ویزاردها TTL دارد —
+        # قبلاً مالکِ رهاکنندهٔ announce اولین متنِ بعدی‌اش (حتی وسطِ
+        # ویزاردِ باز) بی‌صدا پیش‌نمایشِ broadcast می‌شد.
         self._announce_pending: set = set()
         self._announce_text: dict = {}
+        self._announce_ts: dict = {}
+        self._ANNOUNCE_TTL_SEC = 10 * 60
         # PATCH (v2.0.12): wizard TTL. هر wizard یک timestamp ست می‌شه و
         # وقتی از ۳۰ دقیقه بگذره، خودکار پاک می‌شه (و temp_client disconnect).
         # این از نشتِ TCP socket و session file lock در wizardهای رها‌شده
@@ -349,11 +354,13 @@ class SaaSBot:
         self._gate_blocked_ts: dict = {}
         # v2.23.6 (AUDIT-43 43-b#10): کوول‌داونِ رندرِ گیتِ ردشده — کاربرِ بسته‌ای
         # که متن‌ها را پشت‌سرهم می‌فرستاد، به‌ازایِ هر پیام delete+send می‌گرفت
-        # تا FloodWait (channel_retry از قبل سقف ۵ ثانیه دارد؛ پیامِ ساده نداشت).
+        # تا FloodWait (channel_retry از قبل کوول‌داون دارد؛ پیامِ ساده نداشت).
         self._gate_render_ts: dict = {}
-        # آخرین زمان کلیکِ «بررسی عضویت» به‌ازای هر کاربر — برای سقفِ
-        # ۵ ثانیه‌ای: هر کلیکِ force یک یا دو تماس شبکه با تلگرام است و
-        # بدون سقف، یک کاربر می‌تواند با کلیک‌های پشت‌سرهم آن را اسپم کند.
+        # آخرین زمان کلیکِ «بررسی عضویت» به‌ازای هر کاربر — برای کوول‌داونِ
+        # ۲۰ثانیه‌ای (_GATE_RETRY_COOLDOWN): هر کلیکِ force یک یا دو تماس
+        # شبکه با تلگرام است و بدون سقف، یک کاربر می‌تواند با کلیک‌های
+        # پشت‌سرهم آن را اسپم کند. (v2.23.9 · AUDIT-47 51-c#8: کامنت کهنه
+        # «۵ ثانیه‌ای» با مقدارِ واقعی هم‌راستا شد.)
         self._gate_retry_ts: dict = {}
         # قفلِ استارت/ری‌استارت سلف‌بات‌ها بعد از تمدید: {tag: in-flight} — تا
         # دو درخواست هم‌زمانِ resume (مثلاً تایید کارت + فعال‌سازی لایسنس)
@@ -778,6 +785,23 @@ class SaaSBot:
         # تشخیص CallbackQuery با `event.query` (قابل‌اطمینان) نه
         # `hasattr(respond)` — چون telethon به CallbackQuery هم respond می‌دهد.
         is_callback = getattr(event, "query", None) is not None
+        # v2.23.9 (AUDIT-47 51-c#7): رویدادِ غیر-خصوصی (گروه) هرگز respond
+        # عمومی نمی‌گیرد — قبلاً پیامِ گیت در همان گروهِ عمومی پست می‌شد و
+        # _gate_msg_id هم با آیدیِ پیامِ گروهی override می‌شد (پاکسازیِ
+        # پیامِ گیتِ خصوصیِ بعدی از کار می‌افتاد). به‌جایش DM.
+        if not getattr(event, "is_private", False):
+            if is_callback:
+                try:
+                    await event.answer(
+                        "🔒 برای استفاده از ربات باید عضو کانال‌ها شوید — پیام خصوصی را چک کنید.",
+                        alert=True)
+                except Exception:
+                    pass
+            try:
+                await self.client.send_message(event.sender_id, text, buttons=buttons)
+            except Exception:
+                pass
+            return
         if not is_callback:
             await self._try_delete_gate_message(event.sender_id, event.chat_id)
             try:
@@ -847,6 +871,11 @@ class SaaSBot:
             # یک سشنِ متصلِ telethon نشت می‌کرد.
             _spawn_bg(self.admin_panel._cleanup_wizard_temp_client(wiz),
                       "wizard_cleanup")
+        # v2.23.9 (AUDIT-47 51-c#6): پاک‌سازیِ متقابل — شروعِ ویزارد،
+        # announce رهاشدهٔ همان کاربر را هم می‌بندد.
+        self._announce_pending.discard(user_id)
+        self._announce_text.pop(user_id, None)
+        self._announce_ts.pop(user_id, None)
         # v2.12.23 (QA10-STABILITY BUG#2): timestamp ست کن برای TTL cleanup.
         # قبلاً _ts ست نمی‌شد → _cleanup_stale_wizards هرگز expire نمی‌کرد.
         import time as _t_wiz
@@ -1776,31 +1805,29 @@ class SaaSBot:
         uid = event.sender_id
         price = dedicated_bot_price()
         if method == "wallet":
-            bal = get_wallet_balance(uid)
-            if bal < price:
-                await event.answer("❌ موجودی کافی نیست.", alert=True)
-                return
-            # v2.11.3: اول order بساز، بعد پول کم کن (با محاسبه‌ی مبلغ واقعی USDT)
+            # v2.23.9 (AUDIT-47 51-b#7): مهاجرت به pay_order_wallet_atomic —
+            # قبلاً wallet_pay_from_balance (دبتِ اتمیک) و سپس UPDATE جدا
+            # برای paid کردن؛ اگر پروسه بین این دو می‌مرد، پول کم شده ولی
+            # فاکتور pending می‌ماند و ربات فعال نمی‌شد (بازیابی فقط دستی).
+            # حالا همه‌چیز در یک تراکنشِ واحد است (همان کاری که Task 44
+            # برای اندپوینت وب کرد)؛ برای DEDICATED_BOT_PLAN فقط status
+            # عوض می‌شود و subscription نمی‌سازد.
             _ded_usdt, _ded_rate = await self._compute_order_amounts(price)
             order = create_order(uid, "ربات اختصاصی", price, _ded_usdt)
             if not isinstance(order, dict) or "id" not in order:
                 await event.answer("❌ خطا در ساخت سفارش.", alert=True)
                 return
-            pay_result = wallet_pay_from_balance(uid, price, ref="dedicated_bot")
+            pay_result = pay_order_wallet_atomic(uid, order["id"])
             if not pay_result.get("ok"):
-                await event.answer(f"❌ خطا در پرداخت: {pay_result.get('error')}", alert=True)
+                err = pay_result.get("error")
+                if err == "insufficient_balance":
+                    await event.answer(
+                        f"❌ موجودی کافی نیست.\nقیمت: {fa_digits(price)} Toman\n"
+                        f"موجودی شما: {fa_digits(pay_result.get('balance', 0))} Toman",
+                        alert=True)
+                else:
+                    await event.answer(f"❌ خطا در پرداخت: {err}", alert=True)
                 return
-            if isinstance(order, dict) and "id" in order:
-                with _conn_immediate() as c:
-                    cur = c.execute("UPDATE orders SET status = 'paid', pay_method = 'wallet', paid_at = ? WHERE id = ? AND status = 'pending'",
-                              (_now(), order["id"]))
-                    if cur.rowcount == 0:
-                        pass  # handle refund outside lock
-                # v2.11.5: refund outside lock
-                if cur.rowcount == 0:
-                    wallet_credit(uid, price, OWNER_ID, reason="refund: already paid")
-                    await event.answer("❌ این فاکتور قبلاً پرداخت شده — مبلغ برگشت.", alert=True)
-                    return
             await self._clear_admin_panel_wizard(uid)
             self._start_own_wizard(uid, "dedicated_bot_token", {"user_id": uid})
             await event.respond(
@@ -2913,10 +2940,8 @@ class SaaSBot:
         if u.get("reseller_id"):
             body.append(f"👥 زیرمجموعه‌ی نماینده: `{u['reseller_id']}`")
         # v2.17.0: وضعیت بلاک — اگر بلاک شده باشد مشخص و پررنگ باشد
-        if u.get("is_blocked"):
-            reason_txt = f" — {u['block_reason']}" if u.get("block_reason") else ""
-            body.append(f"⛔ وضعیت: **بلاک شده**{reason_txt}")
-        # v2.17.0: وضعیت بلاک — اگر بلاک شده باشد مشخص و پررنگ باشد
+        # v2.23.9 (AUDIT-47 51-c#5): بلوکِ تکراری حذف شد — خطِ «⛔ وضعیت:
+        # بلاک شده» در پنلِ هر کاربرِ بلاک‌شده دوبار رندر می‌شد.
         if u.get("is_blocked"):
             reason_txt = f" — {u['block_reason']}" if u.get("block_reason") else ""
             body.append(f"⛔ وضعیت: **بلاک شده**{reason_txt}")
@@ -3061,10 +3086,21 @@ class SaaSBot:
             if getattr(event, "query", None) is not None:
                 await event.answer("⛔ حساب شما توسط مدیریت مسدود شده است.",
                                    alert=True)
-            else:
+            elif getattr(event, "is_private", False):
                 await event.respond(
                     "⛔ **دسترسی شما به این ربات مسدود شده است.**\n\n"
                     "در صورت نیاز، از طریق پشتیبانی پیگیری کنید.")
+            else:
+                # v2.23.9 (AUDIT-47 51-c#7): در گروهِ عمومی اعلام نمی‌شود —
+                # فقط DM به خودِ کاربر (ربات عضو گروه‌های گیت است و پیامِ
+                # عمومیِ «مسدود شدید» حریم کاربر را لگد می‌کند).
+                try:
+                    await self.client.send_message(
+                        user_id,
+                        "⛔ **دسترسی شما به این ربات مسدود شده است.**\n\n"
+                        "در صورت نیاز، از طریق پشتیبانی پیگیری کنید.")
+                except Exception:
+                    pass
         except Exception:
             pass
         return True
@@ -4201,7 +4237,9 @@ class SaaSBot:
         if new_value == "1":
             msg += "\n\n✅ loop هم‌اکنون شروع شد — نیازی به restart نیست."
         else:
-            msg += "\n\n⚠️ loop در next iteration متوقف می‌شه (تا ۵ دقیقه)."
+            # v2.23.9 (AUDIT-47 51-c#8): متن دقیق — بازهٔ حلقه ۶ ساعت است
+            # (core._auto_update_loop INTERVAL_SEC=6*3600)؛ ادعای «۵ دقیقه» غلط بود.
+            msg += "\n\n⚠️ loop در چرخهٔ بعدی (هر ۶ ساعت) متوقف می‌شود."
         await event.answer(msg, alert=True)
         # refresh صفحه
         await self._show_owner_update(event)
@@ -4415,56 +4453,129 @@ class SaaSBot:
             )
             return
 
-        # backup main.py فعلی
-        try:
-            ts = int(_time.time())
-            backup_name = f"main.py.pre-rollback.{ts}"
-            backup_path = versions_dir / backup_name
-            versions_dir.mkdir(parents=True, exist_ok=True)
-            _shutil.copy2(main_py, backup_path)
-        except Exception as e:
-            await event.edit(
-                f"❌ backup main.py قبل از rollback ناموفق: {e}",
-                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+        # v2.23.9 (AUDIT-47 51-f#4): پشتیبانیِ سایدکار — rollback واقعی. از
+        # v2.16 به بعد main.py فقط یک shim است؛ تعویضِ تنها آن هیچ کدی را
+        # برنمی‌گرداند (پلاسیبو). اگر سایدکار <name>.commit هست، کلِ درختِ
+        # tracked با «git checkout <commit> -- .» به همان لحظه برمی‌گردد
+        # (همان فیکسِ v2.23.5 در web_panel.version_rollback).
+        _git_dir = str(_project_dir())
+        sidecar = versions_dir / (name + ".commit")
+        _used_git = False
+        if sidecar.is_file():
+            import re as _re_mod
+            import subprocess as _sp_git
+            commit = sidecar.read_text(encoding="utf-8").strip()
+            if not _re_mod.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
+                await event.edit(
+                    "❌ سایدکارِ کامیت این نسخه خراب است (hash نامعتبر) — rollback ممکن نیست.",
+                    buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+                )
+                return
+            # بکاپِ pre-checkout باید قبل از checkout گرفته شود (درس AUDIT-46 #1)
+            try:
+                ts = int(_time.time())
+                backup_name = f"main.py.pre-rollback.{ts}"
+                backup_path = versions_dir / backup_name
+                versions_dir.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(main_py, backup_path)
+                _cur = await asyncio.to_thread(
+                    _sp_git.run, ["git", "rev-parse", "HEAD"],
+                    cwd=_git_dir, capture_output=True, text=True, timeout=5,
+                )
+                if _cur.returncode == 0:
+                    try:
+                        (versions_dir / (backup_name + ".commit")).write_text(
+                            _cur.stdout.strip(), encoding="utf-8")
+                    except Exception:
+                        pass
+            except Exception as e:
+                await event.edit(
+                    f"❌ backup main.py قبل از rollback ناموفق: {e}",
+                    buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+                )
+                return
+            _co = await asyncio.to_thread(
+                _sp_git.run, ["git", "checkout", commit, "--", "."],
+                cwd=_git_dir, capture_output=True, text=True, timeout=30,
             )
-            return
-
-        # اعتبارسنجی AST قبل از جایگزینی (M-21)
-        try:
-            import ast as _ast
-            _ast.parse(src_path.read_text(encoding="utf-8"))
-        except Exception as _ast_e:
-            await event.edit(
-                f"❌ فایل نسخه‌ی انتخابی معتبر نیست (خطای سینتکس AST): {_ast_e}",
-                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
-            )
-            return
-
-        # جایگزینی
-        try:
-            _shutil.copy2(src_path, main_py)
-            # v2.8.1: بعد از rollback موفق، flag «rolled_back» را در state ست کن
-            # و .last_seen_commit را پاک کن تا آپدیتر بعد از restart بدونه
-            # باید re-detect کنه (bug 3 fix).
+            if _co.returncode != 0:
+                print(f"❌ [rollback bot] git checkout failed: {_co.stderr[:300]}")
+                await event.edit(
+                    "❌ خطا در بازیابی نسخه — با پشتیبانی تماس بگیرید.",
+                    buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+                )
+                return
+            _used_git = True
+            # پاکسازی __pycache__ تا کدِ قدیمیِ کش‌شده اجرا نشود
+            for _pc_root, _pc_dirs, _pc_files in os.walk(_git_dir):
+                if "__pycache__" in _pc_dirs:
+                    _pc_dirs.remove("__pycache__")
+                    try:
+                        _shutil.rmtree(os.path.join(_pc_root, "__pycache__"))
+                    except Exception:
+                        pass
             try:
                 updater_mod, _ = self._import_updater_safe()
                 if updater_mod is not None:
                     updater_mod.mark_rolled_back()
             except Exception as _re:
                 print(f"⚠️ [rollback] mark_rolled_back failed: {_re}")
-        except Exception as e:
+
+        if not _used_git:
+            # backup main.py فعلی (مسیر legacy — بکاپ‌های بدون سایدکار)
             try:
-                _shutil.copy2(backup_path, main_py)
-            except Exception:
-                pass
-            await event.edit(
-                f"❌ جایگزینی ناموفق: {e}\n\nmain.py به حالت قبل برگردانده شد.",
-                buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
-            )
-            return
+                ts = int(_time.time())
+                backup_name = f"main.py.pre-rollback.{ts}"
+                backup_path = versions_dir / backup_name
+                versions_dir.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(main_py, backup_path)
+            except Exception as e:
+                await event.edit(
+                    f"❌ backup main.py قبل از rollback ناموفق: {e}",
+                    buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+                )
+                return
+
+            # اعتبارسنجی AST قبل از جایگزینی (M-21)
+            try:
+                import ast as _ast
+                _ast.parse(src_path.read_text(encoding="utf-8"))
+            except Exception as _ast_e:
+                await event.edit(
+                    f"❌ فایل نسخه‌ی انتخابی معتبر نیست (خطای سینتکس AST): {_ast_e}",
+                    buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+                )
+                return
+
+            # جایگزینی
+            try:
+                _shutil.copy2(src_path, main_py)
+                # v2.8.1: بعد از rollback موفق، flag «rolled_back» را در state ست کن
+                # (v2.23.9: .last_seen_commit حذف شد — state منبع حقیقت است)
+                # باید re-detect کنه (bug 3 fix).
+                try:
+                    updater_mod, _ = self._import_updater_safe()
+                    if updater_mod is not None:
+                        updater_mod.mark_rolled_back()
+                except Exception as _re:
+                    print(f"⚠️ [rollback] mark_rolled_back failed: {_re}")
+            except Exception as e:
+                try:
+                    _shutil.copy2(backup_path, main_py)
+                except Exception:
+                    pass
+                await event.edit(
+                    f"❌ جایگزینی ناموفق: {e}\n\nmain.py به حالت قبل برگردانده شد.",
+                    buttons=[UI.go("↩️ بازگشت", "owner_rollback_list"), UI.nav_row()],
+                )
+                return
 
         # restart
         # v2.9.5: auto-detect service name (قبلاً hardcoded "cianet" بود)
+        # v2.23.9 (AUDIT-47 51-f#4): restart سه‌مرحله‌ای (sudo -n systemctl →
+        # systemctl → SIGTERM به خودِ پروسه؛ systemd با Restart=always
+        # دوباره می‌سازدش) — قبلاً Popenِ لختِ systemctl در non-root بی‌صدا
+        # fail می‌شد و پیامِ «در حال restart» دروغ می‌گفت (الگوی web_panel).
         try:
             import subprocess as _sp
             _svc = os.environ.get("CIANET_SERVICE_NAME", "").strip()
@@ -4485,10 +4596,48 @@ class SaaSBot:
                         continue
             if not _svc:
                 _svc = "selfbot"  # fallback
-            _sp.Popen(
-                ["systemctl", "restart", _svc],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-            )
+            _is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+            _restarted = False
+            if not _is_root:
+                try:
+                    _rc = await asyncio.to_thread(
+                        _sp.run,
+                        ["sudo", "-n", "systemctl", "restart", _svc],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if _rc.returncode == 0:
+                        _restarted = True
+                except Exception:
+                    pass
+            if not _restarted:
+                try:
+                    _rc = await asyncio.to_thread(
+                        _sp.run,
+                        ["systemctl", "restart", _svc],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if _rc.returncode == 0:
+                        _restarted = True
+                except Exception:
+                    pass
+            if not _restarted:
+                import signal as _signal
+                restart_msg = "🔄 در حال restart (SIGTERM — systemd دوباره می‌سازد)..."
+                await event.edit(
+                    UI.screen("✅ Rollback انجام شد",
+                              body=[
+                                  (f"✅ کلِ درخت به commitِ `{commit[:12]}` برگشت."
+                                   if _used_git else
+                                   f"✅ main.py با `{name}` جایگزین شد."),
+                                  f"📦 backupِ نسخه‌ی قبلی: `{backup_name}`",
+                                  "",
+                                  restart_msg,
+                              ],
+                              subtitle="روی نسخه‌ی پشتیبان، دوباره rollback کن تا برگردی."),
+                    buttons=[UI.nav_row()],
+                )
+                os.kill(os.getpid(), _signal.SIGTERM)
+                return
             restart_msg = f"🔄 سرویس در حال restart ({_svc})..."
         except Exception as e:
             restart_msg = f"⚠️ restart ناموفق (دستی بزن): {e}"
@@ -4496,7 +4645,9 @@ class SaaSBot:
         await event.edit(
             UI.screen("✅ Rollback انجام شد",
                       body=[
-                          f"✅ main.py با `{name}` جایگزین شد.",
+                          (f"✅ کلِ درخت به commitِ `{commit[:12]}` برگشت."
+                           if _used_git else
+                           f"✅ main.py با `{name}` جایگزین شد."),
                           f"📦 backupِ نسخه‌ی قبلی: `{backup_name}`",
                           "",
                           restart_msg,
@@ -5589,10 +5740,15 @@ class SaaSBot:
             await event.answer("⛔ فقط OWNER", alert=True)
             return
         # پاک‌سازی wizard قبلی (اگه هست)
+        # v2.23.9 (AUDIT-47 51-c#6): پاک‌سازیِ متقابل — الگوی admin_hub؛
+        # قبلاً ویزاردِ بازِ همان مالک سرِ جایش می‌ماند.
+        self.wizards.pop(event.sender_id, None)
         self._announce_pending.discard(event.sender_id)
         self._announce_text.pop(event.sender_id, None)
         # ست کردن pending
+        import time as _t_ann
         self._announce_pending.add(event.sender_id)
+        self._announce_ts[event.sender_id] = _t_ann.time()
         from telethon import Button
         await event.respond(
             "**📨 ارسال پیام همگانی**\n\n"
@@ -5629,8 +5785,17 @@ class SaaSBot:
                 await self.client.send_message(uid, text)
                 sent_ok += 1
             except errors.FloodWaitError as e:
+                # v2.23.9 (AUDIT-47 51-c#3): بعد از انتظارِ FloodWait یک‌بار
+                # retry می‌شود — قبلاً کلِ مدتِ flood را صبر می‌کردیم ولی
+                # پیام هرگز دوباره ارسال نمی‌شد و کاربرِ عادی اطلاعیه را
+                # نمی‌گرفت (و در «ناموفق‌ها = start نکرده‌اند» غلط دسته‌بندی
+                # می‌شد).
                 await asyncio.sleep(e.seconds + 2)
-                failed += 1
+                try:
+                    await self.client.send_message(uid, text)
+                    sent_ok += 1
+                except Exception:
+                    failed += 1
             except Exception:
                 failed += 1
             await asyncio.sleep(0.05)
@@ -7221,6 +7386,13 @@ class SaaSBot:
             await event.answer("❌ فاکتور پیدا نشد.", alert=True)
             return
         amount = int(order["amount_toman"])
+        # v2.23.9 (AUDIT-47 51-c#2): پرچمِ paid — pay_order_wallet_atomic
+        # اتمیک و all-or-nothing است؛ اگر بعد از موفقیتِ آن، رندرِ پیام
+        # (event.edit — FloodWait/خطای گذرا) شکست بخورد، قبلاً except بی‌شرط
+        # wallet_credit می‌کرد: کاربر هم اشتراکِ فعال‌شده را داشت هم پولش
+        # برگشته بود (اعتبار دوبرابر + پیامِ «مبلغ برگشت» در حالی که پرداخت
+        # commit شده). refund فقط برای شکستِ خودِ پرداخت.
+        _paid = False
         try:
             pay_result = pay_order_wallet_atomic(event.sender_id, oid)
             if not pay_result.get("ok"):
@@ -7234,6 +7406,7 @@ class SaaSBot:
                 else:
                     await event.answer("❌ این فاکتور قابل پرداخت نیست.", alert=True)
                 return
+            _paid = True
             plan_name = pay_result["plan"]
             if plan_name == DEDICATED_BOT_PLAN:
                 # v2.23.1 (AUDIT-43 #3): قبلاً اینجا event.sender_id (int)
@@ -7262,16 +7435,23 @@ class SaaSBot:
             )
         except Exception as _e:
             print(f"⚠️ [wallet_pay] خطا در تأیید فاکتور: {_e}")
-            # v2.12.27 (HUNT-1 #1/HUNT-5 #4): refund در صورت خطا — قبلاً
-            # wallet debited بود ولی create_subscription یا UPDATE fail
-            # می‌کرد و هیچ refund‌ای نبود. کاربر پولش رو از دست می‌داد.
-            try:
-                wallet_credit(event.sender_id, amount, OWNER_ID,
-                              reason="refund: order confirm failed")
-                print(f"✅ [wallet_pay] refund شد: {amount}")
-            except Exception as _re:
-                print(f"❌ [wallet_pay] refund FAILED: {_re}")
-            await event.answer(f"❌ خطا در تأیید فاکتور — مبلغ برگشت.", alert=True)
+            if not _paid:
+                # v2.12.27 (HUNT-1 #1/HUNT-5 #4): refund در صورت خطا — قبلاً
+                # wallet debited بود ولی create_subscription یا UPDATE fail
+                # می‌کرد و هیچ refund‌ای نبود. کاربر پولش رو از دست می‌داد.
+                try:
+                    wallet_credit(event.sender_id, amount, OWNER_ID,
+                                  reason="refund: order confirm failed")
+                    print(f"✅ [wallet_pay] refund شد: {amount}")
+                except Exception as _re:
+                    print(f"❌ [wallet_pay] refund FAILED: {_re}")
+                await event.answer(f"❌ خطا در تأیید فاکتور — مبلغ برگشت.", alert=True)
+            else:
+                # پرداخت commit شده ولی رندر/مراحلِ نمایشی شکست خورده — پول و
+                # فاکتور سالم‌اند؛ پیام صادقانه بدونِ بازپرداختِ اشتباه.
+                await event.answer(
+                    "✅ پرداخت انجام شد ولی نمایشِ پیام با خطا مواجه شد — دوباره /start بزن.",
+                    alert=True)
 
     async def _user_show_orders(self, event):
         orders = list_user_orders(event.sender_id)
@@ -9182,14 +9362,22 @@ class SaaSBot:
             # v2.12.29 (DEEP-9 #9): پوشه‌ی ربات رو پاک کن — قبلاً
             # rmtree نمی‌شد و فایل‌های سشن + دیتابیس روی دیسک می‌موندن
             # (نشتیِ دیسک + امنیتی: فایل سشن حاوی credentials).
+            # v2.23.9 (AUDIT-47 51-c#4): گاردِ مسیر مثل _dedicated_bot_delete_go
+            # — این حلقه هر ساعت خودکار اجرا می‌شود؛ bot_dir خراب/دستکاری‌شده
+            # در DB نباید بتواند مسیرِ دلخواه را rmtree کند.
             bot_dir = dbot.get("bot_dir")
-            if bot_dir and os.path.isdir(bot_dir):
+            _expected_dir = os.path.join(
+                _project_dir(), "dedicated_bots", str(dbot["id"]))
+            if (bot_dir and os.path.isdir(bot_dir)
+                    and os.path.abspath(bot_dir) == _expected_dir):
                 try:
                     import shutil as _shutil
                     _shutil.rmtree(bot_dir)
                     print(f"✅ [dedicated] bot_dir پاک شد: {bot_dir}")
                 except Exception as _re:
                     print(f"⚠️ [dedicated] rmtree({bot_dir}) failed: {_re}")
+            elif bot_dir:
+                print(f"⚠️ [dedicated] bot_dir خارج از مسیرِ مجاز است — پاک نشد: {bot_dir!r}")
             try:
                 await self.client.send_message(
                     dbot["owner_id"],
@@ -9266,24 +9454,34 @@ class SaaSBot:
             # v2.15.0: announce feature — بدون wizard
             uid = event.sender_id
             if uid in self._announce_pending:
-                text = (event.raw_text or "").strip()
-                if not text:
-                    await event.respond("❌ متن پیام خالی است. دوباره بفرست:")
+                # v2.23.9 (AUDIT-47 51-c#6): TTL — announce رهاشده بعد از ۱۰
+                # دقیقه خودکار می‌میرد؛ متنِ بعدیِ مالک (حتی وسطِ کارِ عادی)
+                # دیگر پیش‌نمایشِ broadcast نمی‌شود.
+                import time as _t_ann
+                _ann_started = self._announce_ts.get(uid, 0)
+                if _ann_started and _t_ann.time() - _ann_started > self._ANNOUNCE_TTL_SEC:
+                    self._announce_pending.discard(uid)
+                    self._announce_text.pop(uid, None)
+                    self._announce_ts.pop(uid, None)
+                else:
+                    text = (event.raw_text or "").strip()
+                    if not text:
+                        await event.respond("❌ متن پیام خالی است. دوباره بفرست:")
+                        return
+                    self._announce_pending.discard(uid)
+                    self._announce_text[uid] = text
+                    from telethon import Button
+                    await event.respond(
+                        "**📨 پیش‌نمایش پیام همگانی**\n\n"
+                        "این پیام به همه‌ی کاربران (که ربات را start کرده‌اند) ارسال می‌شود:\n\n"
+                        f"━━━━━━━━━━━━━━\n{text}\n━━━━━━━━━━━━━━\n\n"
+                        "🟡 برای ارسال، دکمه‌ی زیر را بزن.",
+                        buttons=[
+                            [Button.inline("📨 ارسال به همه", b"announce_send:go")],
+                            [Button.inline("انصراف", b"announce_cancel")],
+                        ],
+                    )
                     return
-                self._announce_pending.discard(uid)
-                self._announce_text[uid] = text
-                from telethon import Button
-                await event.respond(
-                    "**📨 پیش‌نمایش پیام همگانی**\n\n"
-                    "این پیام به همه‌ی کاربران (که ربات را start کرده‌اند) ارسال می‌شود:\n\n"
-                    f"━━━━━━━━━━━━━━\n{text}\n━━━━━━━━━━━━━━\n\n"
-                    "🟡 برای ارسال، دکمه‌ی زیر را بزن.",
-                    buttons=[
-                        [Button.inline("📨 ارسال به همه", b"announce_send:go")],
-                        [Button.inline("انصراف", b"announce_cancel")],
-                    ],
-                )
-                return
 
             # v2.13.0 (TEST-WIZARD-FLOWS): پاکسازیِ دوره‌ایِ wizardهای قدیمیِ
             # SaaSBot — قبلاً فقط AdminBot.wizards پاک می‌شد (از
@@ -9384,18 +9582,29 @@ class SaaSBot:
                         pass
                     return
 
-            # اگر ویزاردِ ما این پیام را نخواست، آن را به پنل مدیریت
+            # اگر ویزاردِ ما این پیام را نخورد، آن را به پنل مدیریت
             # اکانت‌های سلف هدایت می‌کنیم — صرف‌نظر از نقش و بدون فهرست
             # جداگانه. این بی‌خطر است چون admin_panel.handle_message بدون
             # ویزاردِ بازِ مخصوصِ همین کاربر کاری نمی‌کند؛ برای OWNER/ADMIN/
             # RESELLER (که همیشه مجازند) و برای USER عادیِ وسطِ ویزاردِ
             # لاگین (تگ/شماره/کد) دقیقاً همین مسیر است. scope پنل هم درست
             # قبل از فراخوانی روی همین کاربر تنظیم می‌شود — و چون پنل یک
-            # singleton مشترک است، کل (sync + dispatch) زیر _panel_lock می‌رود
-            # تا رویدادِ هم‌زمانِ کاربرِ دیگر نتواند وسطِ dispatch scope را
-            # عوض کند.
-            async with self._panel_lock:
-                self._sync_admin_panel_scope(event.sender_id)
+            # singleton مشترک است، sync زیرِ _panel_lock می‌رود تا رویدادِ
+            # هم‌زمانِ کاربرِ دیگر نتواند وسطِ sync scope را عوض کند.
+            # v2.23.9 (AUDIT-47 51-d#3): ① peek بدون قفل — بدونِ ویزاردِ باز،
+            # dispatch یک no-op است؛ پیام‌های عادیِ کاربران هرگز صفِ قفل را
+            # نمی‌سازند. ② پردازشِ ویزارد بیرون از قفل اجرا می‌شود — قبلاً
+            # کلِ dispatch زیرِ قفل بود و awaitهای شبکهٔ ویزاردِ لاگین
+            # (connect/send_code تا ۳۰+۳۰ ثانیه) همهٔ callbackهای پنلِ همهٔ
+            # کاربران را صف می‌کردند (freeze سراسریِ ~۶۰-۷۰s در هر گام).
+            # امنیت: هندلرهای ویزارد scope-invariant اند — tag/data داخلِ
+            # ویزاردِ خودِ کاربر است، مالکیتِ اکانتِ جدید قبل از اولین await
+            # از data/default_owner_id خوانده می‌شود (hardening v2.23.4 در
+            # _finish_add_account) و رندرهای پایانی از for_user_id صریح یا
+            # نقشِ saas استفاده می‌کنند، نه از scopeِ پنل.
+            if self.admin_panel.wizards.get(event.sender_id) is not None:
+                async with self._panel_lock:
+                    self._sync_admin_panel_scope(event.sender_id)
                 await self.admin_panel.handle_message(event)
 
         @self.client.on(events.CallbackQuery)
@@ -9411,7 +9620,18 @@ class SaaSBot:
             مستقیم اجرا می‌شوند. پشته‌ی ناوبری هیچ دسترسی‌ای اعطا نمی‌کند؛
             فقط یادش می‌ماند کاربر کجا بوده.
             """
-            data = _route if _route is not None else event.data.decode()
+            # v2.23.9 (AUDIT-47 51-d#9): decode داخل try — کالبکِ جعلی با
+            # بایت‌های غیر-UTF8 (کلاینتِ بدخواه هر بایتی می‌تواند بفرستد)
+            # قبلاً UnicodeDecodeError می‌داد که قبل از دیسپچر بود و کاربر
+            # answer نمی‌گرفت (الگوی admin/helper در همین راند).
+            try:
+                data = _route if _route is not None else event.data.decode()
+            except Exception:
+                try:
+                    await event.answer("درخواست نامعتبر.", alert=True)
+                except Exception:
+                    pass
+                return
             uid = event.sender_id
             role = self._role(uid)
             # v2.17.0 (BLOCK): هیچ دکمه‌ای برای کاربرِ بلاک‌شده کار نمی‌کند
@@ -9433,6 +9653,10 @@ class SaaSBot:
             if data == NAV_HOME:
                 self.wizards.pop(uid, None)
                 await self._clear_admin_panel_wizard(uid)
+                # v2.23.9 (AUDIT-47 51-c#6): NAV_* حالت announce را هم می‌بندد.
+                self._announce_pending.discard(uid)
+                self._announce_text.pop(uid, None)
+                self._announce_ts.pop(uid, None)
                 self.nav.reset(uid)
                 await self._show_menu_for_role(event.chat_id, role, edit_event=event)
                 return
@@ -9447,6 +9671,10 @@ class SaaSBot:
                     return
                 self.wizards.pop(uid, None)
                 await self._clear_admin_panel_wizard(uid)
+                # v2.23.9 (AUDIT-47 51-c#6): NAV_* حالت announce را هم می‌بندد.
+                self._announce_pending.discard(uid)
+                self._announce_text.pop(uid, None)
+                self._announce_ts.pop(uid, None)
                 prev = self.nav.pop(uid)
                 if not prev:
                     # ریشه‌ی پشته — یک قدم بالاتر از این، منوی اصلی است.
@@ -9570,7 +9798,7 @@ class SaaSBot:
                     # دکمه‌ی «بررسی عضویت» — بعد از عضویت، دسترسی بدون نیاز
                     # به /start دوباره بررسی می‌شود (force=True: بدون استفاده
                     # از کش، چکِ تازه با تلگرام). هر کلیک یک تماس شبکه است؛
-                    # سقف ۵ ثانیه‌ای جلوی اسپمِ کلیک را می‌گیرد.
+                    # کوول‌داونِ ۲۰ثانیه‌ای جلوی اسپمِ کلیک را می‌گیرد.
                     now = time.time()
                     if now - self._gate_retry_ts.get(event.sender_id, 0) < _GATE_RETRY_COOLDOWN:
                         await event.answer("⏳ یک لحظه صبر کن و دوباره بررسی کن.", alert=True)
@@ -10101,9 +10329,19 @@ class SaaSBot:
                     # نباید خود event.data را دستکاری کنیم — telethon آن را
                     # read-only نگه می‌دارد. به‌جایش admin_panel.handle_callback
                     # را با data override صدا می‌زنیم.
-                    async with self._panel_lock:
-                        self._sync_admin_panel_scope(event.sender_id)
+                    # v2.23.9 (AUDIT-47 51-d#3 ادامه): مسیرِ ذخیره‌شده اگر
+                    # کالبکِ سنگینِ ویزاردِ لاگین است، بیرون از قفل (peek).
+                    _route_heavy = (
+                        route == "wiz_resend_code" or route.startswith("confirm_replace:")
+                    ) and self.admin_panel.wizards.get(event.sender_id) is not None
+                    if _route_heavy:
+                        async with self._panel_lock:
+                            self._sync_admin_panel_scope(event.sender_id)
                         await self.admin_panel.handle_callback(event, data=route)
+                    else:
+                        async with self._panel_lock:
+                            self._sync_admin_panel_scope(event.sender_id)
+                            await self.admin_panel.handle_callback(event, data=route)
                     return
                 # v2.12.16 (USER-REQUEST): «🤖 سلف من» کاملاً حذف شد.
                 # callback handlers موندن برای defensive rejection (اگه
@@ -11192,9 +11430,23 @@ class SaaSBot:
             #   (۳) همه‌ی عملیاتِ روی اکانت‌ها با owner_filter (که الان
             #       روی همین کاربر تنظیم شده) گارد می‌شوند — برای USER
             #       یعنی فقط اکانت‌های خودش.
-            async with self._panel_lock:
-                self._sync_admin_panel_scope(event.sender_id)
+            # v2.23.9 (AUDIT-47 51-d#3 ادامه): دو کالبکِ سنگینِ ویزاردِ لاگین
+            # (ارسالِ دوبارهٔ کد / تاییدِ جایگزینی — send_code_request تا ~۳۰s)
+            # بیرون از قفل اجرا می‌شوند (الگوی message_h در همین راند)؛ این
+            # هندلرها فقط state ویزاردِ همین کاربر را می‌خوانند و tag را از
+            # خودِ data می‌گیرند (scope-invariant). بقیهٔ کالبک‌ها رندرِ
+            # پنل با scope مشترک‌اند و تحت قفل می‌مانند.
+            _wiz_heavy = (
+                data == "wiz_resend_code" or data.startswith("confirm_replace:")
+            ) and self.admin_panel.wizards.get(event.sender_id) is not None
+            if _wiz_heavy:
+                async with self._panel_lock:
+                    self._sync_admin_panel_scope(event.sender_id)
                 await self.admin_panel.handle_callback(event, data=data)
+            else:
+                async with self._panel_lock:
+                    self._sync_admin_panel_scope(event.sender_id)
+                    await self.admin_panel.handle_callback(event, data=data)
 
         # ارجاع به روتر، تا صفحات بتوانند «یک قدم دیگر عقب» را درخواست
         # کنند — مثلاً وقتی هدفِ یک مسیرِ ذخیره‌شده دیگر وجود ندارد

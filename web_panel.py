@@ -573,7 +573,10 @@ def _get_client_ip(request: Request) -> str:
     و rightmost non-trusted hop برگردانده می‌شود؛ در غیر این صورت خودِ
     request.client.host.
     """
-    trusted_proxies = os.environ.get("PANEL_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
+    trusted_proxies = [p.strip() for p in os.environ.get(
+        "PANEL_TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if p.strip()]
+    # v2.23.9 (AUDIT-47 51-a#11): strip مثل ALLOWED_ORIGINS — قبلاً
+    # «127.0.0.1, ::1» (با فاصله) ورودیِ ::1 را بی‌صدا غیرفعال می‌کرد.
     if request.client and request.client.host in trusted_proxies:
         fwd = request.headers.get("x-forwarded-for")
         if fwd:
@@ -1173,7 +1176,12 @@ async def account_login_guard(tag: str, request: Request, _: None = Depends(requ
     cfg = m.load_config()
     if tag not in cfg:
         raise HTTPException(404, "Account not found")
-    body = await request.json()
+    # v2.23.9 (AUDIT-47 51-a#8): بدنهٔ خراب/ناقص → 400 نه 500 (الگوی
+    # toggle_auto_renew).
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "بدنهٔ درخواست باید JSON معتبر باشد")
     enabled = bool(body.get("enabled", False))
     cfg[tag]["login_code_guard"] = enabled
     m.save_config(cfg)
@@ -1248,7 +1256,13 @@ async def account_proxy_update(tag: str, update: ProxyUpdate, request: Request, 
                 raise HTTPException(400, "آدرس پروکسی نامعتبر است (SSRF محافظت‌شده)")
             proxy_cfg["addr"] = update.proxy_host
         if update.proxy_port:
-            proxy_cfg["port"] = int(update.proxy_port)
+            # v2.23.9 (AUDIT-47 51-a#9): بازهٔ ۱-۶۵۵۳۵ — قبلاً منفی/صفر/
+            # بزرگ‌تر از ۶۵۵۳۵ در config نوشته می‌شد و telethon موقعِ connect
+            # با خطای گیج‌کننده شکست می‌خورد (گارد SSRF فقط روی host بود).
+            _port = int(update.proxy_port)
+            if not (1 <= _port <= 65535):
+                raise HTTPException(400, "پورت پروکسی باید بین ۱ و ۶۵۵۳۵ باشد")
+            proxy_cfg["port"] = _port
         if ptype == "mtproto":
             if not update.proxy_secret:
                 raise HTTPException(400, "پروکسی mtproto به secret نیاز دارد")
@@ -1687,7 +1701,9 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
     if sidecar.is_file():
         commit = sidecar.read_text(encoding="utf-8").strip()
         if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
-            raise HTTPException(400, "Invalid filename")
+            # v2.23.9 (AUDIT-47 51-a#10): پیام دقیق — فایل سالم است، محتوای
+            # sidecar (hash کامیت) نامعتبر است؛ «Invalid filename» گمراه‌کننده بود.
+            raise HTTPException(400, "سایدکارِ کامیت این نسخه خراب است (hash نامعتبر) — rollback ممکن نیست")
         import subprocess as _sp
         # v2.23.7 (AUDIT-46 #1): بکاپِ pre-rollback باید قبل از checkout
         # گرفته شود — قبلاً بعد از checkout نوشته می‌شد و محتوایش کدِ
@@ -1896,7 +1912,9 @@ async def tools_api_creds_rotate(request: Request, _: None = Depends(require_csr
         if not isinstance(acc, dict):
             continue
         # انتخاب pool[i % len(pool)] بر اساس hash tag
-        import hashlib
+        # v2.23.9 (AUDIT-47 51-a#12): import ماژول-سطحی (خط ۶۳) — import
+        # داخل حلقه دقیقاً همان الگوی سایه‌اندازی است که طبق درس AUDIT-46 #3
+        # rollback را دو نسخه کشت.
         idx = int(hashlib.md5(tag.encode()).hexdigest(), 16) % len(pool)
         new = pool[idx]
         if acc.get("api_id") != new["api_id"]:
@@ -2577,7 +2595,10 @@ async def zarinpal_create_payment(order_id: int, request: Request,
         callback_url = f"{panel_url}/api/payment/zarinpal/callback"
     else:
         callback_url = str(request.url_for("zarinpal_callback"))
-    result = m.create_zarinpal_payment(order_id, callback_url)
+    result = await asyncio.to_thread(m.create_zarinpal_payment, order_id, callback_url)
+    # v2.23.9 (AUDIT-47 51-b#3): توابع درگاه sync اند (urlopen با timeout=15)
+    # و پنلِ embed روی همان event loopِ بات اجرا می‌شود — فراخوانیِ مستقیم
+    # کلِ بات را تا ۱۵ ثانیه فریز می‌کرد (همان کلاسِ Task 45).
     if result.get("ok"):
         return {"ok": True, "url": result["url"]}
     # v2.14.2 (BUG-23w): جزئیات استثنا/پاسخ خام درگاه به detail نچکه
@@ -2728,7 +2749,8 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
         return _payment_failed_html("سفارش پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.")
     order = dict(row)
     amount = int(order["amount_toman"])
-    verify_result = m.verify_zarinpal_payment(Authority, amount)
+    verify_result = await asyncio.to_thread(m.verify_zarinpal_payment, Authority, amount)
+    # v2.23.9 (AUDIT-47 51-b#3): verify هم sync است — to_thread مثل create.
     if verify_result.get("ok"):
         # v2.10.0: idempotent — WHERE status='pending' برای جلوگیری از double-callback
         with m._conn_immediate() as c:
@@ -2766,7 +2788,30 @@ async def zarinpal_callback(request: Request, Authority: str = "", Status: str =
         if plan_name == getattr(m, "DEDICATED_BOT_PLAN", "ربات اختصاصی"):
             m.log_action(order["user_id"], "dedicated_bot_paid_gateway", f"order={order['id']}")
         else:
-            m.create_subscription(order["user_id"], plan_name, days)
+            # v2.23.9 (AUDIT-47 51-a#6): تحویلِ جبران‌پذیر — فاکتور بالای این
+            # نقطه paid/کامیت شده؛ اگر create_subscription شکست بخورد قبلاً
+            # کاربر بعد از کسرِ پول ۵۰۰ می‌دید و فاکتورِ paid بدونِ اشتراک
+            # می‌ماند. حالا مبلغ با همان tx_ref درگاه به کیف پول واریز می‌شود
+            # (credit_gateway_capture روی ref اتمیک است؛ re-callback هم‌زمان
+            # با این مسیر دوباره واریز نمی‌کند — همان ref).
+            try:
+                m.create_subscription(order["user_id"], plan_name, days)
+            except Exception as _se:
+                print(f"⚠️ [zarinpal_callback] create_subscription failed: {_se}", flush=True)
+                _cred = m.credit_gateway_capture(
+                    int(order["user_id"]), amount, "zarinpal",
+                    tx_ref=str(Authority or ""),
+                )
+                try:
+                    await m._notify_user_async(int(order["user_id"]),
+                        "✅ پرداخت شما دریافت شد ولی فعال‌سازیِ خودکارِ اشتراک موقتاً ناموفق بود.\n\n"
+                        f"💰 {m.fa_digits(amount)} تومان به کیف پول شما واریز شد "
+                        f"(کد پیگیری: {verify_result.get('ref_id', '-')}) — می‌توانید همین "
+                        "مبلغ را برای فعال‌سازی/تمدید از کیف پول خرج کنید. از دردسر "
+                        "واقع‌آمده پوزش می‌خواهیم.")
+                except Exception as _ne:
+                    print(f"⚠️ [zarinpal_callback] subfail notify failed: {_ne}", flush=True)
+                return _payment_success_html(verify_result.get("ref_id", "-"))
         # v2.17.0: اگر فاکتورِ دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
         try:
             m.maybe_fulfill_group_order(order_id=order["id"])
@@ -2841,7 +2886,15 @@ async def create_sched_msg(request: Request, _: None = Depends(require_user_csrf
     from pydantic import BaseModel
     uid = require_user_auth(request)
     m = _main()
-    req = await request.json()
+    # v2.23.9 (AUDIT-47 51-a#8): بدنهٔ خراب/ناقص → 400 نه 500 (الگوی
+    # toggle_auto_renew) — این اندپوینت‌ها با curl قابل فراخوانی‌اند.
+    try:
+        req = await request.json()
+    except Exception:
+        raise HTTPException(400, "بدنهٔ درخواست باید JSON معتبر باشد")
+    missing = [k for k in ("tag", "chat_id", "text", "scheduled_at") if k not in req]
+    if missing:
+        raise HTTPException(400, f"فیلدهای الزام در بدنه نیست: {missing}")
     # v2.14.2 (BUG-2w): مالکیت tag قبل از create چک شود — قبلاً req["tag"]
     # بدون هیچ چکی به create_scheduled_message پاس می‌شد و هر دارنده‌ی
     # لایسنس می‌توانست از سلف‌بات دیگران پیام زمان‌بندی‌شده بسازد
@@ -2878,7 +2931,14 @@ async def create_auto_reply_api(request: Request, _: None = Depends(require_user
     """ساخت auto-reply."""
     uid = require_user_auth(request)
     m = _main()
-    req = await request.json()
+    # v2.23.9 (AUDIT-47 51-a#8): بدنهٔ خراب/ناقص → 400 نه 500.
+    try:
+        req = await request.json()
+    except Exception:
+        raise HTTPException(400, "بدنهٔ درخواست باید JSON معتبر باشد")
+    missing = [k for k in ("tag", "keyword", "reply") if k not in req]
+    if missing:
+        raise HTTPException(400, f"فیلدهای الزام در بدنه نیست: {missing}")
     # v2.14.2 (BUG-2w): مالکیت tag قبل از create چک شود — مثل scheduled-messages.
     cfg = m.load_config()
     acc = cfg.get(req["tag"])
@@ -2929,7 +2989,8 @@ async def zibal_create_payment(order_id: int, request: Request,
     import os as _os
     panel_url = (_os.environ.get("PANEL_URL") or "").strip().rstrip("/")
     cb = f"{panel_url}/api/payment/zibal/callback" if panel_url else str(request.url_for("zibal_callback"))
-    result = m.create_zibal_payment(order_id, cb)
+    result = await asyncio.to_thread(m.create_zibal_payment, order_id, cb)
+    # v2.23.9 (AUDIT-47 51-b#3): مثل زرین‌پال — شبکهٔ blocking خارج از loop.
     if result.get("ok"):
         return {"ok": True, "url": result["url"]}
     # v2.14.2 (BUG-23w): جزئیات استثنا/پاسخ خام درگاه به detail نچکه
@@ -2947,7 +3008,8 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
         return _payment_failed_html("سفارش پیدا نشد. لطفاً با پشتیبانی تماس بگیرید.")
     order = dict(row)
     amount = int(order["amount_toman"])
-    verify_result = m.verify_zibal_payment(trackId, amount)
+    verify_result = await asyncio.to_thread(m.verify_zibal_payment, trackId, amount)
+    # v2.23.9 (AUDIT-47 51-b#3): مثل زرین‌پال — شبکهٔ blocking خارج از loop.
     if verify_result.get("ok"):
         with m._conn_immediate() as c:
             cur = c.execute(
@@ -2980,7 +3042,27 @@ async def zibal_callback(request: Request, trackId: str = "", status: str = ""):
         if plan_name == getattr(m, "DEDICATED_BOT_PLAN", "ربات اختصاصی"):
             m.log_action(order["user_id"], "dedicated_bot_paid_gateway", f"order={order['id']}")
         else:
-            m.create_subscription(order["user_id"], plan_name, days)
+            # v2.23.9 (AUDIT-47 51-a#6): تحویلِ جبران‌پذیر — همان فیکسِ
+            # زرین‌پال؛ tx_ref همان trackId است تا re-callback دوباره واریز
+            # نکند (credit_gateway_capture روی ref اتمیک است).
+            try:
+                m.create_subscription(order["user_id"], plan_name, days)
+            except Exception as _se:
+                print(f"⚠️ [zibal_callback] create_subscription failed: {_se}", flush=True)
+                _cred = m.credit_gateway_capture(
+                    int(order["user_id"]), amount, "zibal",
+                    tx_ref=str(trackId or ""),
+                )
+                try:
+                    await m._notify_user_async(int(order["user_id"]),
+                        "✅ پرداخت شما دریافت شد ولی فعال‌سازیِ خودکارِ اشتراک موقتاً ناموفق بود.\n\n"
+                        f"💰 {m.fa_digits(amount)} تومان به کیف پول شما واریز شد "
+                        f"(کد پیگیری: {verify_result.get('ref_id', '-')}) — می‌توانید همین "
+                        "مبلغ را برای فعال‌سازی/تمدید از کیف پول خرج کنید. از دردسر "
+                        "واقع‌آمده پوزش می‌خواهیم.")
+                except Exception as _ne:
+                    print(f"⚠️ [zibal_callback] subfail notify failed: {_ne}", flush=True)
+                return _payment_success_html(verify_result.get("ref_id", "-"))
         # v2.17.0: اگر فاکتورِ دسته‌جمعی بود، لایسنس‌های اعضا را بساز/بفرست
         try:
             m.maybe_fulfill_group_order(order_id=order["id"])
@@ -3100,14 +3182,48 @@ async def user_update_account_settings(req: AccountSettingsUpdate, request: Requ
         p = req.proxy
         if not isinstance(p, dict):
             raise HTTPException(400, "proxy باید dict باشد")
-        valid_keys = {"proxy_type", "addr", "port", "rdns", "username", "password"}
-        invalid = set(p.keys()) - valid_keys
-        if invalid:
-            raise HTTPException(400, f"کلیدهای نامعتبر در proxy: {invalid}. کلیدهای مجاز: {valid_keys}")
-        if p.get("addr") and not m._is_safe_proxy_host(str(p.get("addr"))):
-            raise HTTPException(400, "آدرس پروکسی نامعتبر است (IP داخلی/محلی مجاز نیست)")
-        cfg[tag]["proxy"] = p
-        changes.append("proxy")
+        # v2.23.9 (AUDIT-47 51-a#5): dict خالی یعنی «حذف پروکسی» — قبلاً
+        # گزینهٔ «بدون پروکسی» فرانت‌اند null می‌فرستاد و req.proxy is None
+        # یعنی شاخه اصلاً اجرا نمی‌شد (عمل بی‌اثر).
+        if not p:
+            if "proxy" in cfg[tag]:
+                cfg[tag].pop("proxy", None)
+                changes.append("proxy")
+        else:
+            # v2.23.9 (AUDIT-47 51-a#5): secret (mtproto) هم کلیدِ مجاز است و
+            # ورودی با موجود merge می‌شود — قبلاً کل dict جایگزین می‌شد و چون GET
+            # رمز/secret را استریپ می‌کند (ضد-نشت M-16)، فرانت‌اند مقدار خالی
+            # می‌فرستاد → رمزِ ذخیره‌شده بی‌صدا پاک می‌شد؛ پروکسی mtproto هم به
+            # socks5 بازنویسی می‌شد.
+            valid_keys = {"proxy_type", "addr", "port", "rdns", "username", "password", "secret"}
+            invalid = set(p.keys()) - valid_keys
+            if invalid:
+                raise HTTPException(400, f"کلیدهای نامعتبر در proxy: {invalid}. کلیدهای مجاز: {valid_keys}")
+            if p.get("addr") and not m._is_safe_proxy_host(str(p.get("addr"))):
+                raise HTTPException(400, "آدرس پروکسی نامعتبر است (IP داخلی/محلی مجاز نیست)")
+            _pt = str(p.get("proxy_type") or "").strip().lower()
+            if _pt and _pt not in ("socks5", "socks4", "http", "mtproto"):
+                raise HTTPException(400, "نوع پروکسی نامعتبر است (socks5/socks4/http/mtproto)")
+            if p.get("port") is not None:
+                # v2.23.9 (AUDIT-47 51-a#9): بازهٔ ۱-۶۵۵۳۵ — مثل مسیر ادمین.
+                try:
+                    _port = int(p["port"])
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "پورت پروکسی باید عدد باشد")
+                if not (1 <= _port <= 65535):
+                    raise HTTPException(400, "پورت پروکسی باید بین ۱ و ۶۵۵۳۵ باشد")
+            existing_proxy = cfg[tag].get("proxy") if isinstance(cfg[tag].get("proxy"), dict) else {}
+            merged = dict(existing_proxy)
+            for _k, _v in p.items():
+                if _k in ("password", "secret"):
+                    # خالی/None یعنی «تغییر ندادم» (GET استریپ می‌کند؛ فرانت‌اند
+                    # هرگز echo-back ندارد) — مقدارِ موجود حفظ می‌شود.
+                    if isinstance(_v, str) and _v.strip():
+                        merged[_k] = _v
+                else:
+                    merged[_k] = _v
+            cfg[tag]["proxy"] = merged
+            changes.append("proxy")
     if req.disabled is not None:
         cfg[tag]["disabled"] = req.disabled
         changes.append("disabled")

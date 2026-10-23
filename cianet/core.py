@@ -1107,25 +1107,29 @@ def init_db() -> None:
             _bak_date = datetime.now(timezone.utc).strftime("%Y%m%d")
             _bak_path = f"{DB_PATH}.bak.{_bak_date}"
             if not os.path.exists(_bak_path):
-                shutil.copy2(DB_PATH, _bak_path)
+                # v2.23.9 (AUDIT-47 51-b#5): snapshot با API backup خودِ
+                # SQLite — قبلاً کپیِ خامِ دو-مرحله‌ایِ DB زندهٔ WAL بود
+                # (DB در t0 و -wal/-shm در t1): checkpoint بینِ دو کپی یعنی
+                # commitهای آن بازه نه در تصویرِ DB هستند نه در WALِ
+                # کپی‌شده → بکاپِ integrity-پاس ولی stale. خروجیِ backup
+                # API خودکفاست و سایدکار نمی‌خواهد.
+                _snap_tmp = _snapshot_db_to_temp(DB_PATH)
+                try:
+                    os.replace(_snap_tmp, _bak_path)
+                except Exception:
+                    try:
+                        os.remove(_snap_tmp)
+                    except Exception:
+                        pass
+                    raise
                 _chmod_private(_bak_path, 0o600)
-                # v2.23.6 (AUDIT-43 43-a#11): سایدکارِ -wal هم کپی می‌شود —
-                # بدونِ آن، بکاپِ DBِ زنده ممکن است commitهای اخیر را نداشته
-                # باشد (stale). و بیش از ۷ بکاپِ روزانه نگه نمی‌ماند (قبلاً
-                # بی‌سقف انباشته می‌شد).
-                for _suffix in ("-wal", "-shm"):
-                    _side = DB_PATH + _suffix
-                    if os.path.exists(_side):
-                        try:
-                            shutil.copy2(_side, _bak_path + _suffix)
-                            _chmod_private(_bak_path + _suffix, 0o600)
-                        except Exception:
-                            pass
                 import glob as _glob_bak
                 # v2.23.7 (AUDIT-46 #2): sorted الزامی است — ترتیبِ glob
                 # تضمین‌نشده است (os.scandir order)؛ بدونِ مرتب‌سازیِ
                 # لغت‌نامه‌ایِ تاریخ‌ها، «قدیمی‌ترین‌ها برای حذف» ممکن بود
                 # بکاپِ جدیدتری را انتخاب کند و قدیمی‌تر را نگه دارد.
+                # (قربانی‌های -wal/-shm برای بکاپ‌های legacy نسخه‌های قبل
+                # نگه داشته شده‌اند.)
                 _old_baks = sorted(
                     p for p in _glob_bak.glob(DB_PATH + ".bak.*")
                     if not p.endswith(("-wal", "-shm"))
@@ -1876,7 +1880,15 @@ def grant_trial_if_eligible(user_id: int) -> bool:
         return False
     if get_role(user_id, ROLE_USER) in (ROLE_OWNER, ROLE_ADMIN):
         return False
-    with _conn() as c:
+    days = trial_days()
+    # v2.23.9 (AUDIT-47 51-b#6): چک + درج در یک تراکنشِ واحد — قبلاً چک در
+    # _conn جدا و create_subscription در تراکنشِ دیگر بود؛ دو /start هم‌زمان
+    # (dispatch موازیِ telethon) هر دو از چک رد می‌شدند و دومی اشتراکِ اولی
+    # را supersede می‌کرد → ترایالِ دوبرابر (الگوی claim_referral_rewards).
+    now_utc = datetime.now(timezone.utc)
+    start_str = _format_date(now_utc)
+    expire_str = _format_date(now_utc + timedelta(days=days))
+    with _conn_immediate() as c:
         active = c.execute(
             "SELECT 1 FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
             (user_id,),
@@ -1890,8 +1902,11 @@ def grant_trial_if_eligible(user_id: int) -> bool:
         ).fetchone()
         if prior_trial:
             return False
-    days = trial_days()
-    create_subscription(user_id, trial_plan_name(days), days)
+        c.execute(
+            "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, "
+            "license_id, selfbot_tag, created_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, ?)",
+            (user_id, trial_plan_name(days), start_str, expire_str, _now()),
+        )
     log_action(user_id, "trial_granted", f"days={days}")
     return True
 
@@ -2408,6 +2423,17 @@ def _create_group_licenses_internal(buyer_id: int, count: int,
     return codes
 
 
+def _discard_groupsub_marker(marker: str) -> None:
+    """v2.23.9 (AUDIT-47 51-b#4): آزادسازی مارکرِ idempotency گروهی —
+    بعد از شکستِ گذرای fulfillment حذف می‌شود تا callback/retry بعدی
+    دوباره بتواند صندلی‌ها را بسازد."""
+    try:
+        with _conn_immediate() as c:
+            c.execute("DELETE FROM settings WHERE key = ?", (marker,))
+    except Exception as _de:
+        print(f"⚠️ [group_sub] marker discard failed: {_de}")
+
+
 def maybe_fulfill_group_order(order_id: int = None, payment_id: int = None) -> None:
     """پس از paid شدن فاکتورِ دسته‌جمعی: صندلی‌های باقی‌مانده را به‌صورت
     لایسنس می‌سازد و کدها را برای خریدار می‌فرستد. خریدار خودش اشتراکش
@@ -2417,6 +2443,7 @@ def maybe_fulfill_group_order(order_id: int = None, payment_id: int = None) -> N
       دوباره صدا زدن (مثلاً double-callback درگاه) کد تکراری نمی‌سازد.
     • best-effort — هر خطی فقط لاگ می‌شود؛ پرداختِ تأییدشده هرگز
       نمی‌شکند. شناسه‌ی فاکتور یا payment_id (مسیر کارت) داده می‌شود."""
+    marker = None
     try:
         with _conn_immediate() as c:
             if order_id is None and payment_id is not None:
@@ -2440,38 +2467,50 @@ def maybe_fulfill_group_order(order_id: int = None, payment_id: int = None) -> N
             if cur.rowcount == 0:
                 return  # قبلاً انجام شده
             order = dict(row)
-        # تعداد نفرات و پلنِ پایه از نام پلن خوانده می‌شود:
-        # «👥 گروهی ۳ نفره · ۱ ماهه» → seats=3, base=۱ ماهه
-        seats, base_plan = 0, ""
+        # v2.23.9 (AUDIT-47 51-b#4): مارکر claim می‌شود (ضدِ اجرای هم‌زمان)
+        # ولی در هر شکستِ پایین‌دست حذف می‌شود تا retry ممکن بماند — قبلاً
+        # مارکر قبل از کار ست و می‌ماند: خطای گذرا (قفلِ لحظه‌ایِ DB، کرش)
+        # یا پلنِ تجزیه‌ناپذیر یعنی گم‌شدنِ دائمیِ صندلی‌ها بدون مسیر بازیابی.
         try:
-            rest = order["plan"][len(GROUP_PLAN_PREFIX):]
-            head, _, tail = rest.partition("·")
-            m = re.match(r"\s*(\d+)", head)
-            seats = int(m.group(1)) if m else 0
-            base_plan = tail.strip()
-        except Exception:
+            # تعداد نفرات و پلنِ پایه از نام پلن خوانده می‌شود:
+            # «👥 گروهی ۳ نفره · ۱ ماهه» → seats=3, base=۱ ماهه
             seats, base_plan = 0, ""
-        if seats < 2 or not base_plan:
-            print(f"⚠️ [group_sub] نام پلن قابل تجزیه نیست: {order['plan']}")
+            try:
+                rest = order["plan"][len(GROUP_PLAN_PREFIX):]
+                head, _, tail = rest.partition("·")
+                m = re.match(r"\s*(\d+)", head)
+                seats = int(m.group(1)) if m else 0
+                base_plan = tail.strip()
+            except Exception:
+                seats, base_plan = 0, ""
+            if seats < 2 or not base_plan:
+                print(f"⚠️ [group_sub] نام پلن قابل تجزیه نیست: {order['plan']}")
+                _discard_groupsub_marker(marker)
+                return
+            base_row = get_pricing(base_plan)
+            duration = int(base_row["duration_days"]) if base_row else 30
+            codes = _create_group_licenses_internal(
+                order["user_id"], seats - 1, duration, order["id"])
+        except Exception:
+            _discard_groupsub_marker(marker)
+            raise
+        if not codes:
+            print(f"⚠️ [group_sub] هیچ لایسنسی ساخته نشد — order {order['id']}")
+            _discard_groupsub_marker(marker)
             return
-        base_row = get_pricing(base_plan)
-        duration = int(base_row["duration_days"]) if base_row else 30
-        codes = _create_group_licenses_internal(
-            order["user_id"], seats - 1, duration, order["id"])
-        if codes:
-            codes_block = "\n".join(f"`{cd}`" for cd in codes)
-            _spawn_bg(_notify_user_async(
-                int(order["user_id"]),
-                f"👥 **اشتراک دسته‌جمعی فعال شد**\n\n"
-                f"🧾 فاکتور: `{order['order_no']}`\n"
-                f"👥 نفرات: {seats}\n"
-                f"📅 مدت هر صندلی: {duration} روز\n\n"
-                f"اشتراکِ خودت همین حالا فعال شد. کدهای زیر مالِ "
-                f"{len(codes)} عضو دیگر گروه‌تان است — هر کد، یک اشتراک "
-                f"کامل برای یک نفر است:\n\n{codes_block}\n\n"
-                f"هر عضو در ربات «🔑 فعال‌سازی با لایسنس» را بزند و کد خودش را "
-                f"وارد کند.",
-            ), "groupsub_codes")
+        codes_block = "\n".join(f"`{cd}`" for cd in codes)
+        _spawn_bg(_notify_user_async(
+            int(order["user_id"]),
+            f"👥 **اشتراک دسته‌جمعی فعال شد**\n\n"
+            f"🧾 فاکتور: `{order['order_no']}`\n"
+            f"👥 نفرات: {seats}\n"
+            f"📅 مدت هر صندلی: {duration} روز\n\n"
+            f"اشتراکِ خودت همین حالا فعال شد. کدهای زیر مالِ "
+            f"{len(codes)} عضو دیگر گروه‌تان است — هر کد، یک اشتراک "
+            f"کامل برای یک نفر است:\n\n{codes_block}\n\n"
+            f"هر عضو در ربات «🔑 فعال‌سازی با لایسنس» را بزند و کد خودش را "
+            f"وارد کند.",
+        ), "groupsub_codes")
     except Exception as e:
         print(f"⚠️ [group_sub] fulfillment ناموفق: {type(e).__name__}: {e}")
 
@@ -2662,9 +2701,19 @@ def ensure_wallet_schema() -> None:
             "  text TEXT NOT NULL,"
             "  scheduled_at TEXT NOT NULL,"
             "  sent INTEGER DEFAULT 0,"
+            "  attempts INTEGER NOT NULL DEFAULT 0,"
             "  created_at TEXT NOT NULL"
             ")"
         )
+        # v2.23.9 (AUDIT-47 51-b#8): ستون attempts برای سقفِ retry —
+        # self-heal idempotent برای DBهای قدیمی (الگوی receipt_file_uid).
+        try:
+            _sm_cols = {r[1] for r in c.execute("PRAGMA table_info(scheduled_messages)").fetchall()}
+            if "attempts" not in _sm_cols:
+                c.execute("ALTER TABLE scheduled_messages ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+                print("✅ [sched] ستون attempts به scheduled_messages اضافه شد (v2.23.9)")
+        except Exception as _e:
+            print(f"⚠️ [sched] self-heal attempts: {_e}")
         c.execute(
             "CREATE TABLE IF NOT EXISTS auto_replies ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -3530,7 +3579,9 @@ def delete_scheduled_message(msg_id: int, user_id: int) -> bool:
     """حذف پیام زمان‌بندی‌شده (با مالکیت چک)."""
     with _conn_immediate() as c:
         cur = c.execute(
-            "DELETE FROM scheduled_messages WHERE id = ? AND user_id = ? AND sent = 0",
+            # v2.23.9 (AUDIT-47 51-b#8): sent != 1 — ردیف‌های dead-letter
+            # (sent=2) هم قابل حذف‌اند؛ فقط پیامِ واقعاً ارسال‌شده حذف نمی‌شود.
+            "DELETE FROM scheduled_messages WHERE id = ? AND user_id = ? AND sent != 1",
             (msg_id, user_id),
         )
     return cur.rowcount > 0
@@ -3613,6 +3664,12 @@ def _auto_replies_maybe_present() -> bool:
 
 def find_auto_reply(tag: str, text: str, user_id: int = None) -> str:
     """جستجوی auto-reply برای کلمه‌ی کلیدی در text."""
+    # v2.23.9 (AUDIT-47 51-b#9): user_id عملاً اجباری — None یعنی باز کردنِ
+    # شرط «? IS NULL OR user_id = ?» روی همهٔ ردیف‌های همان tag (پاسخِ خودکارِ
+    # کاربرِ دیگر روی اکانتِ همان tag = cross-user). هر دو caller فعلی مقدارِ
+    # غیر-None می‌دهند؛ این گارد دامِ آینده را می‌بندد.
+    if user_id is None:
+        return None
     if not _auto_replies_maybe_present():
         return None
     text_lower = (text or "").lower().strip()
@@ -8101,7 +8158,7 @@ HELPER_TOPICS_EN = {
 HELPER_ORDER = ("time", "tabchi", "mute", "online", "read", "profile",
                 "tools", "games", "crypto", "copy", "broadcast", "status", "tips")
 
-HELPER_TRIGGERS = {"پنل", "راهنما", "منو", "panel", "help", "h", "menu"}
+HELPER_TRIGGERS = {"پنل", "راهنما", "منو", "panel", "help", "menu"}  # v2.23.9 (AUDIT-47 51-d#6): «h» حذف شد
 
 HELPER_HOME_FA = (
     "🤖 **راهنمای سلف‌بات**\n\n"
@@ -8364,7 +8421,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.8"
+BUILD_VERSION = "2026-10-23-v2.23.9"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)
@@ -11706,6 +11763,30 @@ async def _scheduled_message_loop():
                     break
                 except Exception as e:
                     print(f"⚠️ [sched] خطا در ارسال پیام {msg['id']}: {e}")
+                    # v2.23.9 (AUDIT-47 51-b#8): سقفِ retry/dead-letter —
+                    # ردیفِ همیشه شکست‌خورده (peer مسدود/چت نامعتبر)
+                    # قبلاً هر ۶۰ ثانیه برای همیشه تلاش و لاگ می‌شد. بعد
+                    # از ۵ شکستِ واقعی، sent=2 (failed) و دیگر انتخاب
+                    # نمی‌شود (کوئری فقط sent=0 می‌گیرد).
+                    try:
+                        with _conn_immediate() as c2:
+                            c2.execute(
+                                "UPDATE scheduled_messages SET attempts = COALESCE(attempts, 0) + 1 "
+                                "WHERE id = ?",
+                                (msg["id"],),
+                            )
+                            _n = c2.execute(
+                                "SELECT attempts FROM scheduled_messages WHERE id = ?",
+                                (msg["id"],),
+                            ).fetchone()
+                            if _n is not None and _n["attempts"] >= 5:
+                                c2.execute(
+                                    "UPDATE scheduled_messages SET sent = 2 WHERE id = ?",
+                                    (msg["id"],),
+                                )
+                                print(f"⛔ [sched] پیام {msg['id']} بعد از ۵ شکست dead-letter شد (sent=2)")
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"⚠️ [sched_loop] خطا: {e}")
         await asyncio.sleep(60)

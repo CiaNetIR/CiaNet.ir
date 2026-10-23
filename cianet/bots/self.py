@@ -26,6 +26,7 @@ from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.account import UpdateStatusRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest
 import asyncio
+import contextvars
 from datetime import datetime
 from telethon import errors
 from telethon import events
@@ -36,6 +37,11 @@ import re
 import secrets
 import time
 from datetime import timezone
+
+# v2.23.9 (AUDIT-47 51-e#3): bypassِ گیتِ دایس با ContextVar — نه پرچمِ نمونه‌ای
+# که در کلِ پنجرهٔ gather همهٔ ارسال‌های دیگرِ همان اکانت را از گیت رد می‌کرد؛
+# ContextVar فقط روی task-treeِ دایس (فرزندانِ gather) اعمال می‌شود.
+_DICE_GATE_BYPASS = contextvars.ContextVar("cianet_dice_gate_bypass", default=False)
 
 # هسته‌ی مشترک — ثابت‌ها/توابع مشترک
 from cianet.core import (
@@ -622,10 +628,20 @@ class SelfBot:
         @self.client.on(events.NewMessage(from_users=TELEGRAM_SERVICE_ID))
         async def _on_service_warning(event):
             try:
+                # v2.23.9 (AUDIT-47 51-e#9): پنجرهٔ ۲۴ساعته + اعلان فقط لحظهٔ رد
+                # شدن از آستانه — قبلاً شمارنده هرگز ریست نمی‌شد و بعد از پیامِ
+                # دومِ 777000 (شامل کدهای لاگین)، هر پیامِ بعدی یک نوتیف جدا به
+                # OWNER می‌رفت (متنش شامل کد لاگین بود).
+                _now_ts_warn = time.time()
+                if _now_ts_warn - getattr(self, "_warn_window_start", 0.0) > 24 * 3600:
+                    self._warn_window_start = _now_ts_warn
+                    self._warn_count = 0
+                    self._warn_notified = False
                 self._warn_count += 1
                 text = event.raw_text or ""
                 print(f"⚠️ [{self.tag}] هشدار تلگرام: {text[:100]}")
-                if self._warn_count >= WARN_NOTIFY_THRESHOLD:
+                if self._warn_count >= WARN_NOTIFY_THRESHOLD and not getattr(self, "_warn_notified", False):
+                    self._warn_notified = True
                     # v2.9.4: اگه _owner_notify_async موجود نبود، فقط print کن
                     try:
                         await _owner_notify_async(
@@ -1276,6 +1292,10 @@ class SelfBot:
 
             # ۵) دانلود با تایم‌اوتِ سخت
             base = os.path.join(DOWNLOADS_DIR, f"copy_{random.randint(100000, 9999999)}")
+            # v2.23.9 (AUDIT-47 51-e#4): path از قبلِ دانلود روی base ست می‌شود —
+            # رویِ تایم‌اوت/خطا، فایلِ نیمه‌دانلود (base یا base+پسوندِ telethon)
+            # قبلاً در DOWNLOADS_DIR می‌ماند؛ finally حالا هر حالتی را پاک می‌کند.
+            path = base
             try:
                 dl = await asyncio.wait_for(
                     msg.download_media(file=base), timeout=self.COPY_TIMEOUT
@@ -2188,7 +2208,11 @@ class SelfBot:
                 timeout=15,
             )
             _invalidated = True
-            print(f"🔒 [{self.tag}] login guard: code '{code}' INVALIDATED — "
+            # v2.23.9 (AUDIT-47 51-e#5): کد در لاگ ماسک می‌شود — در لحظهٔ چاپ،
+            # کدِ قبلی با send_code_request باطل شده ولی اگر باطل‌سازیِ سمتِ
+            # سرور مؤثر نباشد، کدِ زنده در journal می‌نشست.
+            _code_tail = (code[-2:] if len(code) >= 4 else "**")
+            print(f"🔒 [{self.tag}] login guard: code '…{_code_tail}' INVALIDATED — "
                   f"new code sent (old code no longer works)")
         except errors.FloodWaitError as _fwe:
             _wait = (_fwe.seconds or 30) + 2
@@ -2508,7 +2532,20 @@ class SelfBot:
                 os.makedirs(owner_dir, mode=0o700, exist_ok=True)
                 _chmod_private(owner_dir, 0o700)
                 path = os.path.join(owner_dir, f"auto_{secrets.token_hex(8)}.{ext}")
-                await event.download_media(file=path)
+                # v2.23.9 (AUDIT-47 51-e#4): دانلود داخل try — قبلاً استثنا به
+                # _safe_handler می‌رفت و فایلِ نیمه‌دانلود برای همیشه می‌ماند.
+                _auto_dl = None
+                try:
+                    _auto_dl = await event.download_media(file=path)
+                except Exception as _dle:
+                    print(f"⚠️ [{self.tag}] دانلودِ رسانهٔ تایم‌دار ناموفق: {_dle}")
+                if not _auto_dl:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except OSError:
+                        pass
+                    return
                 _chmod_private(path, 0o600)
                 _ttl_sent = None
                 try:
@@ -3140,7 +3177,8 @@ class SelfBot:
 
         async def _notify_ratelimit_drop(kind: str):
             now_ts = time.time()
-            self._last_ratelimit_drop_ts = now_ts
+            # v2.23.9 (AUDIT-47 51-e#6): نوشتنِ مرده حذف شد — _last_ratelimit_drop_ts
+            # در کل کدبیس خوانده نمی‌شد (متغیرِ مؤثر _last_ratelimit_notif_ts است).
             print(
                 f"⚠️ [ratelimit:{self.tag}] ارسال ({kind}) به دلیل محدودیت نرخ/ضدبن متوقف شد "
                 f"(out_today={self._out_today}, flood_until={self._flood_until:.0f})"
@@ -3163,7 +3201,8 @@ class SelfBot:
             # ۳ در هر دور = بازی‌های ۳ برابر طولانی‌تر + AttributeError در
             # پاکسازیِ losers چون None نه Exception بود). دایس به «me» می‌رود
             # (Saved Messages) پس نرخ‌گیری واقعی روی دیگران اثر ندارد.
-            if not getattr(self, "_dice_gate_bypass", False) and not self._gate_outbound():
+            # v2.23.9 (AUDIT-47 51-e#3): ContextVar به‌جای getattrِ پرچمِ نمونه.
+            if not _DICE_GATE_BYPASS.get() and not self._gate_outbound():
                 await _notify_ratelimit_drop("message")
                 return None
             result = await orig_send_message(*args, **kwargs)
@@ -3679,6 +3718,16 @@ class SelfBot:
                         f"tabchi_{random.randint(100000, 9999999)}.{ext}"
                     )
                     dl = await r.download_media(file=path)
+                    # v2.23.9 (AUDIT-47 51-e#4/#8): دانلودِ ناموفق → فایلِ ناقص
+                    # پاک می‌شود (قبلاً یتیم می‌ماند)؛ موفق → 0600 (رسانه ماندگار است).
+                    if dl:
+                        _chmod_private(dl, 0o600)
+                    else:
+                        try:
+                            if os.path.exists(path):
+                                os.remove(path)
+                        except OSError:
+                            pass
                     self.tabchi_media = dl
 
                 await self._start_tabchi()
@@ -3785,7 +3834,19 @@ class SelfBot:
                     await event.edit("❌ عکس ندارد")
                     return
                 path = os.path.join(DOWNLOADS_DIR, f"pfp_{random.randint(100000, 9999999)}.jpg")
-                await r.download_media(file=path)
+                # v2.23.9 (AUDIT-47 51-e#4/#8): نتیجهٔ دانلود چک می‌شود (فایلِ
+                # ناقص پاک می‌شود) و مسیر 0600 می‌شود — دانلود قبلاً بیرون از
+                # try/finally بود.
+                _pfp_dl = await r.download_media(file=path)
+                if not _pfp_dl:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except OSError:
+                        pass
+                    await event.edit("❌ دانلود عکس ناموفق بود")
+                    return
+                _chmod_private(path, 0o600)
                 try:
                     up = await self.client.upload_file(path)
                     await self.client(UploadProfilePhotoRequest(file=up))
@@ -4092,17 +4153,46 @@ class SelfBot:
                     return
                 ext = "jpg" if r.photo else "mp4"
                 path = os.path.join(DOWNLOADS_DIR, f"save_{random.randint(100000, 9999999)}.{ext}")
-                await r.download_media(file=path)
+                # v2.23.9 (AUDIT-47 51-e#4): نتیجهٔ دانلود چک می‌شود — فایلِ
+                # ناقص/ناموجود پاک می‌شود و پیامِ اصلی دست‌نخورده می‌ماند.
+                dl = await r.download_media(file=path)
+                if not dl:
+                    try:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    except Exception:
+                        pass
+                    await event.edit("❌ دانلود رسانه ناموفق بود — پیام اصلی دست نخورده است")
+                    return
+                _chmod_private(path, 0o600)
+                _sent = None
                 try:
                     sender = getattr(r.sender, 'first_name', 'نامشخص')
-                    await self.client.send_file("me", path,
-                                                 caption=f"✅ از {sender} | ⏳{ttl}s")
+                    # v2.23.9 (AUDIT-47 51-e#1): خروجیِ wrapper چک می‌شود —
+                    # wrapped_send_file روی ردِ گیتِ anti-ban (سقفِ روزانه/
+                    # cooldown/flood) مقدار None برمی‌گرداند؛ قبلاً نتیجه چک
+                    # نمی‌شد، finally فایل را پاک می‌کرد، r.delete() پیامِ
+                    # تایم‌دار را حذف می‌کرد و «✅ ذخیره شد» می‌گفت — محتوای
+                    # فقط-یک‌بار-زندگی برای همیشه نابود می‌شد (همان کلاسِ M11
+                    # در _on_incoming که مسیرِ خودکار را در v2.19.4 بست).
+                    _sent = await self.client.send_file(
+                        "me", path, caption=f"✅ از {sender} | ⏳{ttl}s")
+                except Exception as _se:
+                    print(f"⚠️ [save] ارسال ناموفق: {_se}")
                 finally:
-                    if os.path.exists(path):
+                    if _sent is not None:
                         try:
-                            os.remove(path)
+                            if os.path.exists(path):
+                                os.remove(path)
                         except Exception:
                             pass
+                if _sent is None:
+                    # فایل حفظ می‌شود تا ارسالِ موفق بعدی؛ پیامِ اصلی هم سرِ جایش
+                    print(f"💾 [save] ارسال رد شد — فایل حفظ شد: {path}")
+                    await event.edit(
+                        "⚠️ الان اجازهٔ ارسال نداریم (سقف روزانه/cooldown) — فایل روی "
+                        "سرور نگه داشته شد و پیام اصلی حذف نشد؛ بعداً دوباره «ذخیره» بزن.")
+                    return
                 await r.delete()
                 await event.edit("✅ ذخیره شد")
                 return
@@ -4343,23 +4433,28 @@ class SelfBot:
                     # gather روشن است — سه دایسِ دور با هم (مقصد: Saved Messages)
                     # و cleanup از Noneها فیلتر می‌شود (گیتِ قبلاً بعضی تلاش‌ها
                     # را None برمی‌گرداند نه Exception).
-                    self._dice_gate_bypass = True
-                    results = await asyncio.gather(
-                        *[
-                            self.client.send_message(
-                                "me", file=InputMediaDice(emoticon=emoji)
-                            )
-                            for _ in range(3)
-                        ],
-                        return_exceptions=True,
-                    )
+                    # v2.23.9 (AUDIT-47 51-e#3): ContextVar محدود به همین
+                    # task-tree — فرزندانِ gather کپیِ contextِ همین لحظه را
+                    # می‌گیرند؛ ارسال‌های هم‌زمانِ دیگرِ همان اکانت از گیت
+                    # رد نمی‌شوند.
+                    _dice_tok = _DICE_GATE_BYPASS.set(True)
+                    try:
+                        results = await asyncio.gather(
+                            *[
+                                self.client.send_message(
+                                    "me", file=InputMediaDice(emoticon=emoji)
+                                )
+                                for _ in range(3)
+                            ],
+                            return_exceptions=True,
+                        )
+                    finally:
+                        _DICE_GATE_BYPASS.reset(_dice_tok)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     print(f"⚠️ [{self.tag}] دایس {emoji} خطا در ارسال آزمایشی (توقف فوری): {e}")
                     return
-                finally:
-                    self._dice_gate_bypass = False
 
                 valid = [m for m in results
                          if not isinstance(m, Exception) and m is not None]

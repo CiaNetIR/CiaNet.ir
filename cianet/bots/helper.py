@@ -82,6 +82,10 @@ class HelperBot:
     def _register(self):
         @self.client.on(events.NewMessage(pattern=r"^/start"))
         async def _h_start(event):
+            # v2.23.9 (AUDIT-47 51-d#6): فقط چتِ خصوصی — اگر ربات به گروهی
+            # اضافه شود، هر عضو با /start پنلِ کامل را در گروه نمی‌گیرد.
+            if not getattr(event, "is_private", False):
+                return
             name = ""
             try:
                 s = await event.get_sender()
@@ -98,13 +102,26 @@ class HelperBot:
         async def _h_msg(event):
             if (event.raw_text or "").startswith("/start"):
                 return
+            # v2.23.9 (AUDIT-47 51-d#6): فقط چتِ خصوصی — trigger تک‌کاراکتریِ «h»
+            # از HELPER_TRIGGERS هم حذف شد (در گروه، هر «h» پنلِ کامل می‌شد).
+            if not getattr(event, "is_private", False):
+                return
             if _helper_is_trigger(_helper_normalize(event.raw_text or "")):
                 await event.respond(self.home_text("fa"),
                                     buttons=self.home_buttons("fa"))
 
         @self.client.on(events.CallbackQuery)
         async def _h_cb(event):
-            data = event.data.decode()
+            # v2.23.9 (AUDIT-47 51-d#9): decode داخل try — کالبکِ جعلی با
+            # بایت‌های غیر-UTF8 نباید UnicodeDecodeError بدهد.
+            try:
+                data = event.data.decode()
+            except Exception:
+                try:
+                    await event.answer("درخواست نامعتبر.", alert=True)
+                except Exception:
+                    pass
+                return
             try:
                 if data == "hclose":
                     await event.edit("✅ بسته شد. برای باز کردن دوباره: /start")
