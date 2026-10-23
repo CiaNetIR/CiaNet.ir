@@ -1109,6 +1109,27 @@ def init_db() -> None:
             if not os.path.exists(_bak_path):
                 shutil.copy2(DB_PATH, _bak_path)
                 _chmod_private(_bak_path, 0o600)
+                # v2.23.6 (AUDIT-43 43-a#11): سایدکارِ -wal هم کپی می‌شود —
+                # بدونِ آن، بکاپِ DBِ زنده ممکن است commitهای اخیر را نداشته
+                # باشد (stale). و بیش از ۷ بکاپِ روزانه نگه نمی‌ماند (قبلاً
+                # بی‌سقف انباشته می‌شد).
+                for _suffix in ("-wal", "-shm"):
+                    _side = DB_PATH + _suffix
+                    if os.path.exists(_side):
+                        try:
+                            shutil.copy2(_side, _bak_path + _suffix)
+                            _chmod_private(_bak_path + _suffix, 0o600)
+                        except Exception:
+                            pass
+                import glob as _glob_bak
+                _old_baks = [p for p in _glob_bak.glob(DB_PATH + ".bak.*")
+                             if not p.endswith(("-wal", "-shm"))]
+                for _ob in _old_baks[:-7]:
+                    for _victim in (_ob, _ob + "-wal", _ob + "-shm"):
+                        try:
+                            os.remove(_victim)
+                        except Exception:
+                            pass
         except Exception as _be:
             print(f"⚠️ [saas_db] pre-migration backup failed: {_be}")
     _SCHEMA_SQL = """
@@ -3200,12 +3221,20 @@ def apply_discount_code(code: str, original_amount: int) -> dict:
             return {"error": "max_uses_reached"}
         if d["expires_at"]:
             try:
-                from datetime import datetime
+                from datetime import datetime, timezone as _tz
                 exp = datetime.fromisoformat(d["expires_at"])
-                if datetime.utcnow() > exp:
+                # v2.23.6 (AUDIT-43 43-a#10): مقایسهٔ aware/naive سازگار — قبلاً
+                # رشتهٔ ISOِ aware با utcnow()ِ naive مقایسه می‌شد → TypeError →
+                # except:pass → کدِ منقضی «هرگز منقضی نمی‌شد» (fail-open).
+                # حالا هر دو طرف UTC-aware است؛ فقطِ نامعتبر = رد.
+                _now_cmp = datetime.now(_tz.utc)
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=_tz.utc)
+                if _now_cmp > exp:
                     return {"error": "expired"}
             except Exception:
-                pass
+                # تاریخِ غیرقابلِ parse → محافظه‌کارانه منقضی (fail-closed)
+                return {"error": "expired"}
         new_amount = max(1, int(original_amount * (100 - d["percent"]) / 100))
         c.execute("UPDATE discount_codes SET used_count = used_count + 1 WHERE code = ?", (code,))
     return {"ok": True, "amount": new_amount, "percent": d["percent"]}
@@ -4908,7 +4937,7 @@ def approve_card_payment_atomic(payment_id: int, reviewed_by: int) -> dict:
         plan_row = c.execute(
             "SELECT duration_days FROM pricing WHERE plan = ?", (pay["plan"],)
         ).fetchone()
-        duration = int(plan_row["duration_days"]) if plan_row else 30
+        duration = int(plan_row["duration_days"] or 30) if plan_row else 30
         if existing:
             c.execute(
                 "UPDATE subscriptions SET status = 'superseded' WHERE id = ?", (existing["id"],)
@@ -5243,7 +5272,7 @@ def pay_order_trc20_atomic(order_id: int, txid: str) -> dict:
             plan_row = c.execute(
                 "SELECT duration_days FROM pricing WHERE plan = ?", (order["plan"],)
             ).fetchone()
-            duration = int(plan_row["duration_days"]) if plan_row else 30
+            duration = int(plan_row["duration_days"] or 30) if plan_row else 30
             if existing:
                 c.execute(
                     "UPDATE subscriptions SET status = 'superseded' WHERE id = ?", (existing["id"],)
@@ -7613,7 +7642,7 @@ WHAT_IS_SELFBOT_TEXT = (
     "📥 سیو خودکار از کانال‌ها\n"
     "🧰 جعبه‌ابزار ادمینی\n\n"
     "**امنیت:**\n"
-    "🔐 سشن رمزگذاری‌شده\n"
+    "🔐 فایل‌های سشن با دسترسی محدود (0600)\n"
     "🛡 محافظت Anti-Ban برای شماره‌های خارج\n"
     "💾 بکاپ خودکار روزانه\n\n"
     "💡 برای فعال‌سازی، از منوی اصلی «📖 راهنمای فعال‌سازی» رو بزن."
@@ -7829,9 +7858,12 @@ DEDICATED_UI_STATE = {
 
 
 # v2.8.10: ذخیره‌ی آخرین رمز 2FA در config.json
-# این تابع فقط بعد از موفقیتِ لاگین صدا زده می‌شه. رمز به‌صورت
-# plaintext ذخیره می‌شه چون OWNER نیاز داره اون رو ببینه. اگر
-# کاربر رمز رو فراموش کنه، OWNER می‌تونه از این فیلد بخونه.
+# این تابع فقط بعد از موفقیتِ لاگین صدا زده می‌شه.
+# v2.23.6 (AUDIT-43 43-a#9 · NIT): کامنتِ قدیمیِ «plaintext ذخیره می‌شه
+# چون OWNER نیاز داره ببینه» از v2.10.4 نادرست بود — ذخیره همیشه argon2id
+# است (v2.12.31) و OWNER هرگز رمزِ خام را نمی‌بیند؛ فقط verify می‌شود
+# (_verify_last_2fa_password). این متنِ گمراه‌کننده حذف شد تا نگهدارندهٔ
+# آینده امنیتِ واقعی را اشتباه نگیرد.
 def _save_last_2fa_password(tag: str, password: str) -> None:
     """ذخیره‌ی آخرین رمز 2FA برای tag در config.json.
 
@@ -8119,7 +8151,7 @@ async def run_saas_bot_forever(selfbot_module):
         # backoff بگیرد — قبلاً روی هر disconnect تمیز، شمارنده ریست می‌شد
         # و اگر تلگرام مدام clean drop می‌کرد حلقه‌ی ری‌استارت تایت می‌شد.
         # فقط بعد از uptime پایدار (≥۳۰۰s) ریست می‌شود (همان الگوی
-        # run_admin_bot_forever).
+        # run_saas_bot_forever).
         _started_at = time.monotonic()
         bot = None
         try:
@@ -8318,7 +8350,7 @@ DEBUG = os.environ.get("DEBUG", "").strip() == "1"
 # اجراست (مثلاً هنگام گزارش باگ، می‌توان از کاربر خواست این عدد را در
 # ابتدای لاگ اجرا چک کند تا مطمئن شد فایل صحیح deploy شده و __pycache__
 # قدیمی اجرا نمی‌شود).
-BUILD_VERSION = "2026-10-23-v2.23.5"
+BUILD_VERSION = "2026-10-23-v2.23.6"
 
 # ══════════════════════════════════════════════════════════════════
 #  PATCH (v2.4.0): سیستم چندزبانه (i18n)

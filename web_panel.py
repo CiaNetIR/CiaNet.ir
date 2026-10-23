@@ -136,9 +136,23 @@ SESSION_SECRET = os.environ.get("PANEL_SESSION_SECRET", "") or secrets.token_hex
 # cookie auth uses opaque tokens stored in _sessions dict (server-side), so
 # SESSION_SECRET is NOT used — but reserved for HMAC-signed cookies in future.
 SESSION_TTL_SEC = 8 * 3600  # 8 hours
+# v2.23.6 (AUDIT-43 43-d#11): Secure cookie با env قابل تنظیم — قبلاً
+# hardcoded True با کامنتِ خلافش («در production روی True»)؛ دیپلویِ
+# HTTP-only بدونِ TLS-terminator اصلاً نمی‌توانست لاگین کند (مرورگر
+# کوکیِ Secure را روی http خاموش می‌اندازد).
+_COOKIE_SECURE = os.environ.get("PANEL_COOKIE_SECURE", "1").strip() != "0"
 
 # CORS: dev + production
 ALLOWED_ORIGINS = os.environ.get("PANEL_CORS_ORIGINS", "http://localhost:3000").split(",")
+# v2.23.6 (AUDIT-43 43-d#9): «*» با allow_credentials خطرناک است — starlette
+# هر origin ای را reflect می‌کند و cookie-authenticated API از هر سایتی
+# قابلِ فراخوانی می‌شود. اگر اپراتور چنین ست کرد، بالا نیاییم (fail-fast)
+# تا «فیکسِ CORS» ناشیانه کلِ پنل را باز نکند.
+if "*" in [o.strip() for o in ALLOWED_ORIGINS]:
+    raise RuntimeError(
+        "PANEL_CORS_ORIGINS='*' با allow_credentials مجاز نیست — "
+        "origin های واقعی را صریح فهرست کن (با کاما جدا)."
+    )
 
 DATA_DIR = _main().DATA_DIR if hasattr(_main(), 'DATA_DIR') else (_PROJECT_DIR / "data")
 SAAS_DB = _main().DB_PATH if hasattr(_main(), 'DB_PATH') else (DATA_DIR / "saas.db")
@@ -483,6 +497,18 @@ app.add_middleware(
 )
 
 
+# v2.23.6 (AUDIT-43 43-d#10): هدرهای امنیتیِ پایه — nosniff و clickjacking
+# و referrer برای همهٔ پاسخ‌ها (API + استاتیک). HSTS عمداً نیست چون پشتِ
+# TLS-terminator (nginx/cloudflared) قرار دادنش تصمیمِ دیپلوی است.
+@app.middleware("http")
+async def _security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
 @app.on_event("startup")
 async def _startup():
     print(f"🌐 CiaNet Web Panel API on http://127.0.0.1:8000", flush=True)
@@ -554,40 +580,50 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _check_login_rate_limit(ip: str) -> tuple:
-    """Returns (allowed, retry_after_seconds)."""
+def _check_login_rate_limit(ip: str, bucket: str = "login") -> tuple:
+    """F-03: شمارش شکست‌های لاگین (در-memory + DB-persisted).
+
+    v2.23.6 (AUDIT-43 43-d#12): bucket جدا برای ادمین و کاربر — قبلاً هر دو
+    از یک کلید «login:{ip}» استفاده می‌کردند: ۵ شکستِ لاگینِ کاربرِ عادی
+    (لایسنس) از یک NAT/اداره، لاگینِ ادمینِ همان IP را هم ۱۵ دقیقه قفل
+    می‌کرد (cross-user lockout).
+    """
     now = time.time()
+    _key = f"{bucket}:{ip}"  # v2.23.6: کلیدِ ترکیبی — حافظهٔ درون‌بازی هم
+    #                          bucket-aware است (نه فقط DB)، وگرنه ۵ شکستِ
+    #                          کاربر همان IP باز هم ادمین را می‌بست.
     # Check if blocked
-    block_until = _login_blocks.get(ip)
+    block_until = _login_blocks.get(_key)
     if block_until and now < block_until:
         return False, int(block_until - now)
     if block_until and now >= block_until:
-        _login_blocks.pop(ip, None)
-        _login_failures.pop(ip, None)
+        _login_blocks.pop(_key, None)
+        _login_failures.pop(_key, None)
     # Check recent failures
-    failures = _login_failures.get(ip, [])
+    failures = _login_failures.get(_key, [])
     failures = [t for t in failures if now - t < _LOGIN_FAIL_WINDOW]
-    _login_failures[ip] = failures
+    _login_failures[_key] = failures
     if len(failures) >= _LOGIN_FAIL_THRESHOLD:
-        _login_blocks[ip] = now + _LOGIN_BLOCK_DURATION
+        _login_blocks[_key] = now + _LOGIN_BLOCK_DURATION
         return False, _LOGIN_BLOCK_DURATION
     # F-03: شمارش DB-persisted — ری‌استارت پنل شمارنده‌های brute-force را
     # صفر نمی‌کند؛ در-memory و DB با هم (max) ارزیابی می‌شوند.
-    db_n = _count_rate_limit_db(f"login:{ip}", now, window_sec=_LOGIN_FAIL_WINDOW)
+    db_n = _count_rate_limit_db(f"{bucket}:{ip}", now, window_sec=_LOGIN_FAIL_WINDOW)
     if db_n >= _LOGIN_FAIL_THRESHOLD:
-        _login_blocks[ip] = now + _LOGIN_BLOCK_DURATION
+        _login_blocks[_key] = now + _LOGIN_BLOCK_DURATION
         return False, _LOGIN_BLOCK_DURATION
     return True, 0
 
 
-def _record_login_failure(ip: str):
+def _record_login_failure(ip: str, bucket: str = "login"):
     now = time.time()
-    failures = _login_failures.get(ip, [])
+    _key = f"{bucket}:{ip}"
+    failures = _login_failures.get(_key, [])
     failures.append(now)
-    _login_failures[ip] = failures
+    _login_failures[_key] = failures
     # F-03: ثبت پایدار شکست در DB (پنجرهٔ همان _LOGIN_FAIL_WINDOW)
     try:
-        _persist_rate_limit_db(f"login:{ip}", now, window_sec=_LOGIN_FAIL_WINDOW)
+        _persist_rate_limit_db(f"{bucket}:{ip}", now, window_sec=_LOGIN_FAIL_WINDOW)
     except Exception:
         pass
 
@@ -637,20 +673,20 @@ async def auth_login(req: LoginRequest, request: Request, response: Response):
     _maybe_sweep_sessions()
     # v2.12.31 (DEBUG-1 MEDIUM-5): rate-limiting
     client_ip = _get_client_ip(request)
-    allowed, retry_after = _check_login_rate_limit(client_ip)
+    allowed, retry_after = _check_login_rate_limit(client_ip, bucket="admin-login")
     if not allowed:
         raise HTTPException(429, f"Too many failed attempts. Try again in {retry_after//60} min.")
     # PATCH (v2.1.5): case-insensitive و trim — قبلاً «Admin» و «admin»
     # متفاوت محسوب می‌شدند و کاربر گیج می‌شد.
     if (req.username or "").strip().lower() != PANEL_ADMIN_USER.strip().lower():
-        _record_login_failure(client_ip)
+        _record_login_failure(client_ip, bucket="admin-login")
         raise HTTPException(401, "Invalid credentials")
     if not _verify_password(req.password, PANEL_ADMIN_PASS_HASH):
-        _record_login_failure(client_ip)
+        _record_login_failure(client_ip, bucket="admin-login")
         raise HTTPException(401, "Invalid credentials")
     # Clear failures on successful login
-    _login_failures.pop(client_ip, None)
-    _login_blocks.pop(client_ip, None)
+    _login_failures.pop(f"admin-login:{client_ip}", None)  # v2.23.6: bucket-keyed
+    _login_blocks.pop(f"admin-login:{client_ip}", None)
     token = _create_session()
     # v2.13.0 (DEBUG-2 CSRF): generate CSRF token, store in _sessions_with_csrf,
     # set as separate non-HttpOnly cookie so JS can read and include in
@@ -663,7 +699,7 @@ async def auth_login(req: LoginRequest, request: Request, response: Response):
         httponly=True,
         samesite="lax",
         max_age=SESSION_TTL_SEC,
-        secure=True,  # nginx terminates SSL — set to True in production via env
+        secure=_COOKIE_SECURE,  # v2.23.6: PANEL_COOKIE_SECURE (پیش‌فرض روشن)
     )
     response.set_cookie(
         key="cianet_csrf_token",
@@ -671,7 +707,7 @@ async def auth_login(req: LoginRequest, request: Request, response: Response):
         httponly=False,  # JS must read this to include in X-CSRF-Token header
         samesite="lax",
         max_age=SESSION_TTL_SEC,
-        secure=True,
+        secure=_COOKIE_SECURE,
     )
     return {"ok": True, "user": {"username": req.username, "role": "OWNER"}}
 
@@ -1875,7 +1911,7 @@ async def user_license_login(req: LicenseLoginRequest, request: Request, respons
     _maybe_sweep_sessions()
     # v2.14.2 (BUG-12w): rate-limiting — همان machinery ادمین (share شده)
     client_ip = _get_client_ip(request)
-    allowed, retry_after = _check_login_rate_limit(client_ip)
+    allowed, retry_after = _check_login_rate_limit(client_ip, bucket="user-login")
     if not allowed:
         raise HTTPException(429, f"Too many failed attempts. Try again in {retry_after//60} min.")
     code = (req.license_code or "").strip().upper()
@@ -1884,14 +1920,14 @@ async def user_license_login(req: LicenseLoginRequest, request: Request, respons
     with m._conn() as c:
         lic = c.execute("SELECT * FROM licenses WHERE code = ?", (code,)).fetchone()
         if lic is None:
-            _record_login_failure(client_ip)
+            _record_login_failure(client_ip, bucket="user-login")
             raise HTTPException(404, "چنین لایسنسی وجود ندارد")
         lic = dict(lic)
         if not lic.get("is_active"):
-            _record_login_failure(client_ip)
+            _record_login_failure(client_ip, bucket="user-login")
             raise HTTPException(403, "این لایسنس غیرفعال است")
         if lic.get("used_count", 0) < 1:
-            _record_login_failure(client_ip)
+            _record_login_failure(client_ip, bucket="user-login")
             raise HTTPException(403, "این لایسنس هنوز فعال نشده — اول در ربات /start بزن و فعالش کن")
         # user_id از طریق subscriptions پیدا می‌شود (آخرین اشتراکِ ساخته‌شده با این license_id)
         sub = c.execute(
@@ -1900,12 +1936,12 @@ async def user_license_login(req: LicenseLoginRequest, request: Request, respons
             (lic["id"],),
         ).fetchone()
         if sub is None:
-            _record_login_failure(client_ip)
+            _record_login_failure(client_ip, bucket="user-login")
             raise HTTPException(403, "این لایسنس فعال شده ولی کاربرش پیدا نشد — با پشتیبانی تماس بگیر")
         user_id = int(sub["user_id"])
     # v2.14.2 (BUG-12w): ورود موفق — failureهای این IP پاک شوند (مثل admin login)
-    _login_failures.pop(client_ip, None)
-    _login_blocks.pop(client_ip, None)
+    _login_failures.pop(f"user-login:{client_ip}", None)  # v2.23.6: bucket-keyed
+    _login_blocks.pop(f"user-login:{client_ip}", None)
     token = _create_user_session(user_id)
     # v2.14.2 (BUG-11w / §13.2): CSRF token برای session کاربر — الگوی
     # double-submit مثل admin login: در session dict ذخیره می‌شود و
@@ -1919,7 +1955,7 @@ async def user_license_login(req: LicenseLoginRequest, request: Request, respons
         httponly=True,
         samesite="lax",
         max_age=USER_SESSION_TTL_SEC,
-        secure=True,  # در production روی True
+        secure=_COOKIE_SECURE,  # v2.23.6: PANEL_COOKIE_SECURE (پیش‌فرض روشن)
     )
     response.set_cookie(
         key="cianet_user_csrf_token",
@@ -1927,7 +1963,7 @@ async def user_license_login(req: LicenseLoginRequest, request: Request, respons
         httponly=False,  # JS باید بخواندش تا در X-CSRF-Token بفرستد
         samesite="lax",
         max_age=USER_SESSION_TTL_SEC,
-        secure=True,
+        secure=_COOKIE_SECURE,
     )
     return {"ok": True, "user_id": user_id}
 

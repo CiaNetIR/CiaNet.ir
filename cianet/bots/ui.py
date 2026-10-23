@@ -317,7 +317,9 @@ class UI:
         return "\n".join(out)
 
     SEP = "━━━━━━━━━━━━━━"
-    THIN_SEP = "─────────────────"
+    # v2.23.6 (AUDIT-43 43-e#6 · NIT): THIN_SEP حذف شد — صفر ارجاع (بقایای
+    # پاکسازی v2.23.0)؛ هر نمادِ مردهٔ صادره باید حذف شود تا surface API
+    # کوچک بماند.
 
     # ۵ شماره‌ی رومی برای ۵ بخش اصلی پنل ادمین (به جای ایموجی شلوغ‌کننده)
     # اصل "Boldness spent in one place": یه signature element
@@ -453,18 +455,8 @@ class NavStack:
         st = self._stacks.get(user_id) or []
         return st[-1] if st else None
 
-    def depth(self, user_id: int) -> int:
-        return len(self._stacks.get(user_id) or [])
-
-    def crumbs(self, user_id: int, labels: dict, limit: int = 3) -> list:
-        """breadcrumb خوانا از روی پشته (فقط مسیرهایی که برچسب دارند)."""
-        st = self._stacks.get(user_id) or []
-        out = []
-        for r in st[-limit:]:
-            lab = labels.get(r) or labels.get(r.split(":", 1)[0])
-            if lab:
-                out.append(lab)
-        return out
+    # v2.23.6 (AUDIT-43 43-e#6 · NIT): depth()/crumbs() حذف شدند — صفر
+    # فراخوان در کل کدبیس (بقایای پاکسازی v2.23.0).
 
     def reset(self, user_id: int) -> None:
         self._stacks.pop(user_id, None)

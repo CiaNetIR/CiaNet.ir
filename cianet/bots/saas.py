@@ -347,6 +347,10 @@ class SaaSBot:
         # برای هرسِ TTL محدودِ _gate_blocked در _prune_gate_state؛ خودِ
         # مجموعه همان set می‌ماند تا بقیه‌ی کد (discard) تغییر نکند.
         self._gate_blocked_ts: dict = {}
+        # v2.23.6 (AUDIT-43 43-b#10): کوول‌داونِ رندرِ گیتِ ردشده — کاربرِ بسته‌ای
+        # که متن‌ها را پشت‌سرهم می‌فرستاد، به‌ازایِ هر پیام delete+send می‌گرفت
+        # تا FloodWait (channel_retry از قبل سقف ۵ ثانیه دارد؛ پیامِ ساده نداشت).
+        self._gate_render_ts: dict = {}
         # آخرین زمان کلیکِ «بررسی عضویت» به‌ازای هر کاربر — برای سقفِ
         # ۵ ثانیه‌ای: هر کلیکِ force یک یا دو تماس شبکه با تلگرام است و
         # بدون سقف، یک کاربر می‌تواند با کلیک‌های پشت‌سرهم آن را اسپم کند.
@@ -603,6 +607,7 @@ class SaaSBot:
         self._gate_blocked.clear()
         self._gate_blocked_ts.clear()
         self._gate_retry_ts.clear()
+        self._gate_render_ts.clear()  # v2.23.6 (43-b#10): کوول‌داون رندر هم ریست
         self._gate_msg_id.clear()
 
     async def _channel_gate(self, user_id: int, force: bool = False) -> bool:
@@ -694,6 +699,12 @@ class SaaSBot:
         if len(self._gate_msg_id) > self._GATE_STATE_MAX:
             for uid in list(self._gate_msg_id)[: len(self._gate_msg_id) - self._GATE_STATE_MAX]:
                 self._gate_msg_id.pop(uid, None)
+        # v2.23.6 (43-b#10): هرسِ مهرهای کوول‌داونِ رندر — سقفِ همان
+        # GATE_STATE_MAX با حذفِ قدیمی‌ترین‌ها.
+        if len(self._gate_render_ts) > self._GATE_STATE_MAX:
+            for uid in sorted(self._gate_render_ts, key=self._gate_render_ts.get)[
+                    : len(self._gate_render_ts) - self._GATE_STATE_MAX]:
+                self._gate_render_ts.pop(uid, None)
 
     async def _send_channel_gate_message(self, event, denied: bool = False):
         """
@@ -707,6 +718,14 @@ class SaaSBot:
         # آمار: فقط اولین بسته‌شدنِ هر کاربر شمرده می‌شود (نه هر پیامِ گیت)
         if event.sender_id not in self._gate_blocked:
             inc_setting("gate_blocked_count")
+        # v2.23.6 (AUDIT-43 43-b#10): کوول‌داونِ ۵ثانیه‌ای رندر — رندرِ تکراریِ
+        # گیتِ ردشده در همان پنجره، حذف/ارسالِ جدید نمی‌کند (پیامِ قبلی کافی
+        # است)؛ سقفِ FloodWait بدونِ از دست دادنِ UX رعایت می‌شود.
+        if denied:
+            _last_render = self._gate_render_ts.get(event.sender_id, 0.0)
+            if time.time() - _last_render < 5.0:
+                return
+            self._gate_render_ts[event.sender_id] = time.time()
         self._gate_blocked.add(event.sender_id)
         # BUG-26: به‌روزرسانی مهرِ زمانی برای هرسِ TTL (ورودی‌های تازه
         # هرگز مشمول حذفِ قدیمی‌ها نمی‌شوند).

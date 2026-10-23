@@ -1135,6 +1135,9 @@ def get_version_info() -> dict:
         "has_local_mods": has_local_modifications(),
         "rolled_back": state.get("rolled_back", False),
         "rolled_back_at": state.get("rolled_back_at", 0),
+        # v2.23.6 (AUDIT-43 43-e#14 · NIT): دلیل rollback دیگر write-only
+        # نیست — پنلِ نسخه آن را نشان می‌دهد (عیب‌یابیِ «چرا برگشتیم»).
+        "rollback_reason": state.get("rollback_reason", ""),
         "last_check": state.get("last_check", 0),
         "last_update_at": state.get("last_update_at", 0),
     }

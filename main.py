@@ -7,7 +7,7 @@
 
   ۱) cianet.core و کلاس‌های cianet.bots را بارگذاری می‌کند،
   ۲) نام کلاس‌ها را در namespace مشترکِ core تزریق می‌کند (توابعِ راه‌اندازِ
-     داخل core — مثل run_admin_bot_forever — این نام‌ها را در زمانِ
+     داخل core — مثل run_saas_bot_forever — این نام‌ها را در زمانِ
      فراخوانی از globals خودشان resolve می‌کنند)،
   ۳) همان سطحِ ماژولِ قبلیِ main را برای web_panel و cianet_updater که
      «import main» می‌کنند بازتولید می‌کند (شامل نام‌های underscore),
