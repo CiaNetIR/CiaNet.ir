@@ -962,11 +962,18 @@ async def user_extend(user_id: int, req: ExtendRequest, request: Request, _: Non
                     plan_name = sub["plan"]
                 if req.plan:
                     plan_name = req.plan
+                # v2.23.3 (AUDIT-45/MED-2 — ②): ستونِ created_at NOT NULL
+                # بدون default است و همهٔ INSERTهای core.py آن را می‌دهند —
+                # قبلاً این INSERT ستون را نداشت و هر extendِ کاربرِ بدونِ
+                # اشتراکِ فعال (None یا expired) با «NOT NULL constraint
+                # failed» به ۵۰۰ منجر می‌شد — یعنی دقیقاً همان کاربرانی
+                # که تمدید برایشان معنای «ساخت اشتراک جدید» داشت.
                 c.execute(
-                    "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status) "
-                    "VALUES (?, ?, ?, ?, 'active')",
+                    "INSERT INTO subscriptions (user_id, plan, start_date, expire_date, status, created_at) "
+                    "VALUES (?, ?, ?, ?, 'active', ?)",
                     (user_id, plan_name,
-                     datetime.now().isoformat(), new_expire.isoformat()),
+                     datetime.now().isoformat(), new_expire.isoformat(),
+                     m._now()),
                 )
             c.commit()
         # v2.12.31 (DEBUG-1 LOW-AUDIT): audit log برای extend subscription
@@ -1173,19 +1180,34 @@ async def account_proxy_update(tag: str, update: ProxyUpdate, request: Request, 
     if update.proxy_type is None:
         cfg[tag].pop("proxy", None)
     else:
-        proxy_cfg: Dict[str, Any] = {"type": update.proxy_type}
+        # v2.23.3 (AUDIT-45/MED-2 — ③): فرمتِ نوشتنی باید دقیقاً همان
+        # اسکیمای Telethon (python-socks) باشد که ویزاردِ پروکسیِ پنلِ
+        # تلگرام می‌نویسد (admin.py _finish_proxy) و self.py مستقیم به
+        # TelegramClient(proxy=...) پاس می‌دهد. قبلاً این اندپوینت
+        # کلیدهای type/host/user/pass می‌نوشت — telethon کلیدهای
+        # proxy_type/addr/username/password را می‌فهمد، پس پروکسیِ ست‌شده
+        # از وب به‌صورتِ خاموش کار نمی‌کرد. secret فقط برای mtproto.
+        ptype = (update.proxy_type or "").strip().lower()
+        if ptype not in ("socks5", "socks4", "http", "mtproto"):
+            raise HTTPException(400, "نوع پروکسی نامعتبر است (socks5/socks4/http/mtproto)")
+        proxy_cfg: Dict[str, Any] = {
+            "proxy_type": ptype,
+            "rdns": True,
+        }
         if update.proxy_host:
             if not m._is_safe_proxy_host(update.proxy_host):
                 raise HTTPException(400, "آدرس پروکسی نامعتبر است (SSRF محافظت‌شده)")
-            proxy_cfg["host"] = update.proxy_host
+            proxy_cfg["addr"] = update.proxy_host
         if update.proxy_port:
-            proxy_cfg["port"] = update.proxy_port
-        if update.proxy_user:
-            proxy_cfg["user"] = update.proxy_user
-        if update.proxy_pass:
-            proxy_cfg["pass"] = update.proxy_pass
-        if update.proxy_secret:
+            proxy_cfg["port"] = int(update.proxy_port)
+        if ptype == "mtproto":
+            if not update.proxy_secret:
+                raise HTTPException(400, "پروکسی mtproto به secret نیاز دارد")
             proxy_cfg["secret"] = update.proxy_secret
+        else:
+            if update.proxy_user:
+                proxy_cfg["username"] = update.proxy_user
+                proxy_cfg["password"] = update.proxy_pass or ""
         cfg[tag]["proxy"] = proxy_cfg
     m.save_config(cfg)
     return {"ok": True}
@@ -1545,6 +1567,32 @@ async def version_apply(request: Request, _: None = Depends(require_csrf)):
         raise HTTPException(500, "خطا در به‌روزرسانی — با پشتیبانی تماس بگیرید.")
 
 
+def _detect_restart_service() -> str:
+    """نامِ سرویسِ systemd برای restart — v2.23.3 (AUDIT-45/MED-2 — ④).
+
+    الگوی cianet_updater (v2.5.0 CRITICAL FIX):
+      ۱) env var CIANET_SERVICE_NAME (اگه تنظیم شده)
+      ۲) وگرنه auto-detect با `systemctl is-enabled` روی cianet → selfbot
+         (install_service.sh سرویس «selfbot.service» می‌سازد)
+      ۳) وگرنه هیچ‌کدام نبود، «cianet» به‌عنوان fallback
+    """
+    svc = os.environ.get("CIANET_SERVICE_NAME", "").strip()
+    if svc:
+        return svc
+    import subprocess
+    for cand in ("cianet", "selfbot"):
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-enabled", cand],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0:
+                return cand
+        except Exception:
+            continue
+    return "cianet"
+
+
 @app.post("/api/version/rollback")
 async def version_rollback(request: Request, body: dict, _: None = Depends(require_csrf)):
     """Body: {"filename": "main.py.pre-rollback.1727..."}"""
@@ -1572,19 +1620,53 @@ async def version_rollback(request: Request, body: dict, _: None = Depends(requi
     # replace
     shutil.copy2(src, main_py)
     # restart
+    # v2.23.3 (AUDIT-45/MED-2 — ④): قبلاً hardcoded «cianet» بود؛
+    # install_service.sh سرویسِ «selfbot.service» می‌سازد و env file هم
+    # CIANET_SERVICE_NAME را ست نمی‌کند — پس systemctl restart cianet
+    # بی‌صدا شکست می‌خورد: فایل rollback می‌شد ولی پروسهٔ قدیمی به
+    # اجرایِ ادامهٔ نسخهٔ قبل می‌داد تا ری‌استارتِ دستی. حالا همان
+    # الگوی cianet_updater (v2.5.0 CRITICAL FIX): env → auto-detect
+    # (is-enabled روی cianet/selfbot) → fallback؛ و سه مرحلهٔ اجرا:
+    # sudo -n systemctl (non-root + sudoers) → plain systemctl (polkit)
+    # → SIGTERM به خودِ پروسه (systemd با Restart=always دوباره
+    # می‌سازدش — پنل و بات هر دو داخلِ همین سرویس‌اند).
     try:
         import subprocess
-        _svc = os.environ.get("CIANET_SERVICE_NAME", "cianet").strip() or "cianet"
-        subprocess.Popen(
-            ["systemctl", "restart", _svc],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        _svc = _detect_restart_service()
+        _is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+        _restarted = False
+        if not _is_root:
+            try:
+                _rc = subprocess.run(
+                    ["sudo", "-n", "systemctl", "restart", _svc],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _rc.returncode == 0:
+                    _restarted = True
+            except Exception:
+                pass
+        if not _restarted:
+            try:
+                _rc = subprocess.run(
+                    ["systemctl", "restart", _svc],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _rc.returncode == 0:
+                    _restarted = True
+            except Exception:
+                pass
+        if not _restarted:
+            # مرحلهٔ آخر: SIGTERM — systemd سرویس را دوباره می‌سازد
+            import signal as _signal
+            os.kill(os.getpid(), _signal.SIGTERM)
+            return {"ok": True, "backup": backup.name,
+                    "message": "Rollback applied — restarting via SIGTERM"}
+        return {"ok": True, "backup": backup.name, "message": "Rollback applied, restarting"}
     except Exception as e:
         # v2.14.2 (BUG-23w / §20.5): جزئیات خطای systemctl/مسیر فایل به
         # کلاینت نشت نکنه — پیام عمومی فارسی؛ جزئیات فقط در لاگ سرور.
         print(f"❌ [version_rollback] restart failed: {type(e).__name__}: {e}")
         return {"ok": True, "warning": "راه‌اندازی مجدد دستی لازم است — با پشتیبانی تماس بگیرید.", "backup": backup.name}
-    return {"ok": True, "backup": backup.name, "message": "Rollback applied, restarting"}
 
 
 # ─── Settings ─────────────────────────────────────────────────────────

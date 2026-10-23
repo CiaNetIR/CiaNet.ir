@@ -3517,10 +3517,22 @@ class SaaSBot:
             return
         # ویزارد پنلِ قبلی (اگر وسطِ کار بود) پاک شود تا تداخل نکرده
         await self._clear_admin_panel_wizard(event.sender_id)
-        await self.admin_panel._start_add_wizard(
-            event, preset_owner_id=target_user_id,
-            preset_data={"add_back": back_data},
-        )
+        # v2.23.3 (AUDIT-45/MED-2 — ①، هم‌خانوادهٔ نشتی اسکوپ): ورود به
+        # admin_panel (singleton مشترک) بدونِ sync اسکوپ یعنی کلِ چرخهٔ
+        # ویزارد با اسکوپِ کاربرِ قبلیِ پنل اجرا می‌شود. امروزِ کد مسیرهای
+        # رندرِ ویزارد را از طریقِ routeی که sync دارد می‌گذراند، اما
+        # الگوی برقرار پروژه (start_login_wizard_for_user در همین فایل و
+        # _show_user_acc در AUDIT-45/①) این است که *هر* ورود به پنل،
+        # scope را زیرِ _panel_lock ست کند — defense-in-depth: اگر
+        # _start_add_wizard یا هر چیزی که صدا می‌زند (حالا یا در آینده)
+        # به default_owner_id/owner_filter تکیه کند، مقدارِ متعلق به
+        # همین بیننده را ببیند، نه کاربرِ قبلی.
+        async with self._panel_lock:
+            self._sync_admin_panel_scope(event.sender_id)
+            await self.admin_panel._start_add_wizard(
+                event, preset_owner_id=target_user_id,
+                preset_data={"add_back": back_data},
+            )
 
     # ─────────────────────────────────────────────────────
     #  «🤖 سلف من» — UI اختصاصی کاربر عادی (نه پنل کامل ادمین)

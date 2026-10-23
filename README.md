@@ -11,9 +11,9 @@
 [![Website](https://img.shields.io/badge/website-CiaNet.ir-0066cc.svg)](https://CiaNet.ir)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org)
 [![Telethon](https://img.shields.io/badge/telethon-1.36+-28a8ea.svg)](https://docs.telethon.dev)
-[![Version](https://img.shields.io/badge/version-2.14.2%20STABLE-blue.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.14.2-stable)
+[![Version](https://img.shields.io/badge/version-2.14.2%20STABLE-blue.svg)](https://github.com/CiaNetIR/CiaNet.ir/releases/tag/v2.14.2-stable)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
+[![Status](https://img.shields.io/badge/status-Production%20Ready-brightgreen.svg)](https://github.com/CiaNetIR/CiaNet.ir/releases/tag/v2.12.29-stable)
 
 </div>
 
@@ -118,7 +118,7 @@
 ### روش اول: نصب سریع (توصیه‌شده)
 
 ```bash
-sudo bash <(curl -sL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/quick_install.sh)
+sudo bash <(curl -sL https://raw.githubusercontent.com/CiaNetIR/CiaNet.ir/main/quick_install.sh)
 ```
 
 یا با env vars:
@@ -128,13 +128,13 @@ sudo API_ID=YOUR_API_ID \
      API_HASH=YOUR_API_HASH \
      ADMIN_BOT_TOKEN=YOUR_BOT_TOKEN \
      ADMIN_ID=YOUR_TELEGRAM_ID \
-     bash <(curl -sL https://raw.githubusercontent.com/DLSDT/CiaNet.ir/main/quick_install.sh)
+     bash <(curl -sL https://raw.githubusercontent.com/CiaNetIR/CiaNet.ir/main/quick_install.sh)
 ```
 
 ### روش دوم: نصب دستی
 
 ```bash
-git clone https://github.com/DLSDT/CiaNet.ir.git /opt/cianet
+git clone https://github.com/CiaNetIR/CiaNet.ir.git /opt/cianet
 cd /opt/cianet
 
 # ساخت venv
@@ -510,13 +510,13 @@ MIT License — استفاده آزاد
 
 🌐 **وب‌سایت**: [CiaNet.ir](https://CiaNet.ir) — نمونه‌ی پروژه‌ی کاملِ یک سیستم SaaS تلگرام
 
-📦 **گیت‌هاب**: [DLSDT/CiaNet.ir](https://github.com/DLSDT/CiaNet.ir)
+📦 **گیت‌هاب**: [CiaNetIR/CiaNet.ir](https://github.com/CiaNetIR/CiaNet.ir)
 
-🚀 **ریلیز استیبل**: [v2.12.29-stable](https://github.com/DLSDT/CiaNet.ir/releases/tag/v2.12.29-stable)
+🚀 **ریلیز استیبل**: [v2.12.29-stable](https://github.com/CiaNetIR/CiaNet.ir/releases/tag/v2.12.29-stable)
 
 💬 **تلگرام**: [@CiaNetSelf](https://t.me/CiaNetSelf)
 
-🐛 **Issues**: [گزارش باگ](https://github.com/DLSDT/CiaNet.ir/issues)
+🐛 **Issues**: [گزارش باگ](https://github.com/CiaNetIR/CiaNet.ir/issues)
 
 ---
 

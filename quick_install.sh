@@ -45,7 +45,7 @@ echo ""
 # ─── ۱. Clone (اگه وجود نداره) ───
 if [ ! -d "$INSTALL_DIR/.git" ]; then
     echo -e "${YELLOW}۱. Clone پروژه...${NC}"
-    git clone https://github.com/DLSDT/CiaNet.ir.git "$INSTALL_DIR" 2>&1 | tail -3
+    git clone https://github.com/CiaNetIR/CiaNet.ir.git "$INSTALL_DIR" 2>&1 | tail -3
     git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 else
     echo -e "${GREEN}۱. پروژه از قبل وجود داره — pull...${NC}"

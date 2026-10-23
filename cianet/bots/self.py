@@ -429,6 +429,28 @@ class SelfBot:
         #   "proxy": {"proxy_type": "socks5", "addr": "1.2.3.4", "port": 1080,
         #             "username": "user", "password": "pass", "rdns": true}
         proxy_cfg = self.cfg.get("proxy")
+        # v2.23.3 (AUDIT-45/MED-2 — ③): پنلِ وبِ قدیمی اسکیمای ناسازگار
+        # (type/host/user/pass) می‌نوشت که telethon نمی‌فهمید — پروکسیِ
+        # ست‌شده از وب به‌صورتِ خاموش کار نمی‌کرد. اینجا در لحظهٔ مصرف،
+        # آن را به اسکیمای telethon ترجمه می‌کنیم تا کانفیگ‌های legacyِ
+        # روی نصب‌های موجود هم بدونِ دست‌کاریِ دستیِ config.json شفا
+        # پیدا کنند. نوشتنِ جدید از وب (v2.23.3) مستقیم اسکیمای درست
+        # را می‌نویسد، پس این ترجمه فقط برای دادهٔ قدیمی است.
+        if isinstance(proxy_cfg, dict) and "proxy_type" not in proxy_cfg:
+            _legacy_type = str(proxy_cfg.get("type") or "").strip().lower()
+            if _legacy_type:
+                _healed = {
+                    "proxy_type": _legacy_type,
+                    "addr": proxy_cfg.get("host"),
+                    "port": proxy_cfg.get("port"),
+                    "rdns": True,
+                }
+                if proxy_cfg.get("user"):
+                    _healed["username"] = proxy_cfg.get("user")
+                    _healed["password"] = proxy_cfg.get("pass") or ""
+                if proxy_cfg.get("secret"):
+                    _healed["secret"] = proxy_cfg.get("secret")
+                proxy_cfg = _healed
 
         self.client = TelegramClient(
             session_path,

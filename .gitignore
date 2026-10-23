@@ -93,6 +93,15 @@ agentdb.rvf.lock
 saas.db
 saas.db-*
 
+# v2.23.3 (AUDIT-45/MED-2 — ⑧): داده‌های runtime کاربران — این پوشه‌ها
+# در زمان اجرا توسط بات پر می‌شوند (رسانه‌های دانلودیِ tracker، خروجی‌های
+# دانلود و state بات‌های اختصاصی که مهاجرتِ dedicated_bots می‌سازد).
+# commit شدنشان هم حجم ریپو را منفجر می‌کند و هم دادهٔ خصوصی کاربران
+# را لو می‌دهد و هم «git reset --hard» آپدیتر آنها را overwrite می‌کند.
+downloads/
+tracker_media/
+dedicated_bots/
+
 # Local agent/tooling state
 .claude*/
 .agents/

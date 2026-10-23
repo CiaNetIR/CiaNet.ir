@@ -28,7 +28,7 @@ from typing import Optional, Tuple
 log = logging.getLogger("cianet.updater")
 
 # ─── Constants ───
-REPO_URL = "https://github.com/DLSDT/CiaNet.ir.git"
+REPO_URL = "https://github.com/CiaNetIR/CiaNet.ir.git"
 BRANCH = os.environ.get("CIANET_BRANCH", "main")
 INSTALL_DIR = os.environ.get("CIANET_INSTALL_DIR", "/opt/cianet")
 
@@ -390,15 +390,26 @@ def apply_update(repo_dir: str = None, restart: bool = True, main_loop: object =
         # قبلاً (v2.0.13) اگر fetch یا verify exception می‌داد، log warning
         # و continue می‌کرد (fail-open) — یعنی اگر network glitch باشه،
         # update بدون verify اعمال می‌شد. حالا fail-closed است: اگر
-        # CIANET_MIN_COMMIT تنظیم شده باشه و verify شکست بخوره، update
-        # رد می‌شه.
+        # verify شکست بخوره، update رد می‌شه.
         #
         # v2.13.4 (UP-HIGH-2): the redundant `git fetch` before
         # `get_remote_commit` has been removed — `get_remote_commit`
         # already runs a fetch internally, so the previous double-fetch
         # just widened the TOCTOU window for no benefit.
+        #
+        # v2.23.3 (AUDIT-45/MED-2 — ⑤): گیتِ قبلاً فقط env بود و در
+        # نصبِ پیش‌فرض (env file فقط API/توکن دارد) هیچ‌وقت روشن نمی‌شد —
+        # یعنی floorی که apply_update بعد از هر آپدیتِ موفق می‌نویسد
+        # (data/.min_commit_floor) و شاخهٔ seeding داخلِ _verify_min_commit
+        # عملاً DORMANT بودند. حالا verification وقتی هم env ست نباشه
+        # اجرا می‌شود، به‌شرطِ اینکه یا state floor موجود باشد یا
+        # seeding ممکن باشد — خودِ _verify_min_commit هر دو حالت را
+        # handle می‌کند (floor از local head می‌سازد؛ اگر نشد fail-closed
+        # برمی‌گرداند). backward-compat فقط برای «هیچ env و هیچ state و
+        # هیچ local head» باقی می‌ماند — که در عمل یعنی نصبِ خراب.
         min_commit = os.environ.get("CIANET_MIN_COMMIT", "").strip()
-        if min_commit:
+        state_min_commit = _read_min_commit_floor()
+        if min_commit or state_min_commit or get_local_commit(repo_dir):
             try:
                 remote_commit = get_remote_commit(repo_dir)
                 if not remote_commit:

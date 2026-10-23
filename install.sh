@@ -31,7 +31,7 @@ fi
 INSTALL_DIR="/opt/cianet"
 SERVICE_NAME="selfbot"
 VENV_DIR="$INSTALL_DIR/.venv"
-REPO_URL="https://github.com/DLSDT/CiaNet.ir.git"
+REPO_URL="https://github.com/CiaNetIR/CiaNet.ir.git"
 LICENSE_API="https://license.cianet.ir/api/verify"
 
 echo ""
